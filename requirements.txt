@@ -1,0 +1,12 @@
+streamlit
+llama-index
+llama-index-embeddings-huggingface
+llama-index-llms-huggingface
+sentence-transformers
+torch
+transformers
+accelerate
+bitsandbytes
+optimum
+huggingface-hub
+safetensors
