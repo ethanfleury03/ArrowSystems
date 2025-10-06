@@ -66,18 +66,29 @@ class TechnicalRAGQuery:
             logger.warning(f"Re-ranker not available: {e}")
             self.reranker = None
         
-        # Try to initialize Mistral-7B LLM
-        try:
-            logger.info("🤖 Initializing Mistral-7B for response generation...")
-            self.llm = HuggingFaceLLM(
-                model_name="mistralai/Mistral-7B-Instruct-v0.1",
-                context_window=4096,
-                max_new_tokens=512
-            )
-            logger.info("✅ Mistral-7B loaded successfully")
-        except Exception as e:
-            logger.warning(f"Mistral-7B not available: {e}")
-            self.llm = None
+        # Try to initialize LLM for response generation
+        llm_options = [
+            "microsoft/DialoGPT-large",  # Best quality, larger model
+            "microsoft/DialoGPT-medium",  # Fallback option
+            "facebook/blenderbot-400M-distill"
+        ]
+        
+        for model_name in llm_options:
+            try:
+                logger.info(f"🤖 Initializing {model_name} for response generation...")
+                self.llm = HuggingFaceLLM(
+                    model_name=model_name,
+                    context_window=2048,
+                    max_new_tokens=256
+                )
+                logger.info(f"✅ {model_name} loaded successfully")
+                break
+            except Exception as e:
+                logger.warning(f"{model_name} not available: {e}")
+                continue
+        
+        if not self.llm:
+            logger.warning("No LLM models available for response generation")
         
         # Set global models
         Settings.embed_model = self.embed_model
