@@ -71,7 +71,6 @@ class TechnicalRAGQuery:
             logger.info("🤖 Initializing Mistral-7B for response generation...")
             self.llm = HuggingFaceLLM(
                 model_name="mistralai/Mistral-7B-Instruct-v0.1",
-                cache_folder=self.cache_dir,
                 context_window=4096,
                 max_new_tokens=512,
                 temperature=0.1,
@@ -152,8 +151,13 @@ class TechnicalRAGQuery:
         Returns:
             AI-generated response synthesizing the documents
         """
-        if not self.llm or not retrieved_docs:
-            return "AI response generation not available or no documents retrieved."
+        if not self.llm:
+            logger.warning("LLM not available for response generation")
+            return "AI response generation not available - LLM not loaded."
+        
+        if not retrieved_docs:
+            logger.warning("No documents retrieved for response generation")
+            return "AI response generation not available - no documents retrieved."
         
         # Prepare context from retrieved documents
         context_parts = []
