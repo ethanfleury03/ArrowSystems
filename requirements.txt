@@ -1,7 +1,7 @@
-streamlit
 llama-index
 llama-index-embeddings-huggingface
 llama-index-llms-huggingface
+llama-index-vector-stores-qdrant
 sentence-transformers
 torch
 transformers
@@ -10,3 +10,7 @@ bitsandbytes
 optimum
 huggingface-hub
 safetensors
+xformers
+scikit-learn
+qdrant-client
+pyyaml
