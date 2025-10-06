@@ -161,7 +161,7 @@ class TechnicalRAGIngestionPipeline:
         """
         logger.info(f"Chunking {len(documents)} documents...")
         
-    text_splitter = SentenceSplitter(
+        text_splitter = SentenceSplitter(
             chunk_size=self.config["chunking"]["chunk_size"],
             chunk_overlap=self.config["chunking"]["chunk_overlap"],
             include_metadata=self.config["chunking"]["include_metadata"]
