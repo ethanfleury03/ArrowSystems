@@ -30,17 +30,42 @@ class TechnicalRAGPipeline:
         
     def initialize_models(self):
         """Initialize embedding and re-ranking models."""
-        logger.info("🚀 Initializing bge-large-en-v1.5 embedding model...")
-        self.embed_model = HuggingFaceEmbedding(
-            model_name="BAAI/bge-large-en-v1.5",
-            cache_folder=self.cache_dir
-        )
+        logger.info("🚀 Initializing embedding model...")
         
-        logger.info("🎯 Initializing bge-reranker-large for precision...")
-        self.reranker = CrossEncoder(
-            "BAAI/bge-reranker-large",
-            cache_folder=self.cache_dir
-        )
+        # Try multiple model options for better compatibility
+        model_options = [
+            "BAAI/bge-large-en-v1.5",
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "sentence-transformers/all-mpnet-base-v2"
+        ]
+        
+        for model_name in model_options:
+            try:
+                logger.info(f"Trying model: {model_name}")
+                self.embed_model = HuggingFaceEmbedding(
+                    model_name=model_name,
+                    cache_folder=self.cache_dir
+                )
+                logger.info(f"✅ Successfully loaded: {model_name}")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to load {model_name}: {e}")
+                continue
+        
+        if not self.embed_model:
+            raise RuntimeError("Could not load any embedding model")
+        
+        # Try to initialize re-ranker (optional)
+        try:
+            logger.info("🎯 Initializing re-ranker...")
+            self.reranker = CrossEncoder(
+                "BAAI/bge-reranker-large",
+                cache_folder=self.cache_dir
+            )
+            logger.info("✅ Re-ranker loaded successfully")
+        except Exception as e:
+            logger.warning(f"Re-ranker not available: {e}")
+            self.reranker = None
         
         # Set global embedding model
         Settings.embed_model = self.embed_model
