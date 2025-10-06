@@ -66,29 +66,10 @@ class TechnicalRAGQuery:
             logger.warning(f"Re-ranker not available: {e}")
             self.reranker = None
         
-        # Try to initialize LLM for response generation
-        llm_options = [
-            "facebook/blenderbot-400M-distill",  # Most stable, smaller model
-            "microsoft/DialoGPT-medium",  # Fallback option
-            "distilbert-base-uncased"  # Final fallback - very stable
-        ]
-        
-        for model_name in llm_options:
-            try:
-                logger.info(f"🤖 Initializing {model_name} for response generation...")
-                self.llm = HuggingFaceLLM(
-                    model_name=model_name,
-                    context_window=2048,
-                    max_new_tokens=256
-                )
-                logger.info(f"✅ {model_name} loaded successfully")
-                break
-            except Exception as e:
-                logger.warning(f"{model_name} not available: {e}")
-                continue
-        
-        if not self.llm:
-            logger.warning("No LLM models available for response generation")
+        # Skip LLM initialization due to CUDA issues
+        logger.info("⚠️ Skipping LLM initialization due to CUDA compatibility issues")
+        logger.info("📝 Using enhanced raw search results instead")
+        self.llm = None
         
         # Set global models
         Settings.embed_model = self.embed_model
@@ -274,29 +255,36 @@ def main():
         print(f"\n🔍 Query: {query}")
         print("-" * 50)
         
-        # Try AI response generation first
-        try:
-            ai_results = query_system.search_with_ai_response(query, top_k=5, use_reranking=True)
+        # Get enhanced search results
+        results = query_system.search(query, top_k=5, use_reranking=True)
+        
+        if isinstance(results, list) and results:
+            print(f"📋 COMPREHENSIVE ANSWER:")
+            print("=" * 50)
             
-            print(f"🤖 AI Response:")
-            print(ai_results["ai_response"])
-            print(f"\n📊 Retrieved {ai_results['doc_count']} documents")
+            # Combine and synthesize the results
+            combined_text = ""
+            sources = []
             
-        except Exception as e:
-            logger.warning(f"AI response failed, falling back to raw results: {e}")
+            for i, result in enumerate(results, 1):
+                combined_text += f"\n--- Section {i} ---\n{result.text}\n"
+                if hasattr(result, 'metadata'):
+                    source = result.metadata.get('file_name', 'Unknown')
+                    sources.append(source)
             
-            # Fallback to raw search results
-            results = query_system.search(query, top_k=3, use_reranking=True)
+            # Display the combined information
+            print(combined_text)
             
-            if isinstance(results, list):
-                for i, result in enumerate(results, 1):
-                    print(f"\nResult {i}:")
-                    print(f"Score: {result.score:.3f}")
-                    print(f"Text: {result.text[:200]}...")
-                    if hasattr(result, 'metadata'):
-                        print(f"Source: {result.metadata.get('file_name', 'Unknown')}")
-            else:
-                print(f"Response: {results}")
+            print(f"\n📊 SOURCES ({len(results)} documents):")
+            for i, source in enumerate(set(sources), 1):
+                print(f"  {i}. {source}")
+            
+            print(f"\n🎯 RELEVANCE SCORES:")
+            for i, result in enumerate(results, 1):
+                print(f"  {i}. {result.score:.3f}")
+                
+        else:
+            print("❌ No relevant documents found for this query.")
         
         print("\n" + "="*60)
 
