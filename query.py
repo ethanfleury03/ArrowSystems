@@ -78,7 +78,7 @@ class TechnicalRAGQuery:
         
         logger.info("✅ Models initialized successfully")
     
-    def load_index(self, storage_dir="storage"):
+    def load_index(self, storage_dir="/workspace/storage"):
         """Load the existing index."""
         if not os.path.exists(storage_dir):
             raise FileNotFoundError(f"Index not found at {storage_dir}. Run ingest.py first.")
