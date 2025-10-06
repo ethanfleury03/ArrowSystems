@@ -72,9 +72,7 @@ class TechnicalRAGQuery:
             self.llm = HuggingFaceLLM(
                 model_name="mistralai/Mistral-7B-Instruct-v0.1",
                 context_window=4096,
-                max_new_tokens=512,
-                temperature=0.1,
-                device_map="auto"
+                max_new_tokens=512
             )
             logger.info("✅ Mistral-7B loaded successfully")
         except Exception as e:
