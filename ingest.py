@@ -34,6 +34,7 @@ class TechnicalRAGPipeline:
         
         # Try multiple model options for better compatibility
         model_options = [
+            "BAAI/bge-large-en",  # BGE-large (7B) model
             "BAAI/bge-large-en-v1.5",
             "sentence-transformers/all-MiniLM-L6-v2",
             "sentence-transformers/all-mpnet-base-v2"
