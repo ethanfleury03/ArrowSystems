@@ -2,7 +2,8 @@
 
 # Qdrant Vector Database Configuration
 qdrant:
-  url: "http://localhost:6333"
+  url: "https://your-cluster-url.qdrant.tech"  # Use Qdrant Cloud
+  api_key: "your-api-key"  # Add your Qdrant Cloud API key
   collection_name: "technical_docs"
 
 # Model Configuration

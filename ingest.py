@@ -29,6 +29,8 @@ from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.storage.index_store import SimpleIndexStore
 from sentence_transformers import CrossEncoder
 import qdrant_client
+import shutil
+import tarfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,7 +39,7 @@ logger = logging.getLogger(__name__)
 class NonTextExtractor:
     """Extract and process non-text content from documents."""
     
-    def __init__(self, output_dir="extracted_content"):
+    def __init__(self, output_dir="/workspace/extracted_content"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
@@ -385,7 +387,7 @@ class TechnicalRAGPipeline:
             logger.warning(f"Qdrant not available, using local storage: {e}")
             return None
     
-    def build_index(self, data_dir="data", storage_dir="storage", use_qdrant=False):
+    def build_index(self, data_dir="data", storage_dir="/workspace/storage", use_qdrant=False):
         """Build or load vector index with optimized chunking and non-text content."""
         
         # Initialize models
@@ -496,6 +498,38 @@ class TechnicalRAGPipeline:
         
         return nodes[:top_k]
     
+    def backup_storage(self, storage_dir: str, backup_name: str = None):
+        """Create a backup of the storage directory."""
+        if not os.path.exists(storage_dir):
+            logger.warning(f"Storage directory {storage_dir} does not exist")
+            return None
+            
+        if backup_name is None:
+            backup_name = f"rag_backup_{int(time.time())}"
+        
+        backup_path = f"/workspace/{backup_name}.tar.gz"
+        
+        try:
+            with tarfile.open(backup_path, "w:gz") as tar:
+                tar.add(storage_dir, arcname=os.path.basename(storage_dir))
+            
+            logger.info(f"✅ Backup created: {backup_path}")
+            return backup_path
+        except Exception as e:
+            logger.error(f"Failed to create backup: {e}")
+            return None
+    
+    def restore_storage(self, backup_path: str, storage_dir: str):
+        """Restore storage from backup."""
+        try:
+            with tarfile.open(backup_path, "r:gz") as tar:
+                tar.extractall(os.path.dirname(storage_dir))
+            logger.info(f"✅ Storage restored from {backup_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to restore backup: {e}")
+            return False
+
 
 def main():
     """Main function to build the RAG index with non-text content support."""
