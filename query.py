@@ -68,9 +68,9 @@ class TechnicalRAGQuery:
         
         # Try to initialize LLM for response generation
         llm_options = [
-            "microsoft/DialoGPT-large",  # Best quality, larger model
+            "facebook/blenderbot-400M-distill",  # Most stable, smaller model
             "microsoft/DialoGPT-medium",  # Fallback option
-            "facebook/blenderbot-400M-distill"
+            "distilbert-base-uncased"  # Final fallback - very stable
         ]
         
         for model_name in llm_options:
