@@ -1,0 +1,32 @@
+# Configuration for Technical RAG Pipeline with Non-Text Content Support
+
+# Qdrant Vector Database Configuration
+qdrant:
+  url: "http://localhost:6333"
+  collection_name: "technical_docs"
+
+# Model Configuration
+models:
+  embedding: "BAAI/bge-large-en-v1.5"
+  reranker: "BAAI/bge-reranker-large"
+
+# Text Chunking Configuration
+chunking:
+  chunk_size: 350
+  chunk_overlap: 88
+
+# Non-text Content Processing
+non_text:
+  output_dir: "extracted_content"
+  extract_tables: true
+  extract_images: true
+  extract_captions: true
+  image_formats: ["PNG", "JPEG"]
+  table_min_rows: 2
+  table_min_cols: 2
+
+# Search Configuration
+search:
+  default_top_k: 10
+  enable_reranking: true
+  content_type_filtering: true

@@ -14,3 +14,7 @@ xformers
 scikit-learn
 qdrant-client
 pyyaml
+PyMuPDF
+pandas
+Pillow
+numpy
