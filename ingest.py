@@ -497,30 +497,6 @@ def main():
     use_qdrant = os.getenv("USE_QDRANT", "false").lower() == "true"
     index = pipeline.build_index(use_qdrant=use_qdrant)
     
-    # Test hybrid search
-    print("\n" + "="*60)
-    print("🧪 Testing hybrid search...")
-    print("="*60)
-    
-    test_queries = [
-        "What are the system requirements?",
-        "Show me tables with specifications",
-        "Find diagrams or figures",
-        "What troubleshooting steps are available?"
-    ]
-    
-    for query in test_queries:
-        print(f"\n🔍 Query: {query}")
-        results = pipeline.hybrid_search(query, top_k=3)
-        
-        for i, result in enumerate(results, 1):
-            content_type = result.metadata.get("content_type", "text")
-            source = Path(result.metadata.get("source_path", "")).name
-            page = result.metadata.get("page_number", "N/A")
-            print(f"  {i}. [{content_type}] {source} (page {page})")
-            print(f"     Score: {result.score:.3f}")
-            print(f"     Text: {result.text[:100]}...")
-    
     print("\n" + "="*60)
     print("✅ INGESTION COMPLETED SUCCESSFULLY")
     print("="*60)
