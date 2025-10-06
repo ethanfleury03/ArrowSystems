@@ -111,75 +111,9 @@ class TechnicalRAGPipeline:
         
         return self.index
     
-    def search_with_reranking(self, query: str, top_k: int = 10) -> List[NodeWithScore]:
-        """
-        Perform search with re-ranking for maximum precision.
-        
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            
-        Returns:
-            List of scored nodes with re-ranking applied
-        """
-        logger.info(f"🔍 Searching for: {query}")
-        
-        # Get more results for re-ranking
-        query_engine = self.index.as_query_engine(similarity_top_k=top_k * 2)
-        response = query_engine.query(query)
-        
-        # Extract nodes from response
-        if hasattr(response, 'source_nodes'):
-            nodes = response.source_nodes
-        else:
-            # Fallback if source_nodes not available
-            nodes = []
-        
-        if not nodes or not self.reranker:
-            return nodes[:top_k]
-        
-        logger.info(f"🎯 Re-ranking {len(nodes)} results...")
-        
-        # Prepare query-document pairs for re-ranking
-        query_doc_pairs = []
-        for node in nodes:
-            query_doc_pairs.append([query, node.text])
-        
-        # Get re-ranking scores
-        rerank_scores = self.reranker.predict(query_doc_pairs)
-        
-        # Sort by re-ranking scores
-        reranked_nodes = sorted(
-            zip(nodes, rerank_scores),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        
-        # Return top-k re-ranked results
-        return [node for node, _ in reranked_nodes[:top_k]]
-    
-    def search(self, query: str, top_k: int = 10, use_reranking: bool = True):
-        """
-        Main search function with optional re-ranking.
-        
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            use_reranking: Whether to use re-ranking for better precision
-            
-        Returns:
-            Search results
-        """
-        if use_reranking:
-            return self.search_with_reranking(query, top_k)
-        else:
-            # Simple search without re-ranking
-            query_engine = self.index.as_query_engine(similarity_top_k=top_k)
-            response = query_engine.query(query)
-            return response
 
 def main():
-    """Main function to run the RAG pipeline."""
+    """Main function to build the RAG index."""
     
     # Initialize pipeline
     pipeline = TechnicalRAGPipeline()
@@ -187,36 +121,12 @@ def main():
     # Build or load index
     index = pipeline.build_index()
     
-    # Test searches
-    test_queries = [
-        "DuraFlex printer troubleshooting",
-        "printhead maintenance procedures",
-        "electrical connections setup",
-        "software installation guide"
-    ]
-    
     print("\n" + "="*60)
-    print("🔍 TESTING SEARCH FUNCTIONALITY")
+    print("✅ INGESTION COMPLETED SUCCESSFULLY")
     print("="*60)
-    
-    for query in test_queries:
-        print(f"\n🔍 Query: {query}")
-        print("-" * 50)
-        
-        # Search with re-ranking
-        results = pipeline.search(query, top_k=3, use_reranking=True)
-        
-        if isinstance(results, list):
-            for i, result in enumerate(results, 1):
-                print(f"\nResult {i}:")
-                print(f"Score: {result.score:.3f}")
-                print(f"Text: {result.text[:200]}...")
-                if hasattr(result, 'metadata'):
-                    print(f"Source: {result.metadata.get('file_name', 'Unknown')}")
-        else:
-            print(f"Response: {results}")
-        
-        print("\n" + "="*60)
+    print("📁 Index saved to: storage/")
+    print("🔍 Use query.py to search the documents")
+    print("="*60)
 
 
 
