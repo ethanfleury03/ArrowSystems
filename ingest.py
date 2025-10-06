@@ -57,7 +57,16 @@ class NonTextExtractor:
                     table_data = table.extract()
                     if table_data and len(table_data) > 1:  # Ensure we have headers and data
                         # Convert to pandas DataFrame for better structure
-                        df = pd.DataFrame(table_data[1:], columns=table_data[0])
+                        headers = table_data[0]
+                        # Handle duplicate column names
+                        unique_headers = []
+                        for i, header in enumerate(headers):
+                            if header in unique_headers:
+                                unique_headers.append(f"{header}_{i}")
+                            else:
+                                unique_headers.append(header)
+                        
+                        df = pd.DataFrame(table_data[1:], columns=unique_headers)
                         
                         # Create table metadata
                         table_info = {
@@ -107,7 +116,8 @@ class NonTextExtractor:
                         pil_image = Image.open(BytesIO(img_data))
                         
                         # Get image metadata
-                        img_rect = page.get_image_rects(xref)[0] if page.get_image_rects(xref) else None
+                        img_rects = page.get_image_rects(xref)
+                        img_rect = img_rects[0] if img_rects else None
                         
                         # Create image info
                         image_info = {
@@ -120,7 +130,7 @@ class NonTextExtractor:
                             "format": "PNG",
                             "content_type": "image",
                             "caption": f"Image from {Path(pdf_path).stem}, page {page_num + 1}",
-                            "bbox": img_rect.get_rect() if img_rect else None
+                            "bbox": str(img_rect) if img_rect else None
                         }
                         images.append(image_info)
                         

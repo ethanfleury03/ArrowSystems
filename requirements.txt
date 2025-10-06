@@ -18,3 +18,4 @@ PyMuPDF
 pandas
 Pillow
 numpy
+tabulate
