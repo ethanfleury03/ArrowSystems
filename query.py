@@ -242,51 +242,71 @@ def main():
     # Load index
     query_system.load_index()
     
-    # Test searches
-    test_queries = [
-        "What are some of the system requirements for the DuraFlex system?"
-    ]
-    
     print("\n" + "="*60)
-    print("🔍 TESTING SEARCH FUNCTIONALITY")
+    print("🔍 DURAFLEX TECHNICAL ASSISTANT")
     print("="*60)
+    print("Ask questions about DuraFlex printer systems, troubleshooting, setup, and maintenance.")
+    print("Type 'quit' or 'exit' to stop.\n")
     
-    for query in test_queries:
-        print(f"\n🔍 Query: {query}")
-        print("-" * 50)
-        
-        # Get enhanced search results
-        results = query_system.search(query, top_k=5, use_reranking=True)
-        
-        if isinstance(results, list) and results:
-            print(f"📋 COMPREHENSIVE ANSWER:")
-            print("=" * 50)
+    while True:
+        try:
+            # Get user input
+            query = input("❓ Your question: ").strip()
             
-            # Combine and synthesize the results
-            combined_text = ""
-            sources = []
+            # Check for exit commands
+            if query.lower() in ['quit', 'exit', 'q']:
+                print("\n👋 Goodbye! Thanks for using the DuraFlex Technical Assistant.")
+                break
             
-            for i, result in enumerate(results, 1):
-                combined_text += f"\n--- Section {i} ---\n{result.text}\n"
-                if hasattr(result, 'metadata'):
-                    source = result.metadata.get('file_name', 'Unknown')
-                    sources.append(source)
+            # Skip empty queries
+            if not query:
+                print("Please enter a question.\n")
+                continue
             
-            # Display the combined information
-            print(combined_text)
+            print(f"\n🔍 Searching for: {query}")
+            print("-" * 50)
             
-            print(f"\n📊 SOURCES ({len(results)} documents):")
-            for i, source in enumerate(set(sources), 1):
-                print(f"  {i}. {source}")
+            # Get enhanced search results
+            results = query_system.search(query, top_k=5, use_reranking=True)
             
-            print(f"\n🎯 RELEVANCE SCORES:")
-            for i, result in enumerate(results, 1):
-                print(f"  {i}. {result.score:.3f}")
+            if isinstance(results, list) and results:
+                print(f"📋 COMPREHENSIVE ANSWER:")
+                print("=" * 50)
                 
-        else:
-            print("❌ No relevant documents found for this query.")
-        
-        print("\n" + "="*60)
+                # Combine and synthesize the results
+                combined_text = ""
+                sources = []
+                
+                for i, result in enumerate(results, 1):
+                    combined_text += f"\n--- Section {i} ---\n{result.text}\n"
+                    if hasattr(result, 'metadata'):
+                        source = result.metadata.get('file_name', 'Unknown')
+                        sources.append(source)
+                
+                # Display the combined information
+                print(combined_text)
+                
+                print(f"\n📊 SOURCES ({len(results)} documents):")
+                for i, source in enumerate(set(sources), 1):
+                    print(f"  {i}. {source}")
+                
+                print(f"\n🎯 RELEVANCE SCORES:")
+                for i, result in enumerate(results, 1):
+                    print(f"  {i}. {result.score:.3f}")
+                    
+            else:
+                print("❌ No relevant documents found for this query.")
+                print("💡 Try rephrasing your question or using different keywords.")
+            
+            print("\n" + "="*60)
+            print()  # Add spacing for next question
+            
+        except KeyboardInterrupt:
+            print("\n\n👋 Goodbye! Thanks for using the DuraFlex Technical Assistant.")
+            break
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            print("Please try again.\n")
 
 if __name__ == "__main__":
     main()
