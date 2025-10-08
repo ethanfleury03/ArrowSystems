@@ -50,22 +50,7 @@ st.set_page_config(
     page_title="DuraFlex Technical Assistant",
     page_icon="🔧",
     layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={
-        'Get Help': None,
-        'Report a bug': None,
-        'About': """
-        # DuraFlex Technical Assistant v1.0
-        
-        Intelligent Knowledge System powered by:
-        - Advanced RAG (Retrieval-Augmented Generation)
-        - Hybrid Search (Dense + BM25)
-        - Query Intent Classification
-        - Multi-modal Content (Text, Tables, Images)
-        
-        © 2025 Arrow Systems Inc
-        """
-    }
+    initial_sidebar_state="expanded"
 )
 
 
@@ -324,8 +309,11 @@ def render_stats_bar():
 def main_application():
     """Main application interface (after authentication)."""
     
-    # Load custom CSS
-    load_custom_css()
+    # Load custom CSS (with error handling)
+    try:
+        load_custom_css()
+    except Exception as e:
+        logger.warning(f"Could not load custom CSS: {e}")
     
     # Render header
     render_header()
