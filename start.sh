@@ -164,11 +164,13 @@ elif [ "$MISSING_UI" = true ]; then
     echo ""
     
     if [ "$IS_RUNPOD" = true ]; then
-        # On RunPod: Install ONLY UI packages (skip pandas, numpy, etc. - already there)
-        # Install to user directory to avoid system conflicts
+        # On RunPod: Install ONLY UI packages
+        # Use --upgrade-strategy only-if-needed to skip reinstalling satisfied dependencies
+        echo "   Note: Skipping already-satisfied dependencies (numpy, pandas, etc.)"
         pip install streamlit streamlit-authenticator plotly pydeck \
                     reportlab openpyxl python-docx python-dotenv watchdog \
                     --user \
+                    --upgrade-strategy only-if-needed \
                     --ignore-installed cryptography \
                     --no-warn-script-location
         
@@ -290,11 +292,9 @@ if [ ! -z "$STORAGE_PATH" ]; then
 fi
 
 # Determine port and URL
-# On RunPod, use port 8888 (commonly exposed) or 8501
 if [ "$IS_RUNPOD" = true ]; then
-    # Check if port 8888 is available (usually exposed for Jupyter)
-    # Use 8888 if Jupyter not running, otherwise 8501
-    PORT=8888
+    # Use port 8501 on RunPod
+    PORT=8501
     echo "📍 Using port $PORT (RunPod HTTP Service port)"
 else
     PORT=8501
@@ -311,7 +311,6 @@ if [ "$IS_RUNPOD" = true ]; then
     echo "  1. Go to your RunPod pod page"
     echo "  2. Under 'Connect' → 'HTTP Services'"
     echo "  3. Click on the port $PORT service link"
-    echo "     (It may show as 'Jupyter Lab' - that's the port we're using)"
     echo ""
     echo "💡 The URL will look like:"
     echo "   https://xxxxx-$PORT.proxy.runpod.net"
