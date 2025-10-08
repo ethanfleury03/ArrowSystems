@@ -11,7 +11,7 @@ credentials:
     admin:
       email: admin@arrowsystems.com
       name: Administrator
-      password: 240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9
+      password: be61085957883d7703537a896fd6e0066622f83a890456974b8f17e81c7c9153
       salt: arrow_secure_2024
       role: admin
       
@@ -20,7 +20,7 @@ credentials:
     tech1:
       email: tech1@arrowsystems.com
       name: John Smith
-      password: 3d8e577bddb17db339eae0b3d9bcf78f62f8b7b9c8e34ca7eb7e9b8d8e9e5a94
+      password: 9d54a9e19a5abcb72e22c7c73a31d5d20297d97136e4bbb025c50407c423668d
       salt: arrow_secure_2024
       role: technician
       
@@ -29,7 +29,7 @@ credentials:
     tech2:
       email: tech2@arrowsystems.com
       name: Jane Doe
-      password: 3d8e577bddb17db339eae0b3d9bcf78f62f8b7b9c8e34ca7eb7e9b8d8e9e5a94
+      password: 9d54a9e19a5abcb72e22c7c73a31d5d20297d97136e4bbb025c50407c423668d
       salt: arrow_secure_2024
       role: technician
 
