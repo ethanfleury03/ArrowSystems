@@ -29,31 +29,23 @@ check_package() {
 }
 
 # Virtual environment handling
-# Always use venv to avoid system package conflicts
-VENV_PATH=""
-if [ "$IS_RUNPOD" = true ]; then
-    # On RunPod, create venv in /tmp (fast, won't persist but that's ok)
-    VENV_PATH="/tmp/duraflex-venv"
-else
-    # On local machine, use persistent venv
-    VENV_PATH="venv"
-fi
-
-if [ ! -d "$VENV_PATH" ]; then
-    echo "📦 Creating virtual environment at $VENV_PATH..."
-    python -m venv "$VENV_PATH"
-    echo "✅ Virtual environment created"
-    
-    if [ "$IS_RUNPOD" = true ]; then
-        echo "ℹ️  Note: Venv in /tmp - packages will be installed fresh each pod creation"
-        echo "   This avoids system package conflicts and ensures clean environment"
+# On RunPod: Use system environment (has PyTorch pre-installed)
+# On Local: Use venv for isolation
+if [ "$IS_RUNPOD" = false ]; then
+    # Local machine - use venv for isolation
+    if [ ! -d "venv" ]; then
+        echo "📦 Creating virtual environment..."
+        python3 -m venv venv
+        echo "✅ Virtual environment created"
     fi
+    
+    echo "📦 Activating virtual environment..."
+    source venv/bin/activate
 else
-    echo "📦 Found existing virtual environment at $VENV_PATH"
+    # RunPod - use system environment (has PyTorch, Transformers, etc.)
+    echo "📦 Using system Python environment"
+    echo "   (Keeps access to pre-installed PyTorch & ML libraries)"
 fi
-
-echo "📦 Activating virtual environment..."
-source "$VENV_PATH/bin/activate"
 
 # Check Python version
 PYTHON_VERSION=$(python --version 2>&1 | awk '{print $2}')
@@ -117,10 +109,20 @@ if [ "$MISSING_CORE" = true ]; then
     
     # Install with ignore-installed for problematic system packages
     echo "   Installing packages (progress hidden for clarity)..."
-    pip install -r requirements.txt \
-        --ignore-installed cryptography \
-        -i https://pypi.tuna.tsinghua.edu.cn/simple \
-        --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    
+    if [ "$IS_RUNPOD" = true ]; then
+        # On RunPod: Install to user directory to avoid system conflicts
+        pip install -r requirements.txt \
+            --user \
+            --ignore-installed cryptography \
+            -i https://pypi.tuna.tsinghua.edu.cn/simple \
+            --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    else
+        # On local: Normal install in venv
+        pip install -r requirements.txt \
+            -i https://pypi.tuna.tsinghua.edu.cn/simple \
+            --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    fi
     
     echo ""
     echo "✅ Core dependencies installed"
@@ -134,12 +136,24 @@ elif [ "$MISSING_UI" = true ]; then
     
     # Install only lightweight UI packages with fast mirror
     echo "   Installing packages (progress hidden for clarity)..."
-    pip install streamlit streamlit-authenticator plotly pydeck \
-                reportlab openpyxl python-docx python-dotenv watchdog \
-                PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client \
-                --ignore-installed cryptography \
-                -i https://pypi.tuna.tsinghua.edu.cn/simple \
-                --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    
+    if [ "$IS_RUNPOD" = true ]; then
+        # On RunPod: Install to user directory to avoid system conflicts
+        pip install streamlit streamlit-authenticator plotly pydeck \
+                    reportlab openpyxl python-docx python-dotenv watchdog \
+                    PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client \
+                    --user \
+                    --ignore-installed cryptography \
+                    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+                    --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    else
+        # On local: Normal install in venv
+        pip install streamlit streamlit-authenticator plotly pydeck \
+                    reportlab openpyxl python-docx python-dotenv watchdog \
+                    PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client \
+                    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+                    --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    fi
     
     echo ""
     echo "✅ UI dependencies installed"
