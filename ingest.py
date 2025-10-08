@@ -4,6 +4,11 @@ Optimized for GPU rental with bge-large-en-v1.5 and re-ranking
 Enhanced with non-text content extraction (tables, images, diagrams)
 """
 
+import warnings
+# Suppress annoying Pydantic warnings
+warnings.filterwarnings("ignore", message=".*validate_default.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
 import os
 import logging
 import time

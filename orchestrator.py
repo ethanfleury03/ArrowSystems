@@ -3,6 +3,11 @@ Elite RAG Orchestrator with Hybrid Search (Dense + BM25 + Metadata)
 Implements query rewriting, intent classification, and structured response generation
 """
 
+import warnings
+# Suppress annoying Pydantic warnings
+warnings.filterwarnings("ignore", message=".*validate_default.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
 import os
 import re
 import logging
