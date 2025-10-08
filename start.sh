@@ -164,18 +164,17 @@ elif [ "$MISSING_UI" = true ]; then
     echo ""
     
     if [ "$IS_RUNPOD" = true ]; then
-        # On RunPod: Install to user directory to avoid system conflicts
-        # Try default PyPI first (most reliable)
+        # On RunPod: Install ONLY UI packages (skip pandas, numpy, etc. - already there)
+        # Install to user directory to avoid system conflicts
         pip install streamlit streamlit-authenticator plotly pydeck \
                     reportlab openpyxl python-docx python-dotenv watchdog \
-                    PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client \
                     --user \
                     --ignore-installed cryptography \
                     --no-warn-script-location
         
         INSTALL_STATUS=$?
     else
-        # On local: Normal install in venv
+        # On local: Install everything including data packages
         pip install streamlit streamlit-authenticator plotly pydeck \
                     reportlab openpyxl python-docx python-dotenv watchdog \
                     PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client
