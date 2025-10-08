@@ -270,12 +270,24 @@ def initialize_rag_system():
     """Initialize RAG system (cached for performance)."""
     logger.info("Initializing RAG system...")
     try:
-        rag = EliteRAGQuery()
-        rag.initialize()
+        # Determine storage path
+        import os
+        if os.path.exists("/workspace/storage"):
+            storage_path = "/workspace/storage"
+        elif os.path.exists("./storage"):
+            storage_path = "./storage"
+        else:
+            raise FileNotFoundError(
+                "Storage directory not found. Please run 'python ingest.py' first."
+            )
+        
+        logger.info(f"Using storage path: {storage_path}")
+        rag = EliteRAGQuery(cache_dir="/root/.cache/huggingface/hub")
+        rag.initialize(storage_dir=storage_path)
         logger.info("RAG system initialized successfully")
         return rag
     except Exception as e:
-        logger.error(f"Failed to initialize RAG system: {e}")
+        logger.error(f"Failed to initialize RAG system: {e}", exc_info=True)
         raise
 
 
@@ -464,5 +476,12 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Application error: {e}", exc_info=True)
         st.error(f"❌ Application Error: {e}")
+        st.code(str(e))
+        
+        # Show traceback for debugging
+        import traceback
+        with st.expander("🔍 Error Details (for debugging)"):
+            st.code(traceback.format_exc())
+        
         st.info("Please refresh the page or contact support if the problem persists.")
 
