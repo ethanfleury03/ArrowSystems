@@ -3,6 +3,11 @@ Elite RAG Query Interface with Hybrid Search & Structured Responses
 Implements the complete RAG orchestration pipeline
 """
 
+import warnings
+# Suppress annoying Pydantic warnings
+warnings.filterwarnings("ignore", message=".*validate_default.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
 import os
 import logging
 from typing import List, Optional, Dict, Any
