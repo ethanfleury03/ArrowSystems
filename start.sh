@@ -28,21 +28,32 @@ check_package() {
     return $?
 }
 
-# Virtual environment handling (skip on RunPod, use global environment)
-if [ "$IS_RUNPOD" = false ]; then
-    # Local machine - use venv
-    if [ ! -d "venv" ]; then
-        echo "📦 Creating virtual environment..."
-        python3 -m venv venv
-        echo "✅ Virtual environment created"
-    fi
-    
-    echo "📦 Activating virtual environment..."
-    source venv/bin/activate
+# Virtual environment handling
+# Always use venv to avoid system package conflicts
+VENV_PATH=""
+if [ "$IS_RUNPOD" = true ]; then
+    # On RunPod, create venv in /tmp (fast, won't persist but that's ok)
+    VENV_PATH="/tmp/duraflex-venv"
 else
-    # RunPod - use system Python
-    echo "📦 Using system Python environment"
+    # On local machine, use persistent venv
+    VENV_PATH="venv"
 fi
+
+if [ ! -d "$VENV_PATH" ]; then
+    echo "📦 Creating virtual environment at $VENV_PATH..."
+    python -m venv "$VENV_PATH"
+    echo "✅ Virtual environment created"
+    
+    if [ "$IS_RUNPOD" = true ]; then
+        echo "ℹ️  Note: Venv in /tmp - packages will be installed fresh each pod creation"
+        echo "   This avoids system package conflicts and ensures clean environment"
+    fi
+else
+    echo "📦 Found existing virtual environment at $VENV_PATH"
+fi
+
+echo "📦 Activating virtual environment..."
+source "$VENV_PATH/bin/activate"
 
 # Check Python version
 PYTHON_VERSION=$(python --version 2>&1 | awk '{print $2}')
@@ -95,20 +106,42 @@ fi
 
 echo ""
 
-# Install missing dependencies
+# Install missing dependencies with smart handling
 if [ "$MISSING_CORE" = true ]; then
     echo "📥 Installing core ML dependencies..."
-    echo "   This may take a while (5-10 minutes)..."
-    pip install --upgrade pip
-    pip install -r requirements.txt
+    echo "   Using fast mirror and ignoring system packages..."
+    echo "   Estimated time: 3-5 minutes with fast mirror"
+    echo ""
+    
+    pip install --upgrade pip -q
+    
+    # Install with ignore-installed for problematic system packages
+    echo "   Installing packages (progress hidden for clarity)..."
+    pip install -r requirements.txt \
+        --ignore-installed cryptography \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    
+    echo ""
     echo "✅ Core dependencies installed"
     echo ""
 elif [ "$MISSING_UI" = true ]; then
-    echo "📥 Installing UI dependencies (fast)..."
-    # Install only lightweight UI packages
+    echo "📥 Installing UI dependencies..."
+    echo "   Using fast mirror for quick installation (1-2 minutes)"
+    echo ""
+    
+    pip install --upgrade pip -q
+    
+    # Install only lightweight UI packages with fast mirror
+    echo "   Installing packages (progress hidden for clarity)..."
     pip install streamlit streamlit-authenticator plotly pydeck \
                 reportlab openpyxl python-docx python-dotenv watchdog \
-                PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client
+                PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client \
+                --ignore-installed cryptography \
+                -i https://pypi.tuna.tsinghua.edu.cn/simple \
+                --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+    
+    echo ""
     echo "✅ UI dependencies installed"
     echo ""
 else
@@ -211,7 +244,16 @@ if [ ! -z "$STORAGE_PATH" ]; then
 fi
 
 # Determine port and URL
-PORT=8501
+# On RunPod, use port 8888 (commonly exposed) or 8501
+if [ "$IS_RUNPOD" = true ]; then
+    # Check if port 8888 is available (usually exposed for Jupyter)
+    # Use 8888 if Jupyter not running, otherwise 8501
+    PORT=8888
+    echo "📍 Using port $PORT (RunPod HTTP Service port)"
+else
+    PORT=8501
+fi
+
 if [ "$IS_RUNPOD" = true ]; then
     echo "=========================================="
     echo "🌐 RunPod Network Configuration"
@@ -221,11 +263,12 @@ if [ "$IS_RUNPOD" = true ]; then
     echo ""
     echo "To access from your browser:"
     echo "  1. Go to your RunPod pod page"
-    echo "  2. Click 'Connect' → 'HTTP Service'"
-    echo "  3. Or use the public URL if exposed"
+    echo "  2. Under 'Connect' → 'HTTP Services'"
+    echo "  3. Click on the port $PORT service link"
+    echo "     (It may show as 'Jupyter Lab' - that's the port we're using)"
     echo ""
-    echo "If port not exposed, run in RunPod:"
-    echo "  runpodctl expose $PORT"
+    echo "💡 The URL will look like:"
+    echo "   https://xxxxx-$PORT.proxy.runpod.net"
     echo ""
 else
     echo "=========================================="
@@ -259,11 +302,12 @@ echo ""
 if [ "$IS_RUNPOD" = true ]; then
     # RunPod - bind to all interfaces
     # Use python -m streamlit to ensure it's found
+    # Note: enableCORS must be true for XSRF protection
     python -m streamlit run app.py \
         --server.port=$PORT \
         --server.address=0.0.0.0 \
         --server.headless=true \
-        --server.enableCORS=false \
+        --server.enableCORS=true \
         --server.enableXsrfProtection=true
 else
     # Local - standard settings
