@@ -223,9 +223,8 @@ class TechnicalRAGPipeline:
         
         # Use config or fallback to multiple model options
         model_options = [
-            self.config.get("models", {}).get("embedding", "BAAI/bge-large-en-v1.5"),
-            "BAAI/bge-large-en",  # BGE-large (7B) model
             "BAAI/bge-large-en-v1.5",
+            "BAAI/bge-base-en-v1.5",
             "sentence-transformers/all-MiniLM-L6-v2",
             "sentence-transformers/all-mpnet-base-v2"
         ]
@@ -233,9 +232,15 @@ class TechnicalRAGPipeline:
         for model_name in model_options:
             try:
                 logger.info(f"Trying model: {model_name}")
+                # Try to load with SentenceTransformer first to verify download
+                from sentence_transformers import SentenceTransformer
+                _ = SentenceTransformer(model_name, cache_folder=self.cache_dir)
+                
+                # Now wrap it for llama-index
                 self.embed_model = HuggingFaceEmbedding(
                     model_name=model_name,
-                    cache_folder=self.cache_dir
+                    cache_folder=self.cache_dir,
+                    trust_remote_code=True
                 )
                 logger.info(f"✅ Successfully loaded: {model_name}")
                 break
