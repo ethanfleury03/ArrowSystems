@@ -19,3 +19,7 @@ pandas
 Pillow
 numpy
 tabulate
+rank-bm25
+spacy
+symspellpy
+openai
