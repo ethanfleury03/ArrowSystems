@@ -318,20 +318,7 @@ def main_application():
     # Render header
     render_header()
     
-    # Initialize RAG system
-    if not st.session_state.get('models_initialized', False):
-        with st.spinner("🚀 Initializing AI models... This may take a minute on first run."):
-            try:
-                st.session_state['rag_system'] = initialize_rag_system()
-                st.session_state['models_initialized'] = True
-                st.success("✅ AI models loaded successfully!")
-            except Exception as e:
-                st.error(f"❌ Failed to initialize AI models: {e}")
-                st.stop()
-    
-    rag_system = st.session_state['rag_system']
-    
-    # Render stats bar
+    # Render stats bar (models not yet loaded)
     render_stats_bar()
     
     st.markdown("---")
@@ -354,7 +341,38 @@ def main_application():
     # Main content area
     query = render_query_input()
     
+    # Lazy load models ONLY when first query is made
+    if query and not st.session_state.get('models_initialized', False):
+        st.info("🤖 First-time setup: Loading AI models (30-60 seconds)...")
+        
+        # Progress bar for visual feedback
+        progress_bar = st.progress(0, text="Initializing...")
+        
+        try:
+            progress_bar.progress(10, text="🔄 Loading embedding model...")
+            st.session_state['rag_system'] = initialize_rag_system()
+            progress_bar.progress(100, text="✅ Models loaded!")
+            st.session_state['models_initialized'] = True
+            
+            # Clear progress and show success
+            progress_bar.empty()
+            st.success("✅ AI models loaded! Processing your query...")
+            
+        except Exception as e:
+            progress_bar.empty()
+            logger.error(f"Failed to initialize AI models: {e}", exc_info=True)
+            st.error(f"❌ Failed to initialize AI models: {e}")
+            st.info("Please refresh the page or contact support if the problem persists.")
+            st.stop()
+    
     if query:
+        # Ensure models are loaded before querying
+        if not st.session_state.get('models_initialized', False):
+            st.warning("⚠️ Please wait for models to load before querying.")
+            st.stop()
+        
+        rag_system = st.session_state['rag_system']
+        
         # Add to history
         add_to_query_history(query)
         increment_query_count()
