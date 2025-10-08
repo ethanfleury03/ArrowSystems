@@ -545,6 +545,12 @@ class RAGOrchestrator:
         """Initialize embedding and re-ranking models."""
         logger.info("🚀 Initializing models for RAG orchestrator...")
         
+        # Disable hf_transfer if not installed (RunPod issue)
+        import os
+        if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1':
+            logger.info("Disabling HF_HUB_ENABLE_HF_TRANSFER (package not installed)")
+            os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
+        
         # Embedding model options (without sentence-transformers/ prefix)
         model_options = [
             ("BAAI/bge-large-en-v1.5", "BGE Large"),
