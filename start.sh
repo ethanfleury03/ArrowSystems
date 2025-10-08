@@ -343,6 +343,13 @@ echo ""
 echo "=========================================="
 echo ""
 
+# Precompile Python files for faster startup (saves 1-2 seconds)
+if [ "$IS_RUNPOD" = true ]; then
+    echo "⚡ Precompiling Python files..."
+    python -m compileall app.py components/ utils/ -q 2>/dev/null || true
+    echo ""
+fi
+
 # Run streamlit with appropriate settings
 if [ "$IS_RUNPOD" = true ]; then
     # RunPod - bind to all interfaces
