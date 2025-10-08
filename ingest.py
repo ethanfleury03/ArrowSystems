@@ -221,9 +221,13 @@ class TechnicalRAGPipeline:
         """Initialize embedding and re-ranking models."""
         logger.info("🚀 Initializing embedding model...")
         
-        # Clear any corrupt cache first
+        # Disable hf_transfer if not installed (RunPod issue)
         import os
         import shutil
+        if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1':
+            logger.info("Disabling HF_HUB_ENABLE_HF_TRANSFER (package not installed)")
+            os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
+        
         cache_path = os.path.expanduser(self.cache_dir)
         
         # Try multiple approaches
