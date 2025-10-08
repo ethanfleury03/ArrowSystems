@@ -54,46 +54,32 @@ echo ""
 
 # Smart dependency checking
 echo "🔍 Checking dependencies..."
+echo ""
 
 MISSING_CORE=false
 MISSING_UI=false
 
-# Check core ML packages (usually pre-installed on RunPod)
-if ! check_package torch; then
-    echo "  ❌ PyTorch not found"
-    MISSING_CORE=true
+# On RunPod, check if packages are in pip list (might not be importable yet)
+if [ "$IS_RUNPOD" = true ]; then
+    echo "   Scanning installed packages..."
+    HAS_TORCH=$(pip list 2>/dev/null | grep -c "torch " || echo "0")
+    HAS_TRANSFORMERS=$(pip list 2>/dev/null | grep -c "transformers " || echo "0")
+    HAS_LLAMA=$(pip list 2>/dev/null | grep -c "llama-index " || echo "0")
+    HAS_SENTENCE=$(pip list 2>/dev/null | grep -c "sentence-transformers" || echo "0")
+    HAS_STREAMLIT=$(pip list 2>/dev/null | grep -c "streamlit " || echo "0")
+    
+    [ "$HAS_TORCH" -eq "0" ] && MISSING_CORE=true || echo "  ✅ PyTorch (system)"
+    [ "$HAS_TRANSFORMERS" -eq "0" ] && MISSING_CORE=true || echo "  ✅ Transformers (system)"
+    [ "$HAS_LLAMA" -eq "0" ] && MISSING_CORE=true || echo "  ✅ LlamaIndex (system)"
+    [ "$HAS_SENTENCE" -eq "0" ] && MISSING_CORE=true || echo "  ✅ Sentence-Transformers (system)"
+    [ "$HAS_STREAMLIT" -eq "0" ] && MISSING_UI=true || echo "  ✅ Streamlit"
 else
-    TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
-    echo "  ✅ PyTorch: $TORCH_VERSION"
-fi
-
-if ! check_package transformers; then
-    echo "  ❌ Transformers not found"
-    MISSING_CORE=true
-else
-    echo "  ✅ Transformers installed"
-fi
-
-if ! check_package llama_index; then
-    echo "  ❌ LlamaIndex not found"
-    MISSING_CORE=true
-else
-    echo "  ✅ LlamaIndex installed"
-fi
-
-if ! check_package sentence_transformers; then
-    echo "  ❌ Sentence-Transformers not found"
-    MISSING_CORE=true
-else
-    echo "  ✅ Sentence-Transformers installed"
-fi
-
-# Check UI packages
-if ! check_package streamlit; then
-    echo "  ❌ Streamlit not found"
-    MISSING_UI=true
-else
-    echo "  ✅ Streamlit installed"
+    # Local machine - check imports
+    check_package torch && echo "  ✅ PyTorch" || { echo "  ❌ PyTorch not found"; MISSING_CORE=true; }
+    check_package transformers && echo "  ✅ Transformers" || { echo "  ❌ Transformers not found"; MISSING_CORE=true; }
+    python -c "import llama_index.core" 2>/dev/null && echo "  ✅ LlamaIndex" || { echo "  ❌ LlamaIndex not found"; MISSING_CORE=true; }
+    check_package sentence_transformers && echo "  ✅ Sentence-Transformers" || { echo "  ❌ Sentence-Transformers not found"; MISSING_CORE=true; }
+    check_package streamlit && echo "  ✅ Streamlit" || { echo "  ❌ Streamlit not found"; MISSING_UI=true; }
 fi
 
 echo ""
