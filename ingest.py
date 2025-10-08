@@ -221,35 +221,66 @@ class TechnicalRAGPipeline:
         """Initialize embedding and re-ranking models."""
         logger.info("🚀 Initializing embedding model...")
         
-        # Use config or fallback to multiple model options
+        # Clear any corrupt cache first
+        import os
+        import shutil
+        cache_path = os.path.expanduser(self.cache_dir)
+        
+        # Try multiple approaches
         model_options = [
-            "BAAI/bge-large-en-v1.5",
-            "BAAI/bge-base-en-v1.5",
-            "sentence-transformers/all-MiniLM-L6-v2",
-            "sentence-transformers/all-mpnet-base-v2"
+            ("BAAI/bge-large-en-v1.5", "BGE Large"),
+            ("BAAI/bge-base-en-v1.5", "BGE Base"),
+            ("all-MiniLM-L6-v2", "MiniLM"),
+            ("all-mpnet-base-v2", "MPNet")
         ]
         
-        for model_name in model_options:
+        for model_name, display_name in model_options:
             try:
-                logger.info(f"Trying model: {model_name}")
-                # Try to load with SentenceTransformer first to verify download
-                from sentence_transformers import SentenceTransformer
-                _ = SentenceTransformer(model_name, cache_folder=self.cache_dir)
+                logger.info(f"Trying model: {display_name} ({model_name})")
                 
-                # Now wrap it for llama-index
-                self.embed_model = HuggingFaceEmbedding(
-                    model_name=model_name,
-                    cache_folder=self.cache_dir,
-                    trust_remote_code=True
-                )
-                logger.info(f"✅ Successfully loaded: {model_name}")
-                break
+                # Method 1: Direct load without sentence-transformers prefix
+                try:
+                    self.embed_model = HuggingFaceEmbedding(
+                        model_name=model_name,
+                        cache_folder=self.cache_dir,
+                        trust_remote_code=True,
+                        device="cuda" if os.path.exists("/dev/nvidia0") else "cpu"
+                    )
+                    logger.info(f"✅ Successfully loaded: {display_name}")
+                    break
+                except Exception as e1:
+                    logger.debug(f"Method 1 failed: {e1}")
+                    
+                    # Method 2: Try with full sentence-transformers path
+                    if not model_name.startswith("sentence-transformers/"):
+                        try:
+                            full_name = f"sentence-transformers/{model_name}"
+                            self.embed_model = HuggingFaceEmbedding(
+                                model_name=full_name,
+                                cache_folder=self.cache_dir,
+                                trust_remote_code=True,
+                                device="cuda" if os.path.exists("/dev/nvidia0") else "cpu"
+                            )
+                            logger.info(f"✅ Successfully loaded: {display_name}")
+                            break
+                        except Exception as e2:
+                            logger.debug(f"Method 2 failed: {e2}")
+                            raise e1
+                    else:
+                        raise e1
+                        
             except Exception as e:
-                logger.warning(f"Failed to load {model_name}: {e}")
+                logger.warning(f"Failed to load {display_name}: {str(e)[:100]}")
                 continue
         
         if not self.embed_model:
-            raise RuntimeError("Could not load any embedding model")
+            logger.error("All model loading attempts failed. Trying emergency fallback...")
+            # Emergency fallback - use any available model
+            try:
+                self.embed_model = HuggingFaceEmbedding(model_name="all-MiniLM-L6-v2")
+                logger.info("✅ Loaded with emergency fallback")
+            except:
+                raise RuntimeError("Could not load any embedding model. Check internet connection and HuggingFace access.")
         
         # Try to initialize re-ranker (optional)
         try:

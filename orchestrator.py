@@ -545,33 +545,50 @@ class RAGOrchestrator:
         """Initialize embedding and re-ranking models."""
         logger.info("🚀 Initializing models for RAG orchestrator...")
         
-        # Embedding model
+        # Embedding model options (without sentence-transformers/ prefix)
         model_options = [
-            "BAAI/bge-large-en-v1.5",
-            "BAAI/bge-base-en-v1.5",
-            "sentence-transformers/all-MiniLM-L6-v2"
+            ("BAAI/bge-large-en-v1.5", "BGE Large"),
+            ("BAAI/bge-base-en-v1.5", "BGE Base"),
+            ("all-MiniLM-L6-v2", "MiniLM"),
+            ("all-mpnet-base-v2", "MPNet")
         ]
         
-        for model_name in model_options:
+        for model_name, display_name in model_options:
             try:
-                logger.info(f"Loading embedding model: {model_name}")
-                # Try to load with SentenceTransformer first to verify download
-                from sentence_transformers import SentenceTransformer
-                _ = SentenceTransformer(model_name, cache_folder=self.cache_dir)
+                logger.info(f"Loading embedding model: {display_name} ({model_name})")
                 
-                # Now wrap it for llama-index
+                import os
                 self.embed_model = HuggingFaceEmbedding(
                     model_name=model_name,
                     cache_folder=self.cache_dir,
-                    trust_remote_code=True
+                    trust_remote_code=True,
+                    device="cuda" if os.path.exists("/dev/nvidia0") else "cpu"
                 )
-                logger.info(f"✅ Embedding model loaded: {model_name}")
+                logger.info(f"✅ Embedding model loaded: {display_name}")
                 break
             except Exception as e:
-                logger.warning(f"Failed to load {model_name}: {e}")
+                logger.warning(f"Failed to load {display_name}: {str(e)[:100]}")
+                # Try with sentence-transformers prefix if not already
+                if not model_name.startswith("sentence-transformers/"):
+                    try:
+                        full_name = f"sentence-transformers/{model_name}"
+                        self.embed_model = HuggingFaceEmbedding(
+                            model_name=full_name,
+                            cache_folder=self.cache_dir,
+                            trust_remote_code=True
+                        )
+                        logger.info(f"✅ Embedding model loaded: {display_name} (with prefix)")
+                        break
+                    except:
+                        continue
         
         if not self.embed_model:
-            raise RuntimeError("Could not load embedding model")
+            # Emergency fallback
+            try:
+                self.embed_model = HuggingFaceEmbedding(model_name="all-MiniLM-L6-v2")
+                logger.info("✅ Loaded with emergency fallback")
+            except:
+                raise RuntimeError("Could not load embedding model. Check internet connection.")
         
         # Re-ranker model
         try:
