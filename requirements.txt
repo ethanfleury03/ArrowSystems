@@ -9,6 +9,7 @@ accelerate
 bitsandbytes
 optimum
 huggingface-hub
+hf-transfer
 safetensors
 xformers
 scikit-learn
