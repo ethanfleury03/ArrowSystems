@@ -204,10 +204,16 @@ def render_login_page(auth_manager: AuthManager):
                 if not username or not password:
                     st.error("⚠️ Please enter both username and password.")
                 else:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"Login attempt for user: {username}")
+                    
                     is_valid, user_info = auth_manager.verify_credentials(username, password)
+                    logger.info(f"Credentials valid: {is_valid}")
                     
                     if is_valid:
                         auth_manager.initialize_session(user_info)
+                        logger.info(f"Session initialized for: {user_info['name']}")
                         st.success(f"✅ Welcome back, {user_info['name']}!")
                         st.balloons()
                         # Small delay to show success message
@@ -215,6 +221,7 @@ def render_login_page(auth_manager: AuthManager):
                         time.sleep(0.5)
                         st.rerun()
                     else:
+                        logger.warning(f"Invalid login attempt for: {username}")
                         st.error("❌ Invalid username or password. Please try again.")
         
         st.markdown('</div>', unsafe_allow_html=True)
