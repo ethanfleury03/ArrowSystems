@@ -1,0 +1,88 @@
+# DuraFlex Technical Assistant - Application Configuration
+
+# Application Settings
+app:
+  name: "DuraFlex Technical Assistant"
+  version: "1.0.0"
+  company: "Arrow Systems Inc"
+  logo_path: "assets/logo.png"
+  theme: "professional"  # professional, dark, light
+
+# RAG System Settings
+rag:
+  storage_dir: "storage"
+  cache_dir: "C:\\Users\\ethan\\.cache\\huggingface\\hub"
+  data_dir: "data"
+  extracted_content_dir: "extracted_content"
+  
+  # Default query parameters
+  default_top_k: 10
+  default_alpha: 0.5  # 0.5 = equal weight between BM25 and dense
+  max_top_k: 50
+  min_top_k: 1
+  
+  # Content types to enable
+  content_types:
+    - text
+    - table
+    - image
+    - figure_caption
+
+# UI Settings
+ui:
+  # Layout
+  layout: "wide"  # wide, centered
+  sidebar_state: "expanded"  # expanded, collapsed
+  
+  # Features
+  enable_query_history: true
+  enable_export: true
+  enable_feedback: true
+  enable_advanced_filters: true
+  
+  # Display
+  show_confidence: true
+  show_intent: true
+  show_reasoning: true
+  show_retrieved_chunks: true
+  max_results_display: 20
+  
+  # Example queries
+  example_queries:
+    - "What is the DuraFlex printhead temperature range?"
+    - "How to troubleshoot print quality issues?"
+    - "PPU installation procedure steps"
+    - "Compare inline degasser vs standard degasser"
+    - "DuraFlex electrical specifications"
+    - "How to calibrate the printhead?"
+
+# Export Settings
+export:
+  formats:
+    - PDF
+    - Excel
+    - Word
+  include_sources: true
+  include_metadata: true
+  company_header: true
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "rag_handler.log"
+  max_size_mb: 10
+  backup_count: 5
+
+# Performance
+performance:
+  cache_queries: true
+  preload_models: true
+  batch_processing: false
+  
+# Admin Panel
+admin:
+  enable_user_management: true
+  enable_document_upload: true
+  enable_system_stats: true
+  enable_re_indexing: true
+

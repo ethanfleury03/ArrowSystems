@@ -31,9 +31,37 @@ Enterprise-grade **Retrieval-Augmented Generation (RAG)** orchestrator with **Hy
 
 ---
 
+## 📚 Documentation
+
+Complete documentation has been organized in the `docs/` folder:
+
+- **[User Guide](docs/UI_README.md)** - How to use the web interface
+- **[Deployment Guide](docs/DEPLOYMENT_GUIDE.md)** - How to deploy and configure
+- **[Implementation Details](docs/IMPLEMENTATION_SUMMARY.md)** - Technical architecture
+- **[All Documentation](docs/README.md)** - Complete documentation index
+
+---
+
 ## 🚀 Quick Start
 
-### Installation
+### Web Interface (Recommended)
+
+```bash
+# Windows
+start.bat
+
+# Linux/Mac
+chmod +x start.sh
+./start.sh
+```
+
+Then open http://localhost:8501 and login with:
+- Username: `admin`
+- Password: `admin123`
+
+### Command Line Interface
+
+#### Installation
 
 ```bash
 # Install dependencies
