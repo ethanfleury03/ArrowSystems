@@ -10,8 +10,8 @@ app:
 
 # RAG System Settings
 rag:
-  storage_dir: "storage"
-  cache_dir: "C:\\Users\\ethan\\.cache\\huggingface\\hub"
+  storage_dir: "/workspace/storage"
+  cache_dir: "/root/.cache/huggingface/hub"
   data_dir: "data"
   extracted_content_dir: "extracted_content"
   
