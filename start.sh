@@ -258,7 +258,8 @@ echo ""
 # Run streamlit with appropriate settings
 if [ "$IS_RUNPOD" = true ]; then
     # RunPod - bind to all interfaces
-    streamlit run app.py \
+    # Use python -m streamlit to ensure it's found
+    python -m streamlit run app.py \
         --server.port=$PORT \
         --server.address=0.0.0.0 \
         --server.headless=true \
@@ -266,5 +267,5 @@ if [ "$IS_RUNPOD" = true ]; then
         --server.enableXsrfProtection=true
 else
     # Local - standard settings
-    streamlit run app.py --server.port=$PORT
+    python -m streamlit run app.py --server.port=$PORT
 fi
