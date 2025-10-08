@@ -551,6 +551,14 @@ class RAGOrchestrator:
             logger.info("Disabling HF_HUB_ENABLE_HF_TRANSFER (package not installed)")
             os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
         
+        # Detect GPU
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"🖥️ Using device: {device}")
+        if device == "cuda":
+            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        
         # Embedding model options (without sentence-transformers/ prefix)
         model_options = [
             ("BAAI/bge-large-en-v1.5", "BGE Large"),
@@ -563,14 +571,13 @@ class RAGOrchestrator:
             try:
                 logger.info(f"Loading embedding model: {display_name} ({model_name})")
                 
-                import os
                 self.embed_model = HuggingFaceEmbedding(
                     model_name=model_name,
                     cache_folder=self.cache_dir,
                     trust_remote_code=True,
-                    device="cuda" if os.path.exists("/dev/nvidia0") else "cpu"
+                    device=device
                 )
-                logger.info(f"✅ Embedding model loaded: {display_name}")
+                logger.info(f"✅ Embedding model loaded: {display_name} on {device}")
                 break
             except Exception as e:
                 logger.warning(f"Failed to load {display_name}: {str(e)[:100]}")
@@ -581,9 +588,10 @@ class RAGOrchestrator:
                         self.embed_model = HuggingFaceEmbedding(
                             model_name=full_name,
                             cache_folder=self.cache_dir,
-                            trust_remote_code=True
+                            trust_remote_code=True,
+                            device=device
                         )
-                        logger.info(f"✅ Embedding model loaded: {display_name} (with prefix)")
+                        logger.info(f"✅ Embedding model loaded: {display_name} (with prefix) on {device}")
                         break
                     except:
                         continue
@@ -601,9 +609,10 @@ class RAGOrchestrator:
             logger.info("Loading re-ranker model...")
             self.reranker = CrossEncoder(
                 "BAAI/bge-reranker-large",
-                cache_folder=self.cache_dir
+                cache_folder=self.cache_dir,
+                device=device
             )
-            logger.info("✅ Re-ranker loaded")
+            logger.info(f"✅ Re-ranker loaded on {device}")
         except Exception as e:
             logger.warning(f"Re-ranker not available: {e}")
             self.reranker = None

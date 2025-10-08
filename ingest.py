@@ -228,6 +228,14 @@ class TechnicalRAGPipeline:
             logger.info("Disabling HF_HUB_ENABLE_HF_TRANSFER (package not installed)")
             os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
         
+        # Detect GPU
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"🖥️ Using device: {device}")
+        if device == "cuda":
+            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        
         cache_path = os.path.expanduser(self.cache_dir)
         
         # Try multiple approaches
@@ -248,9 +256,9 @@ class TechnicalRAGPipeline:
                         model_name=model_name,
                         cache_folder=self.cache_dir,
                         trust_remote_code=True,
-                        device="cuda" if os.path.exists("/dev/nvidia0") else "cpu"
+                        device=device
                     )
-                    logger.info(f"✅ Successfully loaded: {display_name}")
+                    logger.info(f"✅ Successfully loaded: {display_name} on {device}")
                     break
                 except Exception as e1:
                     logger.debug(f"Method 1 failed: {e1}")
@@ -263,9 +271,9 @@ class TechnicalRAGPipeline:
                                 model_name=full_name,
                                 cache_folder=self.cache_dir,
                                 trust_remote_code=True,
-                                device="cuda" if os.path.exists("/dev/nvidia0") else "cpu"
+                                device=device
                             )
-                            logger.info(f"✅ Successfully loaded: {display_name}")
+                            logger.info(f"✅ Successfully loaded: {display_name} on {device}")
                             break
                         except Exception as e2:
                             logger.debug(f"Method 2 failed: {e2}")
@@ -292,9 +300,10 @@ class TechnicalRAGPipeline:
             reranker_model = self.config.get("models", {}).get("reranker", "BAAI/bge-reranker-large")
             self.reranker = CrossEncoder(
                 reranker_model,
-                cache_folder=self.cache_dir
+                cache_folder=self.cache_dir,
+                device=device
             )
-            logger.info("✅ Re-ranker loaded successfully")
+            logger.info(f"✅ Re-ranker loaded successfully on {device}")
         except Exception as e:
             logger.warning(f"Re-ranker not available: {e}")
             self.reranker = None
