@@ -44,7 +44,7 @@ extracted_content/
 
 # Secrets and credentials
 .streamlit/secrets.toml
-config/users.yaml
+# config/users.yaml  # Commented out - demo credentials are safe to commit
 .env
 *.key
 *.pem
