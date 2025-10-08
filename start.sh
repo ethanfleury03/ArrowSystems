@@ -153,34 +153,43 @@ if [ "$MISSING_CORE" = true ]; then
     echo ""
 elif [ "$MISSING_UI" = true ]; then
     echo "📥 Installing UI dependencies..."
-    echo "   Using fast mirror for quick installation (1-2 minutes)"
+    echo "   This will show progress so you can see what's happening..."
     echo ""
     
     pip install --upgrade pip -q
     
-    # Install only lightweight UI packages with fast mirror
-    echo "   Installing packages (progress hidden for clarity)..."
+    # Install only lightweight UI packages
+    # Show progress, use default PyPI (Tsinghua mirror sometimes hangs)
+    echo "   Installing: streamlit, plotly, and UI tools..."
+    echo ""
     
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install to user directory to avoid system conflicts
+        # Try default PyPI first (most reliable)
         pip install streamlit streamlit-authenticator plotly pydeck \
                     reportlab openpyxl python-docx python-dotenv watchdog \
                     PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client \
                     --user \
                     --ignore-installed cryptography \
-                    -i https://pypi.tuna.tsinghua.edu.cn/simple \
-                    --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+                    --no-warn-script-location
+        
+        INSTALL_STATUS=$?
     else
         # On local: Normal install in venv
         pip install streamlit streamlit-authenticator plotly pydeck \
                     reportlab openpyxl python-docx python-dotenv watchdog \
-                    PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client \
-                    -i https://pypi.tuna.tsinghua.edu.cn/simple \
-                    --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+                    PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client
+        
+        INSTALL_STATUS=$?
     fi
     
     echo ""
-    echo "✅ UI dependencies installed"
+    if [ $INSTALL_STATUS -eq 0 ]; then
+        echo "✅ UI dependencies installed successfully"
+    else
+        echo "⚠️  Installation had issues, but may have partially succeeded"
+        echo "   Attempting to continue..."
+    fi
     echo ""
 else
     echo "✅ All dependencies satisfied!"
