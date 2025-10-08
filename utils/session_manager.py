@@ -32,8 +32,8 @@ def init_session_state():
     if 'query_history' not in st.session_state:
         st.session_state['query_history'] = []
     
-    if 'current_query' not in st.session_state:
-        st.session_state['current_query'] = ''
+    if 'last_processed_query' not in st.session_state:
+        st.session_state['last_processed_query'] = ''
     
     if 'current_response' not in st.session_state:
         st.session_state['current_response'] = None

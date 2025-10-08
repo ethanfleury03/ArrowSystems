@@ -390,7 +390,7 @@ def main_application():
                 
                 # Store in session
                 st.session_state['current_response'] = response
-                st.session_state['current_query'] = query
+                st.session_state['last_processed_query'] = query
                 
                 logger.info(f"Query processed successfully: {query[:50]}...")
                 
@@ -411,11 +411,12 @@ def main_application():
     elif st.session_state.get('current_response'):
         # Show previous results
         st.markdown("## 📋 Previous Results")
-        st.info(f"Showing results for: *{st.session_state['current_query']}*")
+        last_query = st.session_state.get('last_processed_query', 'Previous query')
+        st.info(f"Showing results for: *{last_query}*")
         render_results(st.session_state['current_response'])
         
         st.markdown("---")
-        render_export_options(st.session_state['current_response'], st.session_state['current_query'])
+        render_export_options(st.session_state['current_response'], last_query)
     
     else:
         # Show welcome message
