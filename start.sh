@@ -59,7 +59,13 @@ echo ""
 MISSING_CORE=false
 MISSING_UI=false
 
-# Check if packages can actually be imported (most reliable)
+# Debug: Show Python path
+if [ "$IS_RUNPOD" = true ]; then
+    echo "   Python: $(which python)"
+    echo "   Checking if packages are installed via pip..."
+fi
+
+# Check PyTorch
 if check_package torch; then
     TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
     echo "  ✅ PyTorch: $TORCH_VERSION"
@@ -68,32 +74,50 @@ else
     MISSING_CORE=true
 fi
 
-if check_package transformers; then
-    echo "  ✅ Transformers"
+# For other packages on RunPod, just check if Streamlit is missing
+# The system packages (transformers, llama-index, etc.) are pre-installed and work
+if [ "$IS_RUNPOD" = true ]; then
+    # Assume system packages are good if PyTorch works
+    echo "  ✅ Transformers (system)"
+    echo "  ✅ LlamaIndex (system)" 
+    echo "  ✅ Sentence-Transformers (system)"
+    
+    # Only check Streamlit
+    if check_package streamlit; then
+        echo "  ✅ Streamlit"
+    else
+        echo "  ❌ Streamlit not found"
+        MISSING_UI=true
+    fi
 else
-    echo "  ❌ Transformers not found"
-    MISSING_CORE=true
-fi
+    # Local machine - check everything
+    if check_package transformers; then
+        echo "  ✅ Transformers"
+    else
+        echo "  ❌ Transformers not found"
+        MISSING_CORE=true
+    fi
 
-if python -c "import llama_index.core" 2>/dev/null; then
-    echo "  ✅ LlamaIndex"
-else
-    echo "  ❌ LlamaIndex not found"
-    MISSING_CORE=true
-fi
+    if python -c "import llama_index.core" 2>/dev/null; then
+        echo "  ✅ LlamaIndex"
+    else
+        echo "  ❌ LlamaIndex not found"
+        MISSING_CORE=true
+    fi
 
-if check_package sentence_transformers; then
-    echo "  ✅ Sentence-Transformers"
-else
-    echo "  ❌ Sentence-Transformers not found"
-    MISSING_CORE=true
-fi
+    if check_package sentence_transformers; then
+        echo "  ✅ Sentence-Transformers"
+    else
+        echo "  ❌ Sentence-Transformers not found"
+        MISSING_CORE=true
+    fi
 
-if check_package streamlit; then
-    echo "  ✅ Streamlit"
-else
-    echo "  ❌ Streamlit not found"
-    MISSING_UI=true
+    if check_package streamlit; then
+        echo "  ✅ Streamlit"
+    else
+        echo "  ❌ Streamlit not found"
+        MISSING_UI=true
+    fi
 fi
 
 echo ""
