@@ -128,11 +128,22 @@ if [ ! -f "config/app_config.yaml" ]; then
     echo ""
 fi
 
-# Check if storage/index exists
-if [ ! -d "storage" ] || [ ! -f "storage/docstore.json" ]; then
+# Check if storage/index exists (check multiple locations)
+STORAGE_PATH=""
+if [ -d "/workspace/storage" ] && [ -f "/workspace/storage/docstore.json" ]; then
+    STORAGE_PATH="/workspace/storage"
+    echo "✅ RAG index found in /workspace/storage/"
+elif [ -d "storage" ] && [ -f "storage/docstore.json" ]; then
+    STORAGE_PATH="storage"
+    echo "✅ RAG index found in ./storage/"
+else
     echo "=========================================="
     echo "⚠️  RAG Index Not Found!"
     echo "=========================================="
+    echo ""
+    echo "Checked locations:"
+    echo "  • /workspace/storage/"
+    echo "  • ./storage/"
     echo ""
     echo "The vector index hasn't been built yet."
     echo "You need to run ingestion first to process your PDFs."
@@ -188,11 +199,12 @@ if [ ! -d "storage" ] || [ ! -f "storage/docstore.json" ]; then
             echo ""
         fi
     fi
-else
-    echo "✅ RAG index found in storage/"
-    # Show index stats
-    if [ -f "storage/docstore.json" ]; then
-        NUM_DOCS=$(python -c "import json; print(len(json.load(open('storage/docstore.json'))['docstore/data']))" 2>/dev/null || echo "unknown")
+fi
+
+# If we found storage, show stats
+if [ ! -z "$STORAGE_PATH" ]; then
+    if [ -f "$STORAGE_PATH/docstore.json" ]; then
+        NUM_DOCS=$(python -c "import json; print(len(json.load(open('$STORAGE_PATH/docstore.json'))['docstore/data']))" 2>/dev/null || echo "unknown")
         echo "   📊 Indexed chunks: $NUM_DOCS"
     fi
     echo ""
