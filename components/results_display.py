@@ -116,7 +116,11 @@ def render_sources_tab(response: StructuredResponse):
     
     for idx, source in enumerate(response.sources):
         # Determine icon based on content type
-        content_type = source.get('content_type', 'text')
+        # Handle both dict and dataclass sources
+        if hasattr(source, 'metadata'):
+            content_type = source.metadata.get('content_type', 'text')
+        else:
+            content_type = source.get('content_type', 'text')
         if content_type == 'table':
             icon = "📊"
             type_label = "Table"
@@ -135,13 +139,25 @@ def render_sources_tab(response: StructuredResponse):
             type_color = "#6c757d"
         
         # Source card
-        with st.expander(f"{source['id']} {icon} {source['name']}", expanded=(idx == 0)):
+        # Handle both dict and dataclass sources
+        if hasattr(source, 'file_name'):
+            # Dataclass (MockSource)
+            source_id = f"[{idx + 1}]"
+            source_name = source.file_name
+            source_pages = str(source.page_number)
+        else:
+            # Dict (real source)
+            source_id = source['id']
+            source_name = source['name']
+            source_pages = source['pages']
+            
+        with st.expander(f"{source_id} {icon} {source_name}", expanded=(idx == 0)):
             col1, col2 = st.columns([3, 1])
             
             with col1:
-                st.markdown(f"**Document:** {source['name']}")
-                if source['pages'] != 'N/A':
-                    st.markdown(f"**Pages:** {source['pages']}")
+                st.markdown(f"**Document:** {source_name}")
+                if source_pages != 'N/A':
+                    st.markdown(f"**Pages:** {source_pages}")
             
             with col2:
                 st.markdown(f"""
