@@ -30,6 +30,114 @@ def get_extracted_content_dir():
     return None
 
 
+def render_answer_chunks(response):
+    """Split answer by citations and render each in its own card with feedback."""
+    import re
+    
+    # Split answer by "According to" pattern
+    answer_text = response.answer
+    
+    # Pattern to split: "According to ... [X]:"
+    pattern = r'(According to [^[]+\[\d+\]:)'
+    parts = re.split(pattern, answer_text)
+    
+    # Initialize chunk ratings in session state
+    if 'chunk_ratings' not in st.session_state:
+        st.session_state['chunk_ratings'] = {}
+    
+    # Process chunks
+    chunks = []
+    current_chunk = {"header": None, "content": ""}
+    
+    for i, part in enumerate(parts):
+        if re.match(pattern, part):
+            # This is a header
+            if current_chunk["content"]:
+                chunks.append(current_chunk)
+            current_chunk = {"header": part.strip(), "content": ""}
+        else:
+            # This is content
+            current_chunk["content"] += part.strip()
+    
+    # Add last chunk
+    if current_chunk["content"]:
+        chunks.append(current_chunk)
+    
+    # If no chunks found (no citations), show as single block
+    if not chunks or (len(chunks) == 1 and not chunks[0]["header"]):
+        st.markdown(f"""
+        <div style="background: white; padding: 1.5rem; border-radius: 10px; 
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.05); border-left: 4px solid #667eea;">
+            {answer_text}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Overall feedback
+        st.markdown("")
+        st.markdown("**Was this answer helpful?**")
+        from components.feedback_ui import render_feedback_buttons
+        render_feedback_buttons(response, st.session_state.get('feedback_query', ''), 
+                               st.session_state.get('username', 'Unknown'))
+        return
+    
+    # Render each chunk in its own card
+    for chunk_idx, chunk in enumerate(chunks):
+        if chunk["header"] and chunk["content"]:
+            with st.container():
+                # Extract citation number from header
+                citation_match = re.search(r'\[(\d+)\]', chunk["header"])
+                citation_num = citation_match.group(1) if citation_match else str(chunk_idx + 1)
+                
+                # Card with gradient border
+                border_colors = ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b']
+                border_color = border_colors[chunk_idx % len(border_colors)]
+                
+                st.markdown(f"""
+                <div style="background: white; padding: 1.2rem; border-radius: 10px; 
+                            margin-bottom: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); 
+                            border-left: 4px solid {border_color};">
+                    <strong style="color: {border_color}; font-size: 0.95rem;">{chunk["header"]}</strong>
+                    <div style="margin-top: 0.8rem; line-height: 1.6;">
+                        {chunk["content"].replace(chr(10), '<br>')}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Feedback for this chunk
+                chunk_key = f"chunk_{chunk_idx}_{citation_num}"
+                existing_rating = st.session_state['chunk_ratings'].get(chunk_key)
+                
+                col1, col2, col3 = st.columns([1, 1, 8])
+                
+                with col1:
+                    if existing_rating == 'helpful':
+                        st.button("👍", disabled=True, key=f"chunk_up_{chunk_idx}", 
+                                 help="Marked helpful")
+                    else:
+                        if st.button("👍", key=f"chunk_up_{chunk_idx}", 
+                                    help="This citation was helpful"):
+                            st.session_state['chunk_ratings'][chunk_key] = 'helpful'
+                            st.rerun()
+                
+                with col2:
+                    if existing_rating == 'unhelpful':
+                        st.button("👎", disabled=True, key=f"chunk_down_{chunk_idx}", 
+                                 help="Marked unhelpful")
+                    else:
+                        if st.button("👎", key=f"chunk_down_{chunk_idx}", 
+                                    help="This citation was unhelpful"):
+                            st.session_state['chunk_ratings'][chunk_key] = 'unhelpful'
+                            st.rerun()
+                
+                with col3:
+                    if existing_rating == 'helpful':
+                        st.caption("✅ Helpful citation")
+                    elif existing_rating == 'unhelpful':
+                        st.caption("⚠️ Unhelpful citation")
+                
+                st.markdown("")  # Spacing
+
+
 def render_source_feedback_buttons(source, source_id, idx):
     """Render thumbs up/down buttons for individual sources."""
     # Generate unique key for this source
@@ -149,22 +257,8 @@ def render_answer_tab(response: StructuredResponse):
     answer_col, content_col = st.columns([1.5, 1])
     
     with answer_col:
-        # Display answer with nice formatting
-        formatted_answer = response.answer.replace('\n', '<br>')
-        st.markdown(f"""
-        <div style="background: white; padding: 1.5rem; border-radius: 10px; 
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.05); border-left: 4px solid #667eea;">
-            {formatted_answer}
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("")
-        
-        # Feedback buttons
-        st.markdown("**Was this answer helpful?**")
-        from components.feedback_ui import render_feedback_buttons
-        render_feedback_buttons(response, st.session_state.get('feedback_query', ''), 
-                               st.session_state.get('username', 'Unknown'))
+        # Split answer into chunks by citation
+        render_answer_chunks(response)
         
         # Keywords
         if response.intent.keywords:
