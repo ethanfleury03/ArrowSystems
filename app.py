@@ -31,8 +31,8 @@ from components.results_display import render_results
 from utils.session_manager import init_session_state, increment_query_count, get_session_stats
 from utils.export_utils import render_export_options
 
-# Import RAG system
-from query import EliteRAGQuery
+# Import RAG system - will be imported conditionally based on mock mode
+# from query import EliteRAGQuery
 
 # Configure logging
 logging.basicConfig(
@@ -269,6 +269,9 @@ def initialize_rag_system():
     # Real RAG system
     logger.info("Initializing RAG system...")
     try:
+        # Import only when needed (avoids loading torch in mock mode)
+        from query import EliteRAGQuery
+        
         # Determine storage path
         if os.path.exists("/workspace/storage"):
             storage_path = "/workspace/storage"
