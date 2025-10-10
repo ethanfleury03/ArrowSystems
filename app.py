@@ -31,8 +31,8 @@ from components.results_display import render_results
 from utils.session_manager import init_session_state, increment_query_count, get_session_stats
 from utils.export_utils import render_export_options
 
-# Import RAG system
-from query import EliteRAGQuery
+# Import RAG system - will be imported conditionally based on mock mode
+# from query import EliteRAGQuery
 
 # Configure logging
 logging.basicConfig(
@@ -253,10 +253,26 @@ def load_custom_css():
 @st.cache_resource(show_spinner=False)
 def initialize_rag_system():
     """Initialize RAG system (cached for performance)."""
+    import os
+    
+    # Check if mock mode is enabled
+    use_mock = os.getenv('USE_MOCK_RAG', 'false').lower() == 'true'
+    
+    if use_mock:
+        logger.info("🎭 MOCK MODE ENABLED - Using mock RAG system for UI development")
+        from mock_rag import MockEliteRAGQuery
+        rag = MockEliteRAGQuery()
+        rag.initialize()
+        logger.info("✅ Mock RAG system initialized successfully")
+        return rag
+    
+    # Real RAG system
     logger.info("Initializing RAG system...")
     try:
+        # Import only when needed (avoids loading torch in mock mode)
+        from query import EliteRAGQuery
+        
         # Determine storage path
-        import os
         if os.path.exists("/workspace/storage"):
             storage_path = "/workspace/storage"
         elif os.path.exists("./storage"):
@@ -278,12 +294,18 @@ def initialize_rag_system():
 
 def render_header():
     """Render application header."""
+    import os
+    
     st.markdown("""
     <div class="main-header animated-fade-in">
         <h1>🔧 DuraFlex Technical Assistant</h1>
         <p>Intelligent Knowledge System • Powered by Advanced AI</p>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Show mock mode indicator
+    if os.getenv('USE_MOCK_RAG', 'false').lower() == 'true':
+        st.warning("🎭 **MOCK MODE ACTIVE** - Using simulated responses for UI development. Set `USE_MOCK_RAG=false` for real RAG system.", icon="⚠️")
 
 
 def render_stats_bar():
@@ -326,6 +348,20 @@ def main_application():
     # Sidebar controls
     with st.sidebar:
         render_user_profile_sidebar(st.session_state['auth_manager'])
+        
+        # Navigation
+        st.markdown("---")
+        st.markdown("### 📂 Navigation")
+        if st.button("💾 View Saved Answers", use_container_width=True):
+            st.session_state['show_saved_answers'] = True
+            st.rerun()
+        
+        if st.button("🔍 Search Interface", use_container_width=True):
+            st.session_state['show_saved_answers'] = False
+            st.rerun()
+        
+        st.markdown("---")
+        
         query_params = render_query_controls()
         render_query_history()
         
@@ -338,7 +374,12 @@ def main_application():
             **Content Types:** Text, Tables, Images
             """)
     
-    # Main content area
+    # Main content area - show saved answers or search interface
+    if st.session_state.get('show_saved_answers', False):
+        from components.feedback_ui import render_saved_answers_page
+        render_saved_answers_page()
+        return  # Exit early, don't show search interface
+    
     query = render_query_input()
     
     # Lazy load models ONLY when first query is made
@@ -391,6 +432,7 @@ def main_application():
                 # Store in session
                 st.session_state['current_response'] = response
                 st.session_state['last_processed_query'] = query
+                st.session_state['feedback_query'] = query  # For feedback system (different key to avoid conflict)
                 
                 logger.info(f"Query processed successfully: {query[:50]}...")
                 
