@@ -84,10 +84,11 @@ def render_answer_tab(response: StructuredResponse):
     st.markdown("---")
     
     # Display answer with nice formatting
+    formatted_answer = response.answer.replace('\n', '<br>')
     st.markdown(f"""
     <div style="background: white; padding: 1.5rem; border-radius: 10px; 
                 box-shadow: 0 2px 8px rgba(0,0,0,0.05); border-left: 4px solid #667eea;">
-        {response.answer.replace('\n', '<br>')}
+        {formatted_answer}
     </div>
     """, unsafe_allow_html=True)
     
