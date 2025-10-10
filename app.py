@@ -432,7 +432,7 @@ def main_application():
                 # Store in session
                 st.session_state['current_response'] = response
                 st.session_state['last_processed_query'] = query
-                st.session_state['current_query'] = query  # For feedback system
+                st.session_state['feedback_query'] = query  # For feedback system (different key to avoid conflict)
                 
                 logger.info(f"Query processed successfully: {query[:50]}...")
                 
