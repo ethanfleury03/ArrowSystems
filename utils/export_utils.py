@@ -39,13 +39,24 @@ def export_to_excel(response: StructuredResponse, query: str) -> BytesIO:
         # Sources sheet
         if response.sources:
             sources_data = []
-            for source in response.sources:
-                sources_data.append({
-                    'ID': source['id'],
-                    'Document': source['name'],
-                    'Pages': source['pages'],
-                    'Content Type': source.get('content_type', 'text')
-                })
+            for idx, source in enumerate(response.sources):
+                # Handle both dict and dataclass sources
+                if hasattr(source, 'file_name'):
+                    # Dataclass (MockSource)
+                    sources_data.append({
+                        'ID': f"[{idx + 1}]",
+                        'Document': source.file_name,
+                        'Pages': str(source.page_number),
+                        'Content Type': source.metadata.get('content_type', 'text')
+                    })
+                else:
+                    # Dict (real source)
+                    sources_data.append({
+                        'ID': source['id'],
+                        'Document': source['name'],
+                        'Pages': source['pages'],
+                        'Content Type': source.get('content_type', 'text')
+                    })
             sources_df = pd.DataFrame(sources_data)
             sources_df.to_excel(writer, sheet_name='Sources', index=False)
         
@@ -99,8 +110,15 @@ def export_to_text(response: StructuredResponse, query: str) -> str:
     output_lines.append("-" * 80)
     output_lines.append("SOURCES:")
     output_lines.append("-" * 80)
-    for source in response.sources:
-        output_lines.append(f"{source['id']} {source['name']} (Pages: {source['pages']})")
+    for idx, source in enumerate(response.sources):
+        # Handle both dict and dataclass sources
+        if hasattr(source, 'file_name'):
+            # Dataclass (MockSource)
+            source_line = f"[{idx + 1}] {source.file_name} (Pages: {source.page_number})"
+        else:
+            # Dict (real source)
+            source_line = f"{source['id']} {source['name']} (Pages: {source['pages']})"
+        output_lines.append(source_line)
     output_lines.append("")
     
     output_lines.append("-" * 80)
