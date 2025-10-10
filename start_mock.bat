@@ -10,7 +10,7 @@ echo No GPU or vector index required!
 echo.
 
 set USE_MOCK_RAG=true
-streamlit run app.py
+streamlit run app.py --server.headless=false
 
 pause
 
