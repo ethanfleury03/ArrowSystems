@@ -181,10 +181,76 @@ def render_referenced_content(response: StructuredResponse):
                 render_extracted_image(source, compact=True)
                 st.markdown("---")
         
-        # Display text sources with page preview link
+        # Display text sources - but also check for tables/images on that page!
         elif content_type == 'text':
-            # Only show first 2 text sources to avoid clutter
-            if idx < 2:
+            # Check if this page has any visual content
+            extracted_dir = get_extracted_content_dir()
+            page_has_visuals = False
+            
+            if extracted_dir:
+                # Check for tables from this page
+                page_tables = list(extracted_dir.glob(f"*_page{page_num}_table*.json"))
+                # Check for images from this page  
+                page_images = list(extracted_dir.glob(f"*_page{page_num}_img*.png"))
+                
+                # Display tables from this page
+                if page_tables and idx < 3:  # Show tables from first 3 sources
+                    has_content = True
+                    page_has_visuals = True
+                    with st.container():
+                        st.markdown(f"**📊 Table from Page {page_num}**")
+                        st.caption(f"From: {source_name}")
+                        try:
+                            with open(page_tables[0]) as f:
+                                table_info = json.load(f)
+                                df = pd.DataFrame(table_info['table_data'])
+                                st.dataframe(df.head(3), use_container_width=True, height=150)
+                                if len(df) > 3:
+                                    st.caption(f"+ {len(df) - 3} more rows")
+                                
+                                # Download
+                                csv = df.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 CSV",
+                                    data=csv,
+                                    file_name=f"table_p{page_num}.csv",
+                                    mime="text/csv",
+                                    key=f"dl_tbl_{idx}_{page_num}"
+                                )
+                        except:
+                            st.caption("Table preview error")
+                        st.markdown("---")
+                
+                # Display images from this page (limit to avoid overload)
+                if page_images and idx < 3:  # Show images from first 3 sources
+                    has_content = True
+                    page_has_visuals = True
+                    with st.container():
+                        st.markdown(f"**🖼️ Image from Page {page_num}**")
+                        st.caption(f"From: {source_name}")
+                        try:
+                            img = Image.open(page_images[0])
+                            st.image(img, use_column_width=True, caption=f"Page {page_num}")
+                            
+                            # Download
+                            buf = BytesIO()
+                            img.save(buf, format='PNG')
+                            st.download_button(
+                                label="📥 PNG",
+                                data=buf.getvalue(),
+                                file_name=f"image_p{page_num}.png",
+                                mime="image/png",
+                                key=f"dl_img_{idx}_{page_num}"
+                            )
+                            
+                            if len(page_images) > 1:
+                                st.caption(f"+ {len(page_images) - 1} more images on this page")
+                        except:
+                            st.caption("Image preview error")
+                        st.markdown("---")
+            
+            # If no visuals found but want to show text preview
+            if not page_has_visuals and idx < 2:
                 has_content = True
                 with st.container():
                     st.markdown(f"**📄 Source [{idx + 1}]**")
