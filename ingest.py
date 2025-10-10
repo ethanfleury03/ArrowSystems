@@ -24,6 +24,7 @@ import fitz  # PyMuPDF
 import pandas as pd
 from PIL import Image
 import numpy as np
+from tqdm import tqdm
 
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, load_index_from_storage, Settings
 from llama_index.core.node_parser import SentenceSplitter
@@ -461,17 +462,26 @@ class TechnicalRAGPipeline:
             logger.info("✅ Index loaded successfully")
             return self.index
         
-        logger.info("📥 Creating new index with optimized chunking and non-text content...")
+        print("\n" + "="*70)
+        print("📥 BUILDING NEW RAG INDEX")
+        print("="*70)
         
-        # Load text documents
+        # Step 1: Load Documents
+        print("\n[Step 1/5] 📄 Loading PDF documents...")
         documents = SimpleDirectoryReader(data_dir).load_data()
+        print(f"   ✅ Loaded {len(documents)} PDF documents")
         logger.info(f"Loaded {len(documents)} text documents")
         
-        # Process non-text content
+        # Step 2: Extract Non-Text Content
+        print("\n[Step 2/5] 🖼️  Extracting tables, images, and captions...")
+        print("   This may take a few minutes...")
         tables, images, captions = self.process_non_text_content(data_dir)
+        print(f"   ✅ Extracted {len(tables)} tables, {len(images)} images, {len(captions)} captions")
         
-        # Create non-text nodes
+        # Step 3: Create Non-Text Nodes
+        print("\n[Step 3/5] 📊 Creating searchable nodes from extracted content...")
         non_text_nodes = self.create_non_text_nodes(tables, images, captions)
+        print(f"   ✅ Created {len(non_text_nodes)} non-text nodes")
         logger.info(f"Created {len(non_text_nodes)} non-text nodes")
         
         # Optimized text splitter for technical documents
@@ -484,31 +494,81 @@ class TechnicalRAGPipeline:
             include_metadata=True
         )
         
-        # Create index with text documents
+        # Step 4: Create Vector Embeddings (LONGEST STEP)
+        print("\n[Step 4/5] 🧠 Generating embeddings and building vector index...")
+        print(f"   - Chunk size: {chunk_size} characters")
+        print(f"   - Chunk overlap: {chunk_overlap} characters")
+        print(f"   - Processing {len(documents)} documents...")
+        print(f"   - This is the LONGEST step (embedding generation)")
+        print(f"   - Expected time: 5-15 minutes on GPU, 30-60 minutes on CPU")
+        print(f"   - Watch for progress below...")
+        print("")
+        
+        # Record start time
+        import time
+        start_time = time.time()
+        
+        # Create index with text documents (with progress bar)
         if storage_context:
             self.index = VectorStoreIndex.from_documents(
                 documents,
                 transformations=[text_splitter],
-                storage_context=storage_context
+                storage_context=storage_context,
+                show_progress=True  # Built-in LlamaIndex progress bar!
             )
         else:
             self.index = VectorStoreIndex.from_documents(
                 documents,
-                transformations=[text_splitter]
+                transformations=[text_splitter],
+                show_progress=True  # Built-in LlamaIndex progress bar!
             )
         
-        # Add non-text nodes to the index
+        elapsed = time.time() - start_time
+        print(f"\n   ✅ Vector index created in {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+        print(f"   ⚡ Processing speed: {len(documents) / elapsed:.2f} docs/sec")
+        
+        # Step 5: Add Non-Text Nodes
         if non_text_nodes:
+            print(f"\n[Step 5/5] 📎 Adding {len(non_text_nodes)} non-text items to index...")
             logger.info("📊 Adding non-text content to index...")
-            for node in non_text_nodes:
+            
+            # Progress bar for non-text nodes
+            for node in tqdm(non_text_nodes, 
+                           desc="   Adding items", 
+                           unit="item",
+                           ncols=80,
+                           bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'):
                 self.index.insert_nodes([node])
+            
+            print(f"   ✅ Non-text content added to index")
+        else:
+            print(f"\n[Step 5/5] No non-text content to add")
         
         # Persist the index (only for local storage)
+        print(f"\n💾 Saving index to disk...")
         if not use_qdrant:
             self.index.storage_context.persist(persist_dir=storage_dir)
+            print(f"   ✅ Index saved to: {storage_dir}")
             logger.info("✅ Index created and saved locally")
         else:
+            print(f"   ✅ Index saved to: Qdrant")
             logger.info("✅ Index created and saved to Qdrant")
+        
+        # Final summary
+        total_time = time.time() - start_time
+        estimated_chunks = len(documents) * 10  # Rough estimate
+        print("\n" + "="*70)
+        print("✅ INGESTION COMPLETE!")
+        print("="*70)
+        print(f"📊 Documents processed: {len(documents)}")
+        print(f"📊 Non-text items extracted: {len(non_text_nodes)}")
+        print(f"📊 Estimated total chunks: ~{estimated_chunks}")
+        print(f"⏱️  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
+        if not use_qdrant:
+            print(f"📁 Storage location: {storage_dir}")
+        print(f"📂 Extracted content: extracted_content/")
+        print(f"🔍 Ready to query!")
+        print("="*70 + "\n")
         
         return self.index
     
