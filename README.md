@@ -59,6 +59,34 @@ Then open http://localhost:8501 and login with:
 - Username: `admin`
 - Password: `admin123`
 
+### 🎭 UI Development Mode (No GPU Required)
+
+For UI development without needing a GPU or vector index:
+
+```bash
+# Windows
+start_mock.bat
+
+# Linux/Mac
+chmod +x start_mock.sh
+./start_mock.sh
+```
+
+**What is Mock Mode?**
+- ✅ Instant startup (no model downloads)
+- ✅ Fast responses (~0.5 seconds)
+- ✅ No GPU or vector index needed
+- ✅ Perfect for UI development and testing
+- ⚠️ Returns simulated responses (not real knowledge base)
+
+**When to use:**
+- Developing UI features
+- Testing layouts and styling
+- Working on frontend without backend access
+- Rapid iteration on user experience
+
+**Switch to real mode:** Set `USE_MOCK_RAG=false` or use `start.bat`/`start.sh`
+
 ### Command Line Interface
 
 #### Installation
