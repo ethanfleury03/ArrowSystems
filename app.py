@@ -348,6 +348,20 @@ def main_application():
     # Sidebar controls
     with st.sidebar:
         render_user_profile_sidebar(st.session_state['auth_manager'])
+        
+        # Navigation
+        st.markdown("---")
+        st.markdown("### 📂 Navigation")
+        if st.button("💾 View Saved Answers", use_container_width=True):
+            st.session_state['show_saved_answers'] = True
+            st.rerun()
+        
+        if st.button("🔍 Search Interface", use_container_width=True):
+            st.session_state['show_saved_answers'] = False
+            st.rerun()
+        
+        st.markdown("---")
+        
         query_params = render_query_controls()
         render_query_history()
         
@@ -360,7 +374,12 @@ def main_application():
             **Content Types:** Text, Tables, Images
             """)
     
-    # Main content area
+    # Main content area - show saved answers or search interface
+    if st.session_state.get('show_saved_answers', False):
+        from components.feedback_ui import render_saved_answers_page
+        render_saved_answers_page()
+        return  # Exit early, don't show search interface
+    
     query = render_query_input()
     
     # Lazy load models ONLY when first query is made
@@ -413,6 +432,7 @@ def main_application():
                 # Store in session
                 st.session_state['current_response'] = response
                 st.session_state['last_processed_query'] = query
+                st.session_state['current_query'] = query  # For feedback system
                 
                 logger.info(f"Query processed successfully: {query[:50]}...")
                 
