@@ -69,7 +69,7 @@ def render_intent_badge(intent_type: str, confidence: float):
 
 
 def render_answer_tab(response: StructuredResponse):
-    """Render the answer tab with formatted response."""
+    """Render the answer tab with formatted response and referenced content side-by-side."""
     st.markdown("### 💡 Answer")
     
     # Show intent and confidence
@@ -83,32 +83,107 @@ def render_answer_tab(response: StructuredResponse):
     
     st.markdown("---")
     
-    # Display answer with nice formatting
-    formatted_answer = response.answer.replace('\n', '<br>')
-    st.markdown(f"""
-    <div style="background: white; padding: 1.5rem; border-radius: 10px; 
-                box-shadow: 0 2px 8px rgba(0,0,0,0.05); border-left: 4px solid #667eea;">
-        {formatted_answer}
+    # SIDE-BY-SIDE LAYOUT: Answer on left, Referenced content on right
+    answer_col, content_col = st.columns([1.5, 1])
+    
+    with answer_col:
+        # Display answer with nice formatting
+        formatted_answer = response.answer.replace('\n', '<br>')
+        st.markdown(f"""
+        <div style="background: white; padding: 1.5rem; border-radius: 10px; 
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.05); border-left: 4px solid #667eea;">
+            {formatted_answer}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("")
+        
+        # Feedback buttons
+        st.markdown("**Was this answer helpful?**")
+        from components.feedback_ui import render_feedback_buttons
+        render_feedback_buttons(response, st.session_state.get('feedback_query', ''), 
+                               st.session_state.get('username', 'Unknown'))
+        
+        # Keywords
+        if response.intent.keywords:
+            st.markdown("#### 🔑 Key Terms:")
+            keyword_badges = " ".join([
+                f"<span style='background: #e9ecef; padding: 0.3rem 0.8rem; border-radius: 15px; "
+                f"margin: 0.2rem; display: inline-block; font-size: 0.9rem;'>{kw}</span>"
+                for kw in response.intent.keywords[:10]
+            ])
+            st.markdown(keyword_badges, unsafe_allow_html=True)
+    
+    with content_col:
+        # Display referenced content (tables, images, charts)
+        render_referenced_content(response)
+
+
+def render_referenced_content(response: StructuredResponse):
+    """Render tables, images, and charts referenced in the answer (right column)."""
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                padding: 1rem; border-radius: 10px; margin-bottom: 1rem;">
+        <h3 style="color: white; margin: 0; font-size: 1.1rem;">📎 Referenced Content</h3>
+        <p style="color: rgba(255,255,255,0.9); margin: 0.3rem 0 0 0; font-size: 0.85rem;">
+            Visual content from cited sources
+        </p>
     </div>
     """, unsafe_allow_html=True)
     
-    st.markdown("---")
+    has_content = False
     
-    # Feedback buttons
-    st.markdown("**Was this answer helpful?**")
-    from components.feedback_ui import render_feedback_buttons
-    render_feedback_buttons(response, st.session_state.get('feedback_query', ''), 
-                           st.session_state.get('username', 'Unknown'))
+    # Collect visual content from top sources
+    for idx, source in enumerate(response.sources[:5]):  # Top 5 sources
+        # Handle both dict and dataclass sources
+        if hasattr(source, 'metadata'):
+            # Dataclass (MockSource)
+            content_type = source.metadata.get('content_type', 'text')
+            source_name = source.file_name
+            page_num = source.page_number
+        else:
+            # Dict (real source)
+            content_type = source.get('content_type', 'text')
+            source_name = source.get('name', 'Unknown')
+            page_num = source.get('page_number', 1)
+        
+        # Display tables
+        if content_type == 'table':
+            has_content = True
+            with st.container():
+                st.markdown(f"**📊 Table [{idx + 1}]**")
+                st.caption(f"From: {source_name} (p.{page_num})")
+                render_extracted_table(source, compact=True)
+                st.markdown("---")
+        
+        # Display images
+        elif content_type == 'image':
+            has_content = True
+            with st.container():
+                st.markdown(f"**🖼️ Image [{idx + 1}]**")
+                st.caption(f"From: {source_name} (p.{page_num})")
+                render_extracted_image(source, compact=True)
+                st.markdown("---")
+        
+        # Display text sources with page preview link
+        elif content_type == 'text':
+            # Only show first 2 text sources to avoid clutter
+            if idx < 2:
+                has_content = True
+                with st.container():
+                    st.markdown(f"**📄 Source [{idx + 1}]**")
+                    st.caption(f"{source_name}")
+                    st.caption(f"Page {page_num}")
+                    
+                    # Show snippet if available
+                    if hasattr(source, 'content'):
+                        snippet = source.content[:200] + "..." if len(source.content) > 200 else source.content
+                        st.text_area(f"Preview", snippet, height=100, disabled=True, key=f"preview_{idx}")
+                    
+                    st.markdown("---")
     
-    # Keywords
-    if response.intent.keywords:
-        st.markdown("#### 🔑 Key Terms:")
-        keyword_badges = " ".join([
-            f"<span style='background: #e9ecef; padding: 0.3rem 0.8rem; border-radius: 15px; "
-            f"margin: 0.2rem; display: inline-block; font-size: 0.9rem;'>{kw}</span>"
-            for kw in response.intent.keywords[:10]
-        ])
-        st.markdown(keyword_badges, unsafe_allow_html=True)
+    if not has_content:
+        st.info("No visual content found in sources.\n\nThe answer is based on text documents.")
 
 
 def render_sources_tab(response: StructuredResponse):
@@ -182,20 +257,32 @@ def render_sources_tab(response: StructuredResponse):
                 render_extracted_image(source)
 
 
-def render_extracted_table(source: Dict):
-    """Render extracted table data."""
-    st.markdown("#### 📊 Table Data:")
+def render_extracted_table(source: Dict, compact=False):
+    """Render extracted table data. Compact mode for side panel."""
+    if not compact:
+        st.markdown("#### 📊 Table Data:")
     
     # Try to load the table JSON
     try:
-        source_path = source.get('source_path', '')
-        table_json = source.get('metadata', {}).get('table_json', '')
+        # Handle both dict and dataclass sources  
+        if hasattr(source, 'metadata'):
+            table_json = source.metadata.get('table_json', '')
+        else:
+            source_path = source.get('source_path', '')
+            table_json = source.get('metadata', {}).get('table_json', '')
         
         if table_json:
             # Parse and display
             table_data = json.loads(table_json)
             df = pd.DataFrame(table_data)
-            st.dataframe(df, use_container_width=True)
+            
+            # Compact mode: show preview
+            if compact:
+                st.dataframe(df.head(3), use_container_width=True, height=150)
+                if len(df) > 3:
+                    st.caption(f"+ {len(df) - 3} more rows")
+            else:
+                st.dataframe(df, use_container_width=True)
         else:
             # Try to find the extracted table file
             extracted_dir = Path("extracted_content")
@@ -227,37 +314,50 @@ def render_extracted_table(source: Dict):
         st.warning(f"Could not display table: {e}")
 
 
-def render_extracted_image(source: Dict):
-    """Render extracted image."""
-    st.markdown("#### 🖼️ Image:")
+def render_extracted_image(source: Dict, compact=False):
+    """Render extracted image. Compact mode for side panel."""
+    if not compact:
+        st.markdown("#### 🖼️ Image:")
     
     try:
+        # Handle both dict and dataclass sources
+        if hasattr(source, 'file_name'):
+            source_name = Path(source.file_name).stem
+            page_num = source.page_number
+        else:
+            source_name = Path(source['name']).stem
+            page_num = source.get('metadata', {}).get('page_number', 1)
+        
         # Try to find the extracted image file
         extracted_dir = Path("extracted_content")
         if extracted_dir.exists():
-            source_name = Path(source['name']).stem
-            page_num = source.get('metadata', {}).get('page_number', 1)
             img_files = list(extracted_dir.glob(f"{source_name}_page{page_num}_img*.png"))
             
             if img_files:
                 img = Image.open(img_files[0])
-                st.image(img, use_column_width=True, caption=source.get('caption', 'Extracted image'))
+                
+                # Compact mode: smaller preview
+                if compact:
+                    st.image(img, use_column_width=True, caption=f"Page {page_num}")
+                else:
+                    st.image(img, use_column_width=True, caption=source.get('caption', 'Extracted image'))
                 
                 # Download button
                 buf = BytesIO()
                 img.save(buf, format='PNG')
                 st.download_button(
-                    label="📥 Download Image",
+                    label="📥 PNG" if compact else "📥 Download Image",
                     data=buf.getvalue(),
-                    file_name=f"{source_name}_image.png",
-                    mime="image/png"
+                    file_name=f"image_p{page_num}.png",
+                    mime="image/png",
+                    key=f"download_img_{hash(source_name)}_{page_num}"
                 )
             else:
-                st.info("Image file not found in extracted content.")
+                st.caption("🖼️ Image preview not available")
         else:
-            st.info("Extracted content directory not found.")
+            st.caption("💡 Run ingestion to extract images")
     except Exception as e:
-        st.warning(f"Could not display image: {e}")
+        st.caption(f"Image preview unavailable")
 
 
 def render_reasoning_tab(response: StructuredResponse):
