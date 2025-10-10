@@ -253,10 +253,23 @@ def load_custom_css():
 @st.cache_resource(show_spinner=False)
 def initialize_rag_system():
     """Initialize RAG system (cached for performance)."""
+    import os
+    
+    # Check if mock mode is enabled
+    use_mock = os.getenv('USE_MOCK_RAG', 'false').lower() == 'true'
+    
+    if use_mock:
+        logger.info("🎭 MOCK MODE ENABLED - Using mock RAG system for UI development")
+        from mock_rag import MockEliteRAGQuery
+        rag = MockEliteRAGQuery()
+        rag.initialize()
+        logger.info("✅ Mock RAG system initialized successfully")
+        return rag
+    
+    # Real RAG system
     logger.info("Initializing RAG system...")
     try:
         # Determine storage path
-        import os
         if os.path.exists("/workspace/storage"):
             storage_path = "/workspace/storage"
         elif os.path.exists("./storage"):
@@ -278,12 +291,18 @@ def initialize_rag_system():
 
 def render_header():
     """Render application header."""
+    import os
+    
     st.markdown("""
     <div class="main-header animated-fade-in">
         <h1>🔧 DuraFlex Technical Assistant</h1>
         <p>Intelligent Knowledge System • Powered by Advanced AI</p>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Show mock mode indicator
+    if os.getenv('USE_MOCK_RAG', 'false').lower() == 'true':
+        st.warning("🎭 **MOCK MODE ACTIVE** - Using simulated responses for UI development. Set `USE_MOCK_RAG=false` for real RAG system.", icon="⚠️")
 
 
 def render_stats_bar():
