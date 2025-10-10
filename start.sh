@@ -82,11 +82,27 @@ if [ "$IS_RUNPOD" = true ]; then
     echo "  ✅ LlamaIndex (system)" 
     echo "  ✅ Sentence-Transformers (system)"
     
-    # Only check Streamlit
+    # Check Streamlit
     if check_package streamlit; then
         echo "  ✅ Streamlit"
     else
         echo "  ❌ Streamlit not found"
+        MISSING_UI=true
+    fi
+    
+    # Check PyMuPDF (critical for ingestion)
+    if check_package fitz; then
+        echo "  ✅ PyMuPDF"
+    else
+        echo "  ❌ PyMuPDF not found"
+        MISSING_UI=true
+    fi
+    
+    # Check rank-bm25
+    if check_package rank_bm25; then
+        echo "  ✅ rank-bm25"
+    else
+        echo "  ❌ rank-bm25 not found"
         MISSING_UI=true
     fi
 else
