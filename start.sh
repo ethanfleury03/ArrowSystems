@@ -354,13 +354,14 @@ fi
 if [ "$IS_RUNPOD" = true ]; then
     # RunPod - bind to all interfaces
     # Use python -m streamlit to ensure it's found
-    # Note: enableCORS must be true for XSRF protection
+    # Note: Disable CORS and XSRF for RunPod proxy compatibility (prevents WebSocket errors)
     python -m streamlit run app.py \
         --server.port=$PORT \
         --server.address=0.0.0.0 \
         --server.headless=true \
-        --server.enableCORS=true \
-        --server.enableXsrfProtection=true
+        --server.enableCORS=false \
+        --server.enableXsrfProtection=false \
+        --server.enableWebsocketCompression=false
 else
     # Local - standard settings
     python -m streamlit run app.py --server.port=$PORT
