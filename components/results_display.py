@@ -14,6 +14,22 @@ from typing import Dict, Any, List
 from orchestrator import StructuredResponse
 
 
+def get_extracted_content_dir():
+    """Get the extracted content directory, checking multiple locations."""
+    # Check both relative and absolute paths (for RunPod compatibility)
+    possible_paths = [
+        Path("extracted_content"),
+        Path("./extracted_content"),
+        Path("/workspace/extracted_content"),
+    ]
+    
+    for path in possible_paths:
+        if path.exists():
+            return path
+    
+    return None
+
+
 def render_confidence_meter(confidence: float):
     """Render a visual confidence meter."""
     # Determine color based on confidence
@@ -285,8 +301,8 @@ def render_extracted_table(source: Dict, compact=False):
                 st.dataframe(df, use_container_width=True)
         else:
             # Try to find the extracted table file
-            extracted_dir = Path("extracted_content")
-            if extracted_dir.exists():
+            extracted_dir = get_extracted_content_dir()
+            if extracted_dir:
                 # Look for matching table file
                 source_name = Path(source['name']).stem
                 page_num = source.get('page_number', 1)
@@ -329,8 +345,8 @@ def render_extracted_image(source: Dict, compact=False):
             page_num = source.get('metadata', {}).get('page_number', 1)
         
         # Try to find the extracted image file
-        extracted_dir = Path("extracted_content")
-        if extracted_dir.exists():
+        extracted_dir = get_extracted_content_dir()
+        if extracted_dir:
             img_files = list(extracted_dir.glob(f"{source_name}_page{page_num}_img*.png"))
             
             if img_files:
