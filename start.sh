@@ -124,51 +124,39 @@ echo ""
 
 # Install missing dependencies with smart handling
 if [ "$MISSING_CORE" = true ]; then
-    echo "📥 Installing core ML dependencies..."
-    echo "   Using fast mirror and ignoring system packages..."
-    echo "   Estimated time: 3-5 minutes with fast mirror"
+    echo "📥 Installing all dependencies from requirements.txt..."
+    echo "   This may take a few minutes..."
     echo ""
     
     pip install --upgrade pip -q
-    
-    # Install with ignore-installed for problematic system packages
-    echo "   Installing packages (progress hidden for clarity)..."
     
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install to user directory to avoid system conflicts
         pip install -r requirements.txt \
             --user \
+            --upgrade-strategy only-if-needed \
             --ignore-installed cryptography \
-            -i https://pypi.tuna.tsinghua.edu.cn/simple \
-            --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+            --no-warn-script-location
     else
         # On local: Normal install in venv
-        pip install -r requirements.txt \
-            -i https://pypi.tuna.tsinghua.edu.cn/simple \
-            --quiet --no-warn-script-location 2>&1 | grep -E "(Successfully installed|ERROR)" || true
+        pip install -r requirements.txt
     fi
     
     echo ""
-    echo "✅ Core dependencies installed"
+    echo "✅ All dependencies installed"
     echo ""
 elif [ "$MISSING_UI" = true ]; then
-    echo "📥 Installing UI dependencies..."
+    echo "📥 Installing all dependencies from requirements.txt..."
     echo "   This will show progress so you can see what's happening..."
     echo ""
     
     pip install --upgrade pip -q
     
-    # Install only lightweight UI packages
-    # Show progress, use default PyPI (Tsinghua mirror sometimes hangs)
-    echo "   Installing: streamlit, plotly, and UI tools..."
-    echo ""
-    
     if [ "$IS_RUNPOD" = true ]; then
-        # On RunPod: Install ONLY UI packages
+        # On RunPod: Install all requirements
         # Use --upgrade-strategy only-if-needed to skip reinstalling satisfied dependencies
-        echo "   Note: Skipping already-satisfied dependencies (numpy, pandas, etc.)"
-        pip install streamlit streamlit-authenticator plotly pydeck \
-                    reportlab openpyxl python-docx python-dotenv watchdog \
+        echo "   Note: Skipping already-satisfied dependencies (PyTorch, Transformers, etc.)"
+        pip install -r requirements.txt \
                     --user \
                     --upgrade-strategy only-if-needed \
                     --ignore-installed cryptography \
@@ -176,17 +164,15 @@ elif [ "$MISSING_UI" = true ]; then
         
         INSTALL_STATUS=$?
     else
-        # On local: Install everything including data packages
-        pip install streamlit streamlit-authenticator plotly pydeck \
-                    reportlab openpyxl python-docx python-dotenv watchdog \
-                    PyMuPDF pandas Pillow pyyaml rank-bm25 qdrant-client
+        # On local: Install everything from requirements.txt
+        pip install -r requirements.txt
         
         INSTALL_STATUS=$?
     fi
     
     echo ""
     if [ $INSTALL_STATUS -eq 0 ]; then
-        echo "✅ UI dependencies installed successfully"
+        echo "✅ All dependencies installed successfully"
     else
         echo "⚠️  Installation had issues, but may have partially succeeded"
         echo "   Attempting to continue..."
