@@ -30,6 +30,52 @@ def get_extracted_content_dir():
     return None
 
 
+def render_source_feedback_buttons(source, source_id, idx):
+    """Render thumbs up/down buttons for individual sources."""
+    # Generate unique key for this source
+    if hasattr(source, 'file_name'):
+        source_key = f"{source.file_name}_{source.page_number}"
+    else:
+        source_key = f"{source.get('name', 'unknown')}_{source.get('page_number', 0)}"
+    
+    # Check if already rated (using session state for now)
+    if 'source_ratings' not in st.session_state:
+        st.session_state['source_ratings'] = {}
+    
+    rating_key = f"rating_{source_key}"
+    existing_rating = st.session_state['source_ratings'].get(rating_key)
+    
+    col1, col2, col3 = st.columns([1, 1, 6])
+    
+    with col1:
+        if existing_rating == 'helpful':
+            st.button("👍", disabled=True, key=f"src_up_{idx}_{hash(source_key)}", 
+                     help="Marked as helpful")
+        else:
+            if st.button("👍", key=f"src_up_{idx}_{hash(source_key)}", 
+                        help="Mark source as helpful"):
+                st.session_state['source_ratings'][rating_key] = 'helpful'
+                st.success("✅ Source marked helpful!")
+                st.rerun()
+    
+    with col2:
+        if existing_rating == 'unhelpful':
+            st.button("👎", disabled=True, key=f"src_down_{idx}_{hash(source_key)}", 
+                     help="Marked as unhelpful")
+        else:
+            if st.button("👎", key=f"src_down_{idx}_{hash(source_key)}", 
+                        help="Mark source as unhelpful"):
+                st.session_state['source_ratings'][rating_key] = 'unhelpful'
+                st.warning("📝 Source marked unhelpful")
+                st.rerun()
+    
+    with col3:
+        if existing_rating == 'helpful':
+            st.caption("✅ Helpful source")
+        elif existing_rating == 'unhelpful':
+            st.caption("⚠️ Unhelpful source")
+
+
 def render_confidence_meter(confidence: float):
     """Render a visual confidence meter."""
     # Determine color based on confidence
@@ -149,6 +195,11 @@ def render_referenced_content(response: StructuredResponse):
     
     has_content = False
     
+    # Track already displayed content to avoid duplicates
+    displayed_pages = set()  # Track (filename, page_num) pairs
+    displayed_tables = set()  # Track table file paths
+    displayed_images = set()  # Track image file paths
+    
     # Collect visual content from top sources
     for idx, source in enumerate(response.sources[:5]):  # Top 5 sources
         # Handle both dict and dataclass sources
@@ -193,61 +244,72 @@ def render_referenced_content(response: StructuredResponse):
                 # Check for images from this page  
                 page_images = list(extracted_dir.glob(f"*_page{page_num}_img*.png"))
                 
-                # Display tables from this page
-                if page_tables and idx < 3:  # Show tables from first 3 sources
-                    has_content = True
-                    page_has_visuals = True
-                    with st.container():
-                        st.markdown(f"**📊 Table from Page {page_num}**")
-                        st.caption(f"From: {source_name}")
-                        try:
-                            with open(page_tables[0]) as f:
-                                table_info = json.load(f)
-                                df = pd.DataFrame(table_info['table_data'])
-                                st.dataframe(df.head(3), use_container_width=True, height=150)
-                                if len(df) > 3:
-                                    st.caption(f"+ {len(df) - 3} more rows")
+                # Display tables from this page (skip if already displayed)
+                if page_tables and idx < 5:  # Check up to 5 sources
+                    table_file = str(page_tables[0])
+                    if table_file not in displayed_tables:
+                        displayed_tables.add(table_file)
+                        has_content = True
+                        page_has_visuals = True
+                        with st.container():
+                            st.markdown(f"**📊 Table from Page {page_num}**")
+                            st.caption(f"From: {source_name}")
+                            try:
+                                with open(table_file) as f:
+                                    table_info = json.load(f)
+                                    df = pd.DataFrame(table_info['table_data'])
+                                    
+                                    # Display table preview
+                                    if not df.empty:
+                                        st.dataframe(df.head(3), use_container_width=True, height=150)
+                                        if len(df) > 3:
+                                            st.caption(f"+ {len(df) - 3} more rows")
+                                    else:
+                                        st.caption("Table is empty")
+                                    
+                                    # Download
+                                    csv = df.to_csv(index=False)
+                                    st.download_button(
+                                        label="📥 CSV",
+                                        data=csv,
+                                        file_name=f"table_p{page_num}.csv",
+                                        mime="text/csv",
+                                        key=f"dl_tbl_{hash(table_file)}"
+                                    )
+                            except Exception as e:
+                                st.caption(f"Table preview error")
+                            st.markdown("---")
+                
+                # Display images from this page (skip if already displayed)
+                if page_images and idx < 5:  # Check up to 5 sources
+                    img_file = str(page_images[0])
+                    if img_file not in displayed_images:
+                        displayed_images.add(img_file)
+                        has_content = True
+                        page_has_visuals = True
+                        with st.container():
+                            st.markdown(f"**🖼️ Image from Page {page_num}**")
+                            st.caption(f"From: {source_name}")
+                            try:
+                                img = Image.open(img_file)
+                                st.image(img, use_container_width=True, caption=f"Page {page_num}")
                                 
                                 # Download
-                                csv = df.to_csv(index=False)
+                                buf = BytesIO()
+                                img.save(buf, format='PNG')
                                 st.download_button(
-                                    label="📥 CSV",
-                                    data=csv,
-                                    file_name=f"table_p{page_num}.csv",
-                                    mime="text/csv",
-                                    key=f"dl_tbl_{idx}_{page_num}"
+                                    label="📥 PNG",
+                                    data=buf.getvalue(),
+                                    file_name=f"image_p{page_num}.png",
+                                    mime="image/png",
+                                    key=f"dl_img_{hash(img_file)}"
                                 )
-                        except:
-                            st.caption("Table preview error")
-                        st.markdown("---")
-                
-                # Display images from this page (limit to avoid overload)
-                if page_images and idx < 3:  # Show images from first 3 sources
-                    has_content = True
-                    page_has_visuals = True
-                    with st.container():
-                        st.markdown(f"**🖼️ Image from Page {page_num}**")
-                        st.caption(f"From: {source_name}")
-                        try:
-                            img = Image.open(page_images[0])
-                            st.image(img, use_column_width=True, caption=f"Page {page_num}")
-                            
-                            # Download
-                            buf = BytesIO()
-                            img.save(buf, format='PNG')
-                            st.download_button(
-                                label="📥 PNG",
-                                data=buf.getvalue(),
-                                file_name=f"image_p{page_num}.png",
-                                mime="image/png",
-                                key=f"dl_img_{idx}_{page_num}"
-                            )
-                            
-                            if len(page_images) > 1:
-                                st.caption(f"+ {len(page_images) - 1} more images on this page")
-                        except:
-                            st.caption("Image preview error")
-                        st.markdown("---")
+                                
+                                if len(page_images) > 1:
+                                    st.caption(f"+ {len(page_images) - 1} more images on this page")
+                            except Exception as e:
+                                st.caption(f"Image preview error")
+                            st.markdown("---")
             
             # If no visuals found but want to show text preview
             if not page_has_visuals and idx < 2:
@@ -337,6 +399,11 @@ def render_sources_tab(response: StructuredResponse):
                 render_extracted_table(source)
             elif content_type == 'image':
                 render_extracted_image(source)
+            
+            # Feedback buttons for individual source
+            st.markdown("---")
+            st.markdown("**Was this source helpful?**")
+            render_source_feedback_buttons(source, source_id, idx)
 
 
 def render_extracted_table(source: Dict, compact=False):
@@ -451,9 +518,9 @@ def render_extracted_image(source: Dict, compact=False):
                 
                 # Compact mode: smaller preview
                 if compact:
-                    st.image(img, use_column_width=True, caption=f"Page {page_num}")
+                    st.image(img, use_container_width=True, caption=f"Page {page_num}")
                 else:
-                    st.image(img, use_column_width=True, caption=source.get('caption', 'Extracted image'))
+                    st.image(img, use_container_width=True, caption=source.get('caption', 'Extracted image'))
                 
                 # Download button
                 buf = BytesIO()
