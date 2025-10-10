@@ -60,7 +60,7 @@ class MockEliteRAGQuery:
         
     def query(
         self, 
-        query_text: str, 
+        query: str, 
         top_k: int = 10, 
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
@@ -72,19 +72,19 @@ class MockEliteRAGQuery:
         time.sleep(random.uniform(0.3, 0.7))
         
         # Determine intent based on keywords
-        intent_type = self._classify_intent(query_text)
+        intent_type = self._classify_intent(query)
         
         # Generate contextual answer
-        answer = self._generate_answer(query_text, intent_type)
+        answer = self._generate_answer(query, intent_type)
         
         # Create mock sources
-        sources = self._generate_sources(query_text, top_k, metadata_filters)
+        sources = self._generate_sources(query, top_k, metadata_filters)
         
         # Calculate confidence
         confidence = random.uniform(0.75, 0.95)
         
         # Generate reasoning
-        reasoning = self._generate_reasoning(query_text, intent_type, top_k, alpha, len(sources))
+        reasoning = self._generate_reasoning(query, intent_type, top_k, alpha, len(sources))
         
         return MockResponse(
             answer=answer,
@@ -93,8 +93,8 @@ class MockEliteRAGQuery:
             intent=MockIntent(
                 intent_type=intent_type,
                 confidence=random.uniform(0.80, 0.95),
-                keywords=self._extract_keywords(query_text),
-                requires_subqueries=len(query_text.split()) > 10
+                keywords=self._extract_keywords(query),
+                requires_subqueries=len(query.split()) > 10
             ),
             reasoning=reasoning
         )
