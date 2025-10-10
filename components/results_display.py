@@ -92,6 +92,14 @@ def render_answer_tab(response: StructuredResponse):
     </div>
     """, unsafe_allow_html=True)
     
+    st.markdown("---")
+    
+    # Feedback buttons
+    st.markdown("**Was this answer helpful?**")
+    from components.feedback_ui import render_feedback_buttons
+    render_feedback_buttons(response, st.session_state.get('current_query', ''), 
+                           st.session_state.get('username', 'Unknown'))
+    
     # Keywords
     if response.intent.keywords:
         st.markdown("#### 🔑 Key Terms:")
