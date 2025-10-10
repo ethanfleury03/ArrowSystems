@@ -303,10 +303,28 @@ def render_extracted_table(source: Dict, compact=False):
             # Try to find the extracted table file
             extracted_dir = get_extracted_content_dir()
             if extracted_dir:
-                # Look for matching table file
-                source_name = Path(source['name']).stem
+                # Handle both dict and dataclass sources
+                if hasattr(source, 'file_name'):
+                    source_name = source.file_name
+                else:
+                    source_name = source.get('name', 'Unknown')
+                
                 page_num = source.get('page_number', 1)
-                table_files = list(extracted_dir.glob(f"{source_name}_page{page_num}_table*.json"))
+                
+                # Try multiple matching patterns (exact match, stem match, fuzzy match)
+                source_stem = Path(source_name).stem
+                
+                # Pattern 1: Exact stem match
+                table_files = list(extracted_dir.glob(f"{source_stem}_page{page_num}_table*.json"))
+                
+                # Pattern 2: If no match, try wildcard on page
+                if not table_files:
+                    table_files = list(extracted_dir.glob(f"*_page{page_num}_table*.json"))
+                
+                # Pattern 3: Get first few words of filename for partial match
+                if not table_files and len(source_stem.split()) > 2:
+                    first_words = "_".join(source_stem.split()[:3])
+                    table_files = list(extracted_dir.glob(f"{first_words}*_page{page_num}_table*.json"))
                 
                 if table_files:
                     with open(table_files[0]) as f:
@@ -347,7 +365,20 @@ def render_extracted_image(source: Dict, compact=False):
         # Try to find the extracted image file
         extracted_dir = get_extracted_content_dir()
         if extracted_dir:
-            img_files = list(extracted_dir.glob(f"{source_name}_page{page_num}_img*.png"))
+            # Try multiple matching patterns
+            source_stem = Path(source_name).stem
+            
+            # Pattern 1: Exact stem match
+            img_files = list(extracted_dir.glob(f"{source_stem}_page{page_num}_img*.png"))
+            
+            # Pattern 2: If no match, try wildcard on page (show ANY image from that page)
+            if not img_files:
+                img_files = list(extracted_dir.glob(f"*_page{page_num}_img*.png"))
+            
+            # Pattern 3: Partial filename match
+            if not img_files and len(source_stem.split()) > 2:
+                first_words = "_".join(source_stem.split()[:3])
+                img_files = list(extracted_dir.glob(f"{first_words}*_page{page_num}_img*.png"))
             
             if img_files:
                 img = Image.open(img_files[0])
