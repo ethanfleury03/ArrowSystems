@@ -292,13 +292,30 @@ def render_context_tab(response: StructuredResponse):
     # This would show the actual retrieved chunks
     # For now, we'll show source information
     for idx, source in enumerate(response.sources):
-        with st.expander(f"Chunk {idx+1}: {source['name']}", expanded=False):
-            st.markdown(f"**Source:** {source['name']}")
-            st.markdown(f"**Pages:** {source['pages']}")
-            st.markdown(f"**Type:** {source.get('content_type', 'text')}")
+        # Handle both dict and dataclass sources
+        if hasattr(source, 'file_name'):
+            # Dataclass (MockSource)
+            source_name = source.file_name
+            source_pages = str(source.page_number)
+            content_type = source.metadata.get('content_type', 'text')
+            source_content = source.content
+        else:
+            # Dict (real source)
+            source_name = source['name']
+            source_pages = source['pages']
+            content_type = source.get('content_type', 'text')
+            source_content = "Full chunk content would be displayed here..."
             
-            # In a real implementation, you'd show the actual chunk text here
-            st.caption("Full chunk content would be displayed here...")
+        with st.expander(f"Chunk {idx+1}: {source_name}", expanded=False):
+            st.markdown(f"**Source:** {source_name}")
+            st.markdown(f"**Pages:** {source_pages}")
+            st.markdown(f"**Type:** {content_type}")
+            
+            # Show content if available
+            if hasattr(source, 'content'):
+                st.text_area("Content", source_content, height=150, disabled=True)
+            else:
+                st.caption(source_content)
 
 
 def render_results(response: StructuredResponse):
