@@ -199,6 +199,86 @@ else
     echo ""
 fi
 
+# Check Ollama for LLM document evaluation
+echo "🤖 Checking Ollama for LLM document evaluation..."
+echo ""
+
+OLLAMA_AVAILABLE=false
+if command -v ollama &> /dev/null; then
+    echo "  ✅ Ollama found"
+    
+    # Check if Ollama service is running
+    if ollama list &> /dev/null; then
+        echo "  ✅ Ollama service is running"
+        
+        # Check if llama3.1:8b model is available
+        if ollama list | grep -q "llama3.1:8b"; then
+            echo "  ✅ llama3.1:8b model found"
+            OLLAMA_AVAILABLE=true
+        else
+            echo "  ⚠️  llama3.1:8b model not found"
+            echo "     Downloading model (this may take a few minutes)..."
+            echo ""
+            
+            if ollama pull llama3.1:8b; then
+                echo "  ✅ llama3.1:8b model downloaded successfully"
+                OLLAMA_AVAILABLE=true
+            else
+                echo "  ❌ Failed to download llama3.1:8b model"
+                echo "     LLM document evaluation will be disabled"
+            fi
+        fi
+    else
+        echo "  ⚠️  Ollama service not running"
+        echo "     Starting Ollama service..."
+        
+        # Start Ollama in background
+        nohup ollama serve > /dev/null 2>&1 &
+        sleep 3
+        
+        # Check if it started successfully
+        if ollama list &> /dev/null; then
+            echo "  ✅ Ollama service started"
+            
+            # Check/download model
+            if ollama list | grep -q "llama3.1:8b"; then
+                echo "  ✅ llama3.1:8b model found"
+                OLLAMA_AVAILABLE=true
+            else
+                echo "  ⚠️  Downloading llama3.1:8b model..."
+                if ollama pull llama3.1:8b; then
+                    echo "  ✅ llama3.1:8b model downloaded"
+                    OLLAMA_AVAILABLE=true
+                else
+                    echo "  ❌ Failed to download model"
+                fi
+            fi
+        else
+            echo "  ❌ Failed to start Ollama service"
+            echo "     LLM document evaluation will be disabled"
+        fi
+    fi
+else
+    echo "  ❌ Ollama not installed"
+    echo "     LLM document evaluation will be disabled"
+    echo ""
+    echo "  💡 To enable LLM evaluation:"
+    echo "     1. Install Ollama: https://ollama.ai/"
+    echo "     2. Run: ollama pull llama3.1:8b"
+    echo "     3. Restart this script"
+    echo ""
+fi
+
+if [ "$OLLAMA_AVAILABLE" = true ]; then
+    echo "  🎉 LLM document evaluation enabled!"
+    echo "     Documents will be evaluated for better relevance ranking"
+else
+    echo "  ℹ️  LLM document evaluation disabled"
+    echo "     Using standard hybrid search (dense + BM25)"
+fi
+
+echo ""
+
 # Check if config files exist
 if [ ! -f "config/users.yaml" ]; then
     echo "⚠️  Warning: config/users.yaml not found!"
