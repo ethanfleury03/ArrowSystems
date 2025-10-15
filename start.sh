@@ -45,12 +45,20 @@ if [ "$IS_RUNPOD" = false ]; then
     # Local machine - use venv for isolation
     if [ ! -d "venv" ]; then
         echo "📦 Creating virtual environment..."
-        python3 -m venv venv
+        # Try python3 first, fall back to python
+        (python3 -m venv venv) || (python -m venv venv)
         echo "✅ Virtual environment created"
     fi
-    
+
     echo "📦 Activating virtual environment..."
-    source venv/bin/activate
+    if [ -f "venv/bin/activate" ]; then
+        . venv/bin/activate
+    elif [ -f "venv/Scripts/activate" ]; then
+        . venv/Scripts/activate
+    else
+        echo "❌ Could not find venv activation script (tried venv/bin/activate and venv/Scripts/activate)"
+        exit 1
+    fi
 else
     # RunPod - use system environment (has PyTorch, Transformers, etc.)
     echo "📦 Using system Python environment"
