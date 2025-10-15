@@ -619,7 +619,7 @@ class DocumentEvaluator:
     Replaces Ollama-based evaluation with Claude API.
     """
     
-    def __init__(self, model_name: str = "claude-3-5-sonnet-20240620", enable_caching: bool = True):
+    def __init__(self, model_name: str = "claude-3-5-sonnet-20241022", enable_caching: bool = True):
         self.model_name = model_name
         self.enable_caching = enable_caching
         self.evaluation_cache = {}
@@ -880,7 +880,7 @@ class ClaudeAnswerGenerator:
     Generates clean, technical answers from retrieved documents.
     """
     
-    def __init__(self, api_key: str = None, model_name: str = "claude-3-5-sonnet-20240620", enable_caching: bool = True):
+    def __init__(self, api_key: str = None, model_name: str = "claude-3-5-sonnet-20241022", enable_caching: bool = True):
         self.model_name = model_name
         self.enable_caching = enable_caching
         self.answer_cache = {}
