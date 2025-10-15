@@ -22,6 +22,8 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.schema import NodeWithScore, TextNode
 from sentence_transformers import CrossEncoder
 from rank_bm25 import BM25Okapi
+import json
+import hashlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -199,10 +201,11 @@ class IntentClassifier:
 class HybridRetriever:
     """Combines dense embeddings, BM25, and metadata filtering."""
     
-    def __init__(self, index, embed_model, reranker=None):
+    def __init__(self, index, embed_model, reranker=None, document_evaluator=None):
         self.index = index
         self.embed_model = embed_model
         self.reranker = reranker
+        self.document_evaluator = document_evaluator
         self.bm25 = None
         self.corpus_nodes = []
         self._initialize_bm25()
@@ -332,6 +335,61 @@ class HybridRetriever:
             hybrid_results = self._rerank(query, hybrid_results[:top_k * 2])
         
         return hybrid_results[:top_k]
+    
+    def hybrid_search_with_llm_evaluation(
+        self,
+        query: str,
+        top_k: int = 10,
+        alpha: float = 0.5,
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        enable_llm_evaluation: bool = True
+    ) -> List[NodeWithScore]:
+        """
+        Perform hybrid search with optional LLM-based document evaluation.
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            alpha: Weight for dense search (1-alpha for BM25)
+            metadata_filters: Optional metadata filters
+            enable_llm_evaluation: Whether to use LLM evaluation
+        
+        Returns:
+            Ranked list of nodes with LLM evaluation applied
+        """
+        # First, perform standard hybrid search
+        hybrid_results = self.hybrid_search(
+            query=query,
+            top_k=top_k * 2,  # Get more results for LLM evaluation
+            alpha=alpha,
+            metadata_filters=metadata_filters
+        )
+        
+        # Apply LLM evaluation if enabled and evaluator is available
+        if (enable_llm_evaluation and 
+            self.document_evaluator and 
+            self.document_evaluator.ollama_client):
+            
+            logger.info(f"🤖 Applying LLM document evaluation to {len(hybrid_results)} documents")
+            
+            try:
+                # Evaluate documents with LLM
+                evaluated_results = self.document_evaluator.evaluate_retrieved_documents(
+                    query=query,
+                    nodes=hybrid_results,
+                    max_documents=min(10, len(hybrid_results))  # Limit for performance
+                )
+                
+                # Sort by new scores and return top_k
+                evaluated_results.sort(key=lambda x: x.score, reverse=True)
+                return evaluated_results[:top_k]
+                
+            except Exception as e:
+                logger.warning(f"LLM evaluation failed, falling back to standard ranking: {e}")
+                return hybrid_results[:top_k]
+        else:
+            # No LLM evaluation, return standard results
+            return hybrid_results[:top_k]
     
     def _matches_filters(self, node: NodeWithScore, filters: Dict[str, Any]) -> bool:
         """Check if node matches metadata filters."""
@@ -528,23 +586,273 @@ class ResponseGenerator:
         return min(confidence, 1.0)
 
 
+class DocumentEvaluator:
+    """
+    LLM-based document evaluator with anti-hallucination measures.
+    Uses Ollama for local LLM evaluation of document relevance.
+    """
+    
+    def __init__(self, model_name: str = "llama3.1:8b", enable_caching: bool = True):
+        self.model_name = model_name
+        self.enable_caching = enable_caching
+        self.evaluation_cache = {}
+        self.ollama_client = None
+        self._initialize_ollama()
+    
+    def _initialize_ollama(self):
+        """Initialize Ollama client with error handling."""
+        try:
+            import ollama
+            self.ollama_client = ollama.Client()
+            # Test connection
+            self.ollama_client.list()
+            logger.info(f"✅ Ollama client initialized with model: {self.model_name}")
+        except ImportError:
+            logger.warning("⚠️ Ollama not installed. Document evaluation will be disabled.")
+            self.ollama_client = None
+        except Exception as e:
+            logger.warning(f"⚠️ Ollama connection failed: {e}. Document evaluation will be disabled.")
+            self.ollama_client = None
+    
+    def evaluate_retrieved_documents(
+        self, 
+        query: str, 
+        nodes: List[NodeWithScore],
+        max_documents: int = 10
+    ) -> List[NodeWithScore]:
+        """
+        Evaluate and re-rank retrieved documents using LLM.
+        
+        Args:
+            query: User query
+            nodes: Retrieved document nodes
+            max_documents: Maximum number of documents to evaluate
+            
+        Returns:
+            Re-ranked nodes based on LLM evaluation
+        """
+        if not self.ollama_client or not nodes:
+            return nodes
+        
+        # Limit documents to avoid token limits
+        nodes_to_evaluate = nodes[:max_documents]
+        
+        evaluations = []
+        for node in nodes_to_evaluate:
+            try:
+                evaluation = self._evaluate_single_document(query, node)
+                
+                # Only use high-confidence evaluations
+                if evaluation['confidence'] > 0.6:
+                    # Adjust node score based on LLM evaluation
+                    original_score = node.score
+                    llm_score = evaluation['relevance_score']
+                    # Weighted combination: 70% original, 30% LLM
+                    node.score = 0.7 * original_score + 0.3 * llm_score
+                    
+                    evaluations.append((node, evaluation))
+                    logger.debug(f"Document evaluated: score={node.score:.3f}, confidence={evaluation['confidence']:.3f}")
+                else:
+                    logger.debug(f"Low confidence evaluation ({evaluation['confidence']:.3f}), using original score")
+                    evaluations.append((node, None))
+                    
+            except Exception as e:
+                logger.warning(f"LLM evaluation failed for document: {e}")
+                evaluations.append((node, None))
+        
+        # Sort by new scores
+        evaluations.sort(key=lambda x: x[0].score, reverse=True)
+        
+        return [node for node, _ in evaluations]
+    
+    def _evaluate_single_document(self, query: str, node: NodeWithScore) -> Dict[str, Any]:
+        """Evaluate a single document with anti-hallucination measures."""
+        
+        # Create cache key
+        cache_key = self._create_cache_key(query, node)
+        
+        # Check cache first
+        if self.enable_caching and cache_key in self.evaluation_cache:
+            logger.debug("Using cached evaluation")
+            return self.evaluation_cache[cache_key]
+        
+        # Limit document content to prevent token overflow
+        doc_content = node.text[:1500]  # Limit to 1500 characters
+        
+        # Build constrained prompt
+        prompt = self._build_constrained_prompt(query, doc_content)
+        
+        try:
+            response = self.ollama_client.generate(
+                model=self.model_name,
+                prompt=prompt,
+                options={
+                    'temperature': 0.1,  # Low temperature for consistency
+                    'top_p': 0.9,
+                    'max_tokens': 500
+                }
+            )
+            
+            evaluation = self._parse_evaluation_response(response['response'])
+            
+            # Validate facts against original document
+            evaluation = self._validate_evaluation_facts(evaluation, node.text)
+            
+            # Cache the result
+            if self.enable_caching:
+                self.evaluation_cache[cache_key] = evaluation
+            
+            return evaluation
+            
+        except Exception as e:
+            logger.error(f"LLM evaluation failed: {e}")
+            return {
+                'relevance_score': 0.5,
+                'confidence': 0.0,
+                'reasoning': 'Evaluation failed',
+                'key_facts': [],
+                'limitations': 'LLM evaluation unavailable'
+            }
+    
+    def _create_cache_key(self, query: str, node: NodeWithScore) -> str:
+        """Create cache key for evaluation."""
+        content_hash = hashlib.md5(node.text[:500].encode()).hexdigest()
+        query_hash = hashlib.md5(query.encode()).hexdigest()
+        return f"{query_hash}_{content_hash}"
+    
+    def _build_constrained_prompt(self, query: str, document: str) -> str:
+        """Build constrained prompt to minimize hallucinations."""
+        
+        return f"""TASK: Evaluate document relevance to query with ZERO hallucinations.
+
+CONSTRAINTS:
+- Only use information explicitly present in the document
+- Do not add external knowledge or assumptions
+- Score must be between 0.0 and 1.0
+- Be conservative with scoring
+- If uncertain, use lower scores
+
+QUERY: {query}
+
+DOCUMENT: {document}
+
+EVALUATION CRITERIA:
+1. Direct relevance to query (0.0-0.4)
+2. Completeness of information (0.0-0.3)
+3. Clarity and specificity (0.0-0.3)
+
+RESPOND WITH JSON ONLY (no other text):
+{{
+    "relevance_score": 0.85,
+    "reasoning": "Document directly addresses the query about...",
+    "key_facts": ["Fact 1", "Fact 2"],
+    "confidence": 0.9,
+    "limitations": "Document doesn't cover..."
+}}"""
+    
+    def _parse_evaluation_response(self, response: str) -> Dict[str, Any]:
+        """Parse LLM response and extract evaluation data."""
+        try:
+            # Try to extract JSON from response
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                evaluation = json.loads(json_match.group())
+            else:
+                # Fallback parsing
+                evaluation = self._fallback_parse(response)
+            
+            # Validate required fields
+            required_fields = ['relevance_score', 'reasoning', 'confidence']
+            for field in required_fields:
+                if field not in evaluation:
+                    evaluation[field] = 0.5 if field == 'relevance_score' else 'Unknown'
+            
+            # Ensure score is in valid range
+            evaluation['relevance_score'] = max(0.0, min(1.0, float(evaluation['relevance_score'])))
+            evaluation['confidence'] = max(0.0, min(1.0, float(evaluation['confidence'])))
+            
+            return evaluation
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response: {e}")
+            return {
+                'relevance_score': 0.5,
+                'reasoning': 'Parse error',
+                'confidence': 0.0,
+                'key_facts': [],
+                'limitations': 'Response parsing failed'
+            }
+    
+    def _fallback_parse(self, response: str) -> Dict[str, Any]:
+        """Fallback parsing when JSON extraction fails."""
+        # Extract score from response
+        score_match = re.search(r'score[:\s]*([0-9.]+)', response, re.IGNORECASE)
+        score = float(score_match.group(1)) if score_match else 0.5
+        
+        return {
+            'relevance_score': score,
+            'reasoning': 'Fallback parsing used',
+            'confidence': 0.3,
+            'key_facts': [],
+            'limitations': 'JSON parsing failed'
+        }
+    
+    def _validate_evaluation_facts(self, evaluation: Dict, original_document: str) -> Dict:
+        """Validate that evaluation facts are actually in the document."""
+        claimed_facts = evaluation.get('key_facts', [])
+        validated_facts = []
+        
+        for fact in claimed_facts:
+            # Check if fact is actually present in document (case-insensitive)
+            if fact.lower() in original_document.lower():
+                validated_facts.append(fact)
+            else:
+                logger.debug(f"Fact not found in document: {fact}")
+        
+        evaluation['validated_facts'] = validated_facts
+        evaluation['fact_validation_score'] = (
+            len(validated_facts) / len(claimed_facts) 
+            if claimed_facts else 1.0
+        )
+        
+        # Adjust confidence based on fact validation
+        if evaluation['fact_validation_score'] < 0.5:
+            evaluation['confidence'] *= 0.7  # Reduce confidence for poor fact validation
+        
+        return evaluation
+    
+    def clear_cache(self):
+        """Clear evaluation cache."""
+        self.evaluation_cache.clear()
+        logger.info("Document evaluation cache cleared")
+    
+    def get_cache_stats(self) -> Dict[str, int]:
+        """Get cache statistics."""
+        return {
+            'cached_evaluations': len(self.evaluation_cache),
+            'cache_enabled': self.enable_caching
+        }
+
+
 class RAGOrchestrator:
     """
     Elite RAG orchestrator implementing hybrid search, query rewriting,
     and structured response generation.
     """
     
-    def __init__(self, cache_dir="/root/.cache/huggingface/hub"):
+    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = True):
         self.cache_dir = cache_dir
         self.embed_model = None
         self.reranker = None
         self.index = None
         self.retriever = None
+        self.enable_llm_evaluation = enable_llm_evaluation
         
         # Components
         self.query_rewriter = QueryRewriter()
         self.intent_classifier = IntentClassifier()
         self.response_generator = ResponseGenerator()
+        self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
     
     def initialize_models(self):
         """Initialize embedding and re-ranking models."""
@@ -639,7 +947,8 @@ class RAGOrchestrator:
         self.retriever = HybridRetriever(
             index=self.index,
             embed_model=self.embed_model,
-            reranker=self.reranker
+            reranker=self.reranker,
+            document_evaluator=self.document_evaluator
         )
         
         logger.info("✅ Index and retriever initialized")
@@ -676,14 +985,15 @@ class RAGOrchestrator:
         query_variations = self.query_rewriter.rewrite_query(query, intent)
         logger.info(f"🔄 Generated {len(query_variations)} query variations")
         
-        # Step 3: Hybrid retrieval
+        # Step 3: Hybrid retrieval with LLM evaluation
         all_nodes = []
         for q_variant in query_variations[:3]:  # Use top 3 variations
-            nodes = self.retriever.hybrid_search(
+            nodes = self.retriever.hybrid_search_with_llm_evaluation(
                 query=q_variant,
                 top_k=top_k,
                 alpha=alpha,
-                metadata_filters=metadata_filters
+                metadata_filters=metadata_filters,
+                enable_llm_evaluation=self.enable_llm_evaluation
             )
             all_nodes.extend(nodes)
         

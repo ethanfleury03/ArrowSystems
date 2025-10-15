@@ -31,3 +31,13 @@ search:
   default_top_k: 10
   enable_reranking: true
   content_type_filtering: true
+
+# LLM Document Evaluation Configuration
+llm_evaluation:
+  enabled: true
+  model: "llama3.1:8b"  # Ollama model name
+  max_documents: 10    # Maximum documents to evaluate per query
+  confidence_threshold: 0.6  # Minimum confidence to use LLM evaluation
+  enable_caching: true  # Cache evaluation results
+  temperature: 0.1      # Low temperature for consistency
+  max_tokens: 500       # Maximum tokens for LLM response
