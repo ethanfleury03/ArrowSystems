@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# DuraFlex Technical Assistant - Enhanced Startup Script
+# DuraFlex Technical Assistant - Streamlined Setup Script
 # Works on local machines and RunPod GPU instances
 # Usage: ./start.sh
 
@@ -11,13 +11,6 @@ echo "🔧 DuraFlex Technical Assistant"
 echo "=========================================="
 echo ""
 
-# Set GPU acceleration environment variables for Ollama
-export OLLAMA_GPU_LAYERS=32
-export OLLAMA_GPU_MEMORY_FRACTION=0.8
-export OLLAMA_HOST=0.0.0.0:11434
-export CUDA_VISIBLE_DEVICES=0
-export OLLAMA_DEBUG=1
-
 # Set Claude API key for LLM answer generation
 export ANTHROPIC_API_KEY=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
 
@@ -26,465 +19,162 @@ IS_RUNPOD=false
 if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; then
     IS_RUNPOD=true
     echo "🖥️  Environment: RunPod GPU Instance"
-    echo "📍 GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'Not detected')"
+    echo "📍 GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)"
+    echo ""
 else
     echo "🖥️  Environment: Local Machine"
-fi
-echo ""
-
-# Function to check if a Python package is installed
-check_package() {
-    python -c "import $1" 2>/dev/null
-    return $?
-}
-
-# Virtual environment handling
-# On RunPod: Use system environment (has PyTorch pre-installed)
-# On Local: Use venv for isolation
-if [ "$IS_RUNPOD" = false ]; then
-    # Local machine - use venv for isolation
-    if [ ! -d "venv" ]; then
-        echo "📦 Creating virtual environment..."
-        python3 -m venv venv
-        echo "✅ Virtual environment created"
-    fi
-    
-    echo "📦 Activating virtual environment..."
-    source venv/bin/activate
-else
-    # RunPod - use system environment (has PyTorch, Transformers, etc.)
-    echo "📦 Using system Python environment"
-    echo "   (Keeps access to pre-installed PyTorch & ML libraries)"
+    echo ""
 fi
 
-# Check Python version
-PYTHON_VERSION=$(python --version 2>&1 | awk '{print $2}')
-echo "🐍 Python version: $PYTHON_VERSION"
+# Check Python environment
+echo "📦 Using system Python environment"
+echo "   (Keeps access to pre-installed PyTorch & ML libraries)"
+echo "🐍 Python version: $(python --version | cut -d' ' -f2)"
 echo ""
 
-# Smart dependency checking
+# Check dependencies
 echo "🔍 Checking dependencies..."
 echo ""
 
-MISSING_CORE=false
-MISSING_UI=false
-
-# Debug: Show Python path
-if [ "$IS_RUNPOD" = true ]; then
-    echo "   Python: $(which python)"
-    echo "   Checking if packages are installed via pip..."
-fi
+# Check if packages are installed
+echo "   Python: $(which python)"
+echo "   Checking if packages are installed via pip..."
 
 # Check PyTorch
-if check_package torch; then
-    TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
-    echo "  ✅ PyTorch: $TORCH_VERSION"
+if python -c "import torch; print(f'✅ PyTorch: {torch.__version__}')" 2>/dev/null; then
+    :
 else
     echo "  ❌ PyTorch not found"
-    MISSING_CORE=true
+    echo "     Please install PyTorch first"
+    exit 1
 fi
 
-# For other packages on RunPod, just check if Streamlit is missing
-# The system packages (transformers, llama-index, etc.) are pre-installed and work
-if [ "$IS_RUNPOD" = true ]; then
-    # Assume system packages are good if PyTorch works
-    echo "  ✅ Transformers (system)"
-    echo "  ✅ LlamaIndex (system)" 
-    echo "  ✅ Sentence-Transformers (system)"
-    
-    # Check Streamlit
-    if check_package streamlit; then
-        echo "  ✅ Streamlit"
-    else
-        echo "  ❌ Streamlit not found"
-        MISSING_UI=true
-    fi
-    
-    # Check PyMuPDF (critical for ingestion)
-    if check_package fitz; then
-        echo "  ✅ PyMuPDF"
-    else
-        echo "  ❌ PyMuPDF not found"
-        MISSING_UI=true
-    fi
-    
-    # Check rank-bm25
-    if check_package rank_bm25; then
-        echo "  ✅ rank-bm25"
-    else
-        echo "  ❌ rank-bm25 not found"
-        MISSING_UI=true
-    fi
-else
-    # Local machine - check everything
-    if check_package transformers; then
-        echo "  ✅ Transformers"
-    else
-        echo "  ❌ Transformers not found"
-        MISSING_CORE=true
-    fi
+# Check other packages
+python -c "
+import sys
+packages = [
+    ('transformers', 'Transformers'),
+    ('llama_index', 'LlamaIndex'),
+    ('sentence_transformers', 'Sentence-Transformers'),
+    ('streamlit', 'Streamlit'),
+    ('fitz', 'PyMuPDF'),
+    ('rank_bm25', 'rank-bm25')
+]
 
-    if python -c "import llama_index.core" 2>/dev/null; then
-        echo "  ✅ LlamaIndex"
-    else
-        echo "  ❌ LlamaIndex not found"
-        MISSING_CORE=true
-    fi
+for package, name in packages:
+    try:
+        if package == 'fitz':
+            import fitz
+        else:
+            __import__(package)
+        print(f'  ✅ {name}')
+    except ImportError:
+        print(f'  ❌ {name} not found')
+        sys.exit(1)
+"
 
-    if check_package sentence_transformers; then
-        echo "  ✅ Sentence-Transformers"
-    else
-        echo "  ❌ Sentence-Transformers not found"
-        MISSING_CORE=true
-    fi
-
-    if check_package streamlit; then
-        echo "  ✅ Streamlit"
-    else
-        echo "  ❌ Streamlit not found"
-        MISSING_UI=true
-    fi
-fi
-
-echo ""
-
-# Install missing dependencies with smart handling
-if [ "$MISSING_CORE" = true ]; then
-    echo "📥 Installing all dependencies from requirements.txt..."
-    echo "   This may take a few minutes..."
-    echo ""
-    
-    pip install --upgrade pip -q
-    
-    if [ "$IS_RUNPOD" = true ]; then
-        # On RunPod: Install to user directory to avoid system conflicts
-        pip install -r requirements.txt \
-            --user \
-            --upgrade-strategy only-if-needed \
-            --ignore-installed cryptography \
-            --no-warn-script-location
-    else
-        # On local: Normal install in venv
-        pip install -r requirements.txt
-    fi
-    
-    echo ""
-    echo "✅ All dependencies installed"
-    echo ""
-elif [ "$MISSING_UI" = true ]; then
-    echo "📥 Installing all dependencies from requirements.txt..."
-    echo "   This will show progress so you can see what's happening..."
-    echo ""
-    
-    pip install --upgrade pip -q
-    
-    if [ "$IS_RUNPOD" = true ]; then
-        # On RunPod: Install all requirements
-        # Use --upgrade-strategy only-if-needed to skip reinstalling satisfied dependencies
-        echo "   Note: Skipping already-satisfied dependencies (PyTorch, Transformers, etc.)"
-        pip install -r requirements.txt \
-                    --user \
-                    --upgrade-strategy only-if-needed \
-                    --ignore-installed cryptography \
-                    --no-warn-script-location
-        
-        INSTALL_STATUS=$?
-    else
-        # On local: Install everything from requirements.txt
-        pip install -r requirements.txt
-        
-        INSTALL_STATUS=$?
-    fi
-    
-    echo ""
-    if [ $INSTALL_STATUS -eq 0 ]; then
-        echo "✅ All dependencies installed successfully"
-    else
-        echo "⚠️  Installation had issues, but may have partially succeeded"
-        echo "   Attempting to continue..."
-    fi
-    echo ""
-else
+if [ $? -eq 0 ]; then
     echo "✅ All dependencies satisfied!"
     echo ""
 fi
 
-# Check Ollama for LLM document evaluation
-echo "🤖 Checking Ollama for LLM document evaluation..."
+# Check Claude for LLM answer generation
+echo "🤖 Checking Claude for LLM answer generation..."
 echo ""
 
-OLLAMA_AVAILABLE=false
-
-# Check if ollama Python package is installed
-if ! python -c "import ollama" 2>/dev/null; then
-    echo "  ⚠️  Ollama Python package not found"
-    echo "     Installing ollama package..."
+# Check if anthropic package is installed
+if ! python -c "import anthropic" 2>/dev/null; then
+    echo "  ⚠️  Anthropic package not found"
+    echo "     Installing anthropic package..."
     
-    if pip install ollama; then
-        echo "  ✅ Ollama Python package installed"
+    if pip install anthropic; then
+        echo "  ✅ Anthropic package installed"
     else
-        echo "  ❌ Failed to install Ollama Python package"
-        echo "     LLM features will be disabled"
+        echo "  ❌ Failed to install Anthropic package"
+        echo "     LLM answer generation will be disabled"
     fi
 fi
 
-# Auto-install Ollama on RunPod if not available
-if [ "$IS_RUNPOD" = true ] && ! command -v ollama &> /dev/null; then
-    echo "  ⚠️  Ollama not found on RunPod"
-    echo "     Auto-installing Ollama..."
-    echo ""
-    
-    # Install Ollama
-    if curl -fsSL https://ollama.ai/install.sh | sh; then
-        echo "  ✅ Ollama installed successfully"
-        
-        # Add Ollama to PATH for current session
-        export PATH="$PATH:/usr/local/bin"
-        
-        # Start Ollama service in background with GPU acceleration
-        echo "  🔄 Starting Ollama service with GPU acceleration..."
-        export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
-        export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
-        export CUDA_VISIBLE_DEVICES=0
-        export OLLAMA_DEBUG=1
-        nohup /usr/local/bin/ollama serve > /dev/null 2>&1 &
-        sleep 5
-        
-        # Check if service started
-        if /usr/local/bin/ollama list &> /dev/null; then
-            echo "  ✅ Ollama service started"
-        else
-            echo "  ⚠️  Ollama service may need manual start"
-        fi
-    else
-        echo "  ❌ Failed to install Ollama"
-        echo "     LLM document evaluation will be disabled"
-    fi
-fi
-
-if command -v ollama &> /dev/null; then
-    echo "  ✅ Ollama found"
-    
-    # Kill any existing Ollama processes to ensure clean restart
-    echo "  🔄 Ensuring clean Ollama restart..."
-    pkill -f ollama 2>/dev/null || true
-    sleep 2
-    
-    # Check if Ollama service is running
-    if ollama list &> /dev/null; then
-        echo "  ✅ Ollama service is running"
-        
-        # Check if llama3.1:8b model is available
-        if ollama list | grep -q "llama3.1:8b"; then
-            echo "  ✅ llama3.1:8b model found"
-            OLLAMA_AVAILABLE=true
-        else
-            echo "  ⚠️  llama3.1:8b model not found"
-            echo "     Downloading model (this may take a few minutes)..."
-            echo ""
-            
-            if ollama pull llama3.1:8b; then
-                echo "  ✅ llama3.1:8b model downloaded successfully"
-                OLLAMA_AVAILABLE=true
-            else
-                echo "  ❌ Failed to download llama3.1:8b model"
-                echo "     LLM document evaluation will be disabled"
-            fi
-        fi
-    else
-        echo "  ⚠️  Ollama service not running"
-        echo "     Starting Ollama service..."
-        
-        # Start Ollama in background with GPU acceleration
-        export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
-        export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
-        export CUDA_VISIBLE_DEVICES=0
-        export OLLAMA_DEBUG=1
-        nohup ollama serve > /dev/null 2>&1 &
-        sleep 3
-        
-        # Check if it started successfully
-        if ollama list &> /dev/null; then
-            echo "  ✅ Ollama service started"
-            
-            # Check/download model
-            if ollama list | grep -q "llama3.1:8b"; then
-                echo "  ✅ llama3.1:8b model found"
-                OLLAMA_AVAILABLE=true
-            else
-                echo "  ⚠️  Downloading llama3.1:8b model..."
-                if ollama pull llama3.1:8b; then
-                    echo "  ✅ llama3.1:8b model downloaded"
-                    OLLAMA_AVAILABLE=true
-                else
-                    echo "  ❌ Failed to download model"
-                fi
-            fi
-        else
-            echo "  ❌ Failed to start Ollama service"
-            echo "     LLM document evaluation will be disabled"
-        fi
-    fi
+# Check if API key is set
+if [ -z "$ANTHROPIC_API_KEY" ]; then
+    echo "  ⚠️  ANTHROPIC_API_KEY not set"
+    echo "     LLM answer generation will be disabled"
 else
-    echo "  ❌ Ollama not installed"
-    echo "     LLM document evaluation will be disabled"
-    echo ""
-    echo "  💡 To enable LLM evaluation:"
-    echo "     1. Install Ollama: https://ollama.ai/"
-    echo "     2. Run: ollama pull llama3.1:8b"
-    echo "     3. Restart this script"
-    echo ""
-fi
-
-if [ "$OLLAMA_AVAILABLE" = true ]; then
-    echo "  🎉 LLM document evaluation enabled!"
-    echo "     Documents will be evaluated for better relevance ranking"
-else
-    echo "  ℹ️  LLM document evaluation disabled"
-    echo "     Using standard hybrid search (dense + BM25)"
+    echo "  ✅ Claude API key found"
+    echo "  🎉 LLM answer generation enabled!"
+    echo "     ChatGPT-style responses will be generated"
 fi
 
 echo ""
 
 # Check if config files exist
 if [ ! -f "config/users.yaml" ]; then
-    echo "⚠️  Warning: config/users.yaml not found!"
-    echo "   UI authentication may not work properly"
+    echo "⚠️  User configuration not found"
+    echo "     Creating default user configuration..."
+    mkdir -p config
+    cat > config/users.yaml << EOF
+users:
+  admin:
+    username: "admin"
+    name: "Administrator"
+    password: "admin123"
+    role: "admin"
+  tech1:
+    username: "tech1"
+    name: "Technician"
+    password: "tech123"
+    role: "technician"
+EOF
+    echo "✅ Default user configuration created"
     echo ""
 fi
 
-if [ ! -f "config/app_config.yaml" ]; then
-    echo "⚠️  Warning: config/app_config.yaml not found!"
-    echo ""
-fi
-
-# Check if storage/index exists (check multiple locations)
-STORAGE_PATH=""
-if [ -d "/workspace/storage" ] && [ -f "/workspace/storage/docstore.json" ]; then
-    STORAGE_PATH="/workspace/storage"
+# Check if RAG index exists
+if [ -d "storage" ] && [ -f "storage/index_store.json" ]; then
     echo "✅ RAG index found in /workspace/storage/"
-elif [ -d "storage" ] && [ -f "storage/docstore.json" ]; then
-    STORAGE_PATH="storage"
-    echo "✅ RAG index found in ./storage/"
+    echo "   📊 Indexed chunks: $(find storage -name "*.json" -exec wc -l {} + | tail -1 | awk '{print $1}')"
+    echo ""
 else
-    echo "=========================================="
-    echo "⚠️  RAG Index Not Found!"
-    echo "=========================================="
-    echo ""
-    echo "Checked locations:"
-    echo "  • /workspace/storage/"
-    echo "  • ./storage/"
-    echo ""
-    echo "The vector index hasn't been built yet."
-    echo "You need to run ingestion first to process your PDFs."
-    echo ""
-    echo "This will:"
-    echo "  • Extract text from PDFs in data/ folder"
-    echo "  • Extract tables and images"
-    echo "  • Create vector embeddings"
-    echo "  • Build searchable index"
-    echo ""
-    echo "Estimated time: 5-15 minutes (depending on # of PDFs)"
-    echo ""
-    
-    if [ "$IS_RUNPOD" = true ]; then
-        # On RunPod, auto-run if data exists
-        if [ -d "data" ] && [ "$(ls -A data/*.pdf 2>/dev/null)" ]; then
-            echo "📄 Found PDF files in data/ folder"
-            read -p "Run ingestion now? (y/n) " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                echo ""
-                echo "🔄 Running ingestion..."
-                python ingest.py
-                echo ""
-                echo "✅ Ingestion complete!"
-                echo ""
-            else
-                echo ""
-                echo "⚠️  Skipping ingestion - queries will fail without index"
-                echo "   Run manually later: python ingest.py"
-                echo ""
-            fi
-        else
-            echo "⚠️  No PDF files found in data/ folder"
-            echo "   Add PDFs to data/ and run: python ingest.py"
-            echo ""
-        fi
-    else
-        # On local machine, ask user
-        read -p "Do you want to run ingestion now? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo ""
-            echo "🔄 Running ingestion..."
-            python ingest.py
-            echo ""
-            echo "✅ Ingestion complete!"
-            echo ""
-        else
-            echo ""
-            echo "⚠️  Starting without index - queries will fail"
-            echo "   Run ingestion later: python ingest.py"
-            echo ""
-        fi
-    fi
-fi
-
-# If we found storage, show stats
-if [ ! -z "$STORAGE_PATH" ]; then
-    if [ -f "$STORAGE_PATH/docstore.json" ]; then
-        NUM_DOCS=$(python -c "import json; print(len(json.load(open('$STORAGE_PATH/docstore.json'))['docstore/data']))" 2>/dev/null || echo "unknown")
-        echo "   📊 Indexed chunks: $NUM_DOCS"
-    fi
+    echo "⚠️  RAG index not found"
+    echo "     Please run the indexing process first"
+    echo "     Run: python index_documents.py"
     echo ""
 fi
 
-# Determine port and URL
+# Set port based on environment
 if [ "$IS_RUNPOD" = true ]; then
-    # Use port 8501 on RunPod
     PORT=8501
-    echo "📍 Using port $PORT (RunPod HTTP Service port)"
-else
-    PORT=8501
-fi
-
-if [ "$IS_RUNPOD" = true ]; then
+    echo "📍 Using port 8501 (RunPod HTTP Service port)"
+    echo ""
     echo "=========================================="
     echo "🌐 RunPod Network Configuration"
     echo "=========================================="
     echo ""
-    echo "The app will run on port $PORT"
+    echo "The app will run on port 8501"
     echo ""
     echo "To access from your browser:"
     echo "  1. Go to your RunPod pod page"
     echo "  2. Under 'Connect' → 'HTTP Services'"
-    echo "  3. Click on the port $PORT service link"
+    echo "  3. Click on the port 8501 service link"
     echo ""
     echo "💡 The URL will look like:"
-    echo "   https://xxxxx-$PORT.proxy.runpod.net"
+    echo "   https://xxxxx-8501.proxy.runpod.net"
+    echo ""
+    echo "=========================================="
+    echo "🔐 Login Credentials"
+    echo "=========================================="
+    echo ""
+    echo "  Admin:       admin / admin123"
+    echo "  Technician:  tech1 / tech123"
+    echo ""
+    echo "=========================================="
     echo ""
 else
-    echo "=========================================="
-    echo "🌐 Local Access"
-    echo "=========================================="
-    echo ""
-    echo "After startup, open your browser to:"
-    echo "  http://localhost:$PORT"
+    PORT=8501
+    echo "📍 Using port 8501"
     echo ""
 fi
 
-echo "=========================================="
-echo "🔐 Login Credentials"
-echo "=========================================="
-echo ""
-echo "  Admin:       admin / admin123"
-echo "  Technician:  tech1 / tech123"
-echo ""
-echo "=========================================="
-echo ""
-
-# Start the application
 echo "🚀 Starting Streamlit server..."
 echo ""
 echo "Press Ctrl+C to stop the server"
@@ -492,26 +182,5 @@ echo ""
 echo "=========================================="
 echo ""
 
-# Precompile Python files for faster startup (saves 1-2 seconds)
-if [ "$IS_RUNPOD" = true ]; then
-    echo "⚡ Precompiling Python files..."
-    python -m compileall app.py components/ utils/ -q 2>/dev/null || true
-    echo ""
-fi
-
-# Run streamlit with appropriate settings
-if [ "$IS_RUNPOD" = true ]; then
-    # RunPod - bind to all interfaces
-    # Use python -m streamlit to ensure it's found
-    # Note: Disable CORS and XSRF for RunPod proxy compatibility (prevents WebSocket errors)
-    python -m streamlit run app.py \
-        --server.port=$PORT \
-        --server.address=0.0.0.0 \
-        --server.headless=true \
-        --server.enableCORS=false \
-        --server.enableXsrfProtection=false \
-        --server.enableWebsocketCompression=false
-else
-    # Local - standard settings
-    python -m streamlit run app.py --server.port=$PORT
-fi
+# Start Streamlit
+streamlit run app.py --server.port $PORT --server.address 0.0.0.0
