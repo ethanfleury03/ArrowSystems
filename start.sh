@@ -204,6 +204,37 @@ echo "🤖 Checking Ollama for LLM document evaluation..."
 echo ""
 
 OLLAMA_AVAILABLE=false
+
+# Auto-install Ollama on RunPod if not available
+if [ "$IS_RUNPOD" = true ] && ! command -v ollama &> /dev/null; then
+    echo "  ⚠️  Ollama not found on RunPod"
+    echo "     Auto-installing Ollama..."
+    echo ""
+    
+    # Install Ollama
+    if curl -fsSL https://ollama.ai/install.sh | sh; then
+        echo "  ✅ Ollama installed successfully"
+        
+        # Add Ollama to PATH for current session
+        export PATH="$PATH:/usr/local/bin"
+        
+        # Start Ollama service in background
+        echo "  🔄 Starting Ollama service..."
+        nohup /usr/local/bin/ollama serve > /dev/null 2>&1 &
+        sleep 5
+        
+        # Check if service started
+        if /usr/local/bin/ollama list &> /dev/null; then
+            echo "  ✅ Ollama service started"
+        else
+            echo "  ⚠️  Ollama service may need manual start"
+        fi
+    else
+        echo "  ❌ Failed to install Ollama"
+        echo "     LLM document evaluation will be disabled"
+    fi
+fi
+
 if command -v ollama &> /dev/null; then
     echo "  ✅ Ollama found"
     
