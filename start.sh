@@ -15,6 +15,8 @@ echo ""
 export OLLAMA_GPU_LAYERS=32
 export OLLAMA_GPU_MEMORY_FRACTION=0.8
 export OLLAMA_HOST=0.0.0.0:11434
+export CUDA_VISIBLE_DEVICES=0
+export OLLAMA_DEBUG=1
 
 # Detect environment
 IS_RUNPOD=false
@@ -240,6 +242,8 @@ if [ "$IS_RUNPOD" = true ] && ! command -v ollama &> /dev/null; then
         echo "  🔄 Starting Ollama service with GPU acceleration..."
         export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
         export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
+        export CUDA_VISIBLE_DEVICES=0
+        export OLLAMA_DEBUG=1
         nohup /usr/local/bin/ollama serve > /dev/null 2>&1 &
         sleep 5
         
@@ -257,6 +261,11 @@ fi
 
 if command -v ollama &> /dev/null; then
     echo "  ✅ Ollama found"
+    
+    # Kill any existing Ollama processes to ensure clean restart
+    echo "  🔄 Ensuring clean Ollama restart..."
+    pkill -f ollama 2>/dev/null || true
+    sleep 2
     
     # Check if Ollama service is running
     if ollama list &> /dev/null; then
@@ -286,6 +295,8 @@ if command -v ollama &> /dev/null; then
         # Start Ollama in background with GPU acceleration
         export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
         export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
+        export CUDA_VISIBLE_DEVICES=0
+        export OLLAMA_DEBUG=1
         nohup ollama serve > /dev/null 2>&1 &
         sleep 3
         
