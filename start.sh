@@ -18,6 +18,9 @@ export OLLAMA_HOST=0.0.0.0:11434
 export CUDA_VISIBLE_DEVICES=0
 export OLLAMA_DEBUG=1
 
+# Set Claude API key for LLM answer generation
+export ANTHROPIC_API_KEY=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
+
 # Detect environment
 IS_RUNPOD=false
 if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; then
