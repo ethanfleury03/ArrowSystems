@@ -427,15 +427,16 @@ class ResponseGenerator:
         self,
         query: str,
         context: RetrievalContext,
-        intent: QueryIntent
+        intent: QueryIntent,
+        answer_generator=None
     ) -> StructuredResponse:
         """Generate structured response with answer, reasoning, and sources."""
         
         # Reset source counter
         self.source_counter = 1
         
-        # Build answer from context
-        answer = self._build_answer(query, context, intent)
+        # Build answer from context (with LLM if available)
+        answer = self._build_answer(query, context, intent, answer_generator)
         
         # Generate reasoning
         reasoning = self._generate_reasoning(context, intent)
@@ -459,12 +460,37 @@ class ResponseGenerator:
         self,
         query: str,
         context: RetrievalContext,
-        intent: QueryIntent
+        intent: QueryIntent,
+        answer_generator=None
     ) -> str:
-        """Build answer from retrieved context."""
+        """Build answer from retrieved context using LLM or fallback to chunk-based."""
         
         if not context.nodes:
             return "The provided context does not include information to answer this query."
+        
+        # Try LLM answer generation first if available
+        if answer_generator and answer_generator.ollama_client:
+            try:
+                logger.info("🤖 Generating LLM answer...")
+                llm_answer = answer_generator.generate_answer(
+                    query=query,
+                    documents=context.nodes,
+                    intent=intent
+                )
+                return llm_answer
+            except Exception as e:
+                logger.warning(f"LLM answer generation failed: {e}, falling back to chunk-based answer")
+        
+        # Fallback to chunk-based answer (original method)
+        return self._build_chunk_based_answer(query, context, intent)
+    
+    def _build_chunk_based_answer(
+        self,
+        query: str,
+        context: RetrievalContext,
+        intent: QueryIntent
+    ) -> str:
+        """Build answer from document chunks (original method)."""
         
         # Group nodes by source document
         source_groups = defaultdict(list)
@@ -834,25 +860,234 @@ RESPOND WITH JSON ONLY (no other text):
         }
 
 
+class LLMAnswerGenerator:
+    """
+    LLM-based answer generator for ChatGPT-style responses.
+    Generates clean, technical answers from retrieved documents.
+    """
+    
+    def __init__(self, model_name: str = "llama3.1:8b", enable_caching: bool = True):
+        self.model_name = model_name
+        self.enable_caching = enable_caching
+        self.answer_cache = {}
+        self.ollama_client = None
+        self._initialize_ollama()
+    
+    def _initialize_ollama(self):
+        """Initialize Ollama client with error handling."""
+        try:
+            import ollama
+            self.ollama_client = ollama.Client()
+            # Test connection
+            self.ollama_client.list()
+            logger.info(f"✅ LLM Answer Generator initialized with model: {self.model_name}")
+        except ImportError:
+            logger.warning("⚠️ Ollama not installed. LLM answer generation will be disabled.")
+            self.ollama_client = None
+        except Exception as e:
+            logger.warning(f"⚠️ Ollama connection failed: {e}. LLM answer generation will be disabled.")
+            self.ollama_client = None
+    
+    def generate_answer(
+        self, 
+        query: str, 
+        documents: List[NodeWithScore],
+        intent: QueryIntent
+    ) -> str:
+        """
+        Generate a clean, ChatGPT-style answer from retrieved documents.
+        
+        Args:
+            query: User query
+            documents: Retrieved document nodes
+            intent: Query intent classification
+            
+        Returns:
+            Clean, technical answer with citations
+        """
+        if not self.ollama_client or not documents:
+            return self._fallback_answer(query, documents)
+        
+        # Create cache key
+        cache_key = self._create_answer_cache_key(query, documents)
+        
+        # Check cache first
+        if self.enable_caching and cache_key in self.answer_cache:
+            logger.debug("Using cached answer")
+            return self.answer_cache[cache_key]
+        
+        try:
+            # Prepare context from documents
+            context = self._prepare_document_context(documents)
+            
+            # Build prompt for answer generation
+            prompt = self._build_answer_prompt(query, context, intent)
+            
+            # Generate answer
+            response = self.ollama_client.generate(
+                model=self.model_name,
+                prompt=prompt,
+                options={
+                    'temperature': 0.1,  # Low temperature for consistency
+                    'top_p': 0.9,
+                    'max_tokens': 1000  # Longer responses for technical answers
+                }
+            )
+            
+            answer = self._parse_answer_response(response['response'])
+            
+            # Validate answer against source documents
+            answer = self._validate_answer_facts(answer, documents)
+            
+            # Cache the result
+            if self.enable_caching:
+                self.answer_cache[cache_key] = answer
+            
+            return answer
+            
+        except Exception as e:
+            logger.error(f"LLM answer generation failed: {e}")
+            return self._fallback_answer(query, documents)
+    
+    def _prepare_document_context(self, documents: List[NodeWithScore]) -> str:
+        """Prepare document context for LLM."""
+        context_parts = []
+        
+        for i, node in enumerate(documents[:5], 1):  # Limit to top 5 documents
+            source_name = node.metadata.get('file_name', f'Document {i}')
+            page_num = node.metadata.get('page_label', 'N/A')
+            
+            context_parts.append(f"[{i}] {source_name} (Page {page_num}):")
+            context_parts.append(node.text[:800])  # Limit document length
+            context_parts.append("")  # Empty line between documents
+        
+        return "\n".join(context_parts)
+    
+    def _build_answer_prompt(self, query: str, context: str, intent: QueryIntent) -> str:
+        """Build prompt for technical answer generation."""
+        
+        intent_guidance = {
+            'troubleshooting': "Focus on step-by-step troubleshooting procedures and solutions.",
+            'definition': "Provide clear, technical definitions with examples.",
+            'reasoning': "Explain the process or procedure in logical steps.",
+            'comparison': "Compare features, benefits, and differences clearly.",
+            'lookup': "Provide specific technical details and specifications."
+        }
+        
+        guidance = intent_guidance.get(intent.intent_type, "Provide a comprehensive technical answer.")
+        
+        return f"""TASK: Generate a clean, technical answer to the user's query using ONLY the provided documents.
+
+CONSTRAINTS:
+- Use ONLY information from the provided documents
+- Do NOT add external knowledge or assumptions
+- Maintain technical accuracy and precision
+- Include proper citations [1], [2], etc.
+- Write in a professional, technical style
+- Be comprehensive but concise
+
+QUERY: {query}
+
+INTENT: {intent.intent_type.title()} - {guidance}
+
+DOCUMENTS:
+{context}
+
+RESPONSE REQUIREMENTS:
+1. Start with a direct answer to the query
+2. Provide technical details and explanations
+3. Include step-by-step procedures if applicable
+4. Use citations [1], [2], etc. for all claims
+5. End with a summary or conclusion
+6. Keep the tone professional and technical
+
+Generate a comprehensive technical answer:"""
+    
+    def _parse_answer_response(self, response: str) -> str:
+        """Parse and clean the LLM response."""
+        # Remove any extra formatting or prompts
+        answer = response.strip()
+        
+        # Ensure it starts with actual content
+        if answer.startswith("Answer:"):
+            answer = answer[7:].strip()
+        elif answer.startswith("Response:"):
+            answer = answer[9:].strip()
+        
+        return answer
+    
+    def _validate_answer_facts(self, answer: str, documents: List[NodeWithScore]) -> str:
+        """Validate that answer facts are supported by source documents."""
+        # Extract citations from answer
+        citations = re.findall(r'\[(\d+)\]', answer)
+        
+        # Check if citations are valid
+        valid_citations = []
+        for citation in citations:
+            doc_index = int(citation) - 1
+            if 0 <= doc_index < len(documents):
+                valid_citations.append(citation)
+        
+        # If no valid citations, add a general source note
+        if not valid_citations:
+            answer += "\n\n*Based on retrieved technical documentation.*"
+        
+        return answer
+    
+    def _create_answer_cache_key(self, query: str, documents: List[NodeWithScore]) -> str:
+        """Create cache key for answer generation."""
+        query_hash = hashlib.md5(query.encode()).hexdigest()
+        doc_hashes = [hashlib.md5(node.text[:200].encode()).hexdigest() for node in documents[:3]]
+        docs_hash = hashlib.md5("".join(doc_hashes).encode()).hexdigest()
+        return f"answer_{query_hash}_{docs_hash}"
+    
+    def _fallback_answer(self, query: str, documents: List[NodeWithScore]) -> str:
+        """Fallback answer when LLM is not available."""
+        if not documents:
+            return "I couldn't find relevant information to answer your query."
+        
+        # Simple fallback: combine document chunks with citations
+        answer_parts = []
+        for i, node in enumerate(documents[:3], 1):
+            source_name = node.metadata.get('file_name', f'Document {i}')
+            answer_parts.append(f"According to {source_name} [{i}]:\n{node.text[:500]}...")
+        
+        return "\n\n".join(answer_parts)
+    
+    def clear_cache(self):
+        """Clear answer cache."""
+        self.answer_cache.clear()
+        logger.info("LLM answer cache cleared")
+    
+    def get_cache_stats(self) -> Dict[str, int]:
+        """Get cache statistics."""
+        return {
+            'cached_answers': len(self.answer_cache),
+            'cache_enabled': self.enable_caching
+        }
+
+
 class RAGOrchestrator:
     """
     Elite RAG orchestrator implementing hybrid search, query rewriting,
     and structured response generation.
     """
     
-    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = True):
+    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = True, enable_llm_answers: bool = True):
         self.cache_dir = cache_dir
         self.embed_model = None
         self.reranker = None
         self.index = None
         self.retriever = None
         self.enable_llm_evaluation = enable_llm_evaluation
+        self.enable_llm_answers = enable_llm_answers
         
         # Components
         self.query_rewriter = QueryRewriter()
         self.intent_classifier = IntentClassifier()
         self.response_generator = ResponseGenerator()
         self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
+        self.answer_generator = LLMAnswerGenerator() if enable_llm_answers else None
     
     def initialize_models(self):
         """Initialize embedding and re-ranking models."""
@@ -1023,7 +1258,8 @@ class RAGOrchestrator:
         response = self.response_generator.generate_structured_response(
             query=query,
             context=context,
-            intent=intent
+            intent=intent,
+            answer_generator=self.answer_generator
         )
         
         logger.info(f"✅ Response generated (confidence: {response.confidence:.2%})")
