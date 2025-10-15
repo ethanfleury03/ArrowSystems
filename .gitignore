@@ -19,67 +19,39 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
-venv/
-ENV/
-env/
 
-# IDEs
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
 # Logs
 *.log
+logs/
 rag_handler.log
 
-# Storage and cache
-storage/
-extracted_content/
-.cache/
-*.db
-*.sqlite
+# Data files
+saved_answers.json
+*.json
 
-# Secrets and credentials
-.streamlit/secrets.toml
-# config/users.yaml  # Commented out - demo credentials are safe to commit
-.env
-*.key
-*.pem
+# Temporary files
+temp/
+*.tmp
+*.temp
 
 # OS
 .DS_Store
 Thumbs.db
-desktop.ini
 
-# HuggingFace cache
+# Streamlit
+.streamlit/
+
+# Cache
 .cache/
-models/
-
-# Backup files
-*.bak
-*.backup
-backup_*.tar.gz
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-
-# Large files
-*.tar.gz
-*.zip
-*.rar
-
-# Model files (too large for git)
-*.bin
-*.onnx
-*.safetensors
-*.pt
-*.pth
-
-# Data files (add selectively)
-# data/*.pdf  # Uncomment if you don't want to track PDFs
-
+storage/
