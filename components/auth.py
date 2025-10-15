@@ -194,27 +194,6 @@ def render_login_page(auth_manager: AuthManager):
                 placeholder="Enter your password"
             )
             
-            # Claude mode toggle
-            st.markdown("---")
-            st.markdown("### 🤖 AI Mode Selection")
-            
-            col_mode1, col_mode2 = st.columns(2)
-            with col_mode1:
-                claude_enabled = st.checkbox(
-                    "🤖 Enable Claude AI", 
-                    value=True,
-                    help="Full AI-powered responses with Claude Sonnet 4 (uses API credits)"
-                )
-            with col_mode2:
-                st.markdown("**💡 Development Mode**")
-                st.markdown("*Standard hybrid search only*")
-            
-            if not claude_enabled:
-                st.info("🔧 **Development Mode**: Claude disabled for cost-free testing. Standard hybrid search will be used.")
-            else:
-                st.success("🤖 **Production Mode**: Claude enabled for full AI responses.")
-            
-            st.markdown("---")
             
             col_a, col_b = st.columns(2)
             with col_a:
@@ -235,14 +214,8 @@ def render_login_page(auth_manager: AuthManager):
                     
                     if is_valid:
                         auth_manager.initialize_session(user_info)
-                        
-                        # Store Claude preference in session state
-                        st.session_state['claude_enabled'] = claude_enabled
                         logger.info(f"Session initialized for: {user_info['name']}")
-                        logger.info(f"Claude mode: {'enabled' if claude_enabled else 'disabled'}")
-                        
-                        mode_text = "🤖 Production Mode (Claude enabled)" if claude_enabled else "🔧 Development Mode (Claude disabled)"
-                        st.success(f"✅ Welcome back, {user_info['name']}! {mode_text}")
+                        st.success(f"✅ Welcome back, {user_info['name']}!")
                         st.balloons()
                         # Small delay to show success message
                         import time

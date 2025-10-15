@@ -626,12 +626,8 @@ class DocumentEvaluator:
         self.evaluation_cache = {}
         self.claude_client = None
         
-        # Check session state for Claude preference
-        claude_enabled = st.session_state.get('claude_enabled', True)
-        if claude_enabled:
-            self._initialize_claude()
-        else:
-            logger.info("🔧 Claude Document Evaluator disabled via session preference - using standard retrieval only")
+        # Initialize Claude by default
+        self._initialize_claude()
     
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
@@ -904,12 +900,8 @@ class ClaudeAnswerGenerator:
         self.answer_cache = {}
         self.claude_client = None
         
-        # Check session state for Claude preference
-        claude_enabled = st.session_state.get('claude_enabled', True)
-        if claude_enabled:
-            self._initialize_claude(api_key)
-        else:
-            logger.info("🔧 Claude Answer Generator disabled via session preference - using chunk-based answers")
+        # Initialize Claude by default
+        self._initialize_claude(api_key)
     
     def _initialize_claude(self, api_key: str = None):
         """Initialize Claude client with error handling."""
