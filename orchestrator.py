@@ -368,7 +368,7 @@ class HybridRetriever:
         # Apply LLM evaluation if enabled and evaluator is available
         if (enable_llm_evaluation and 
             self.document_evaluator and 
-            self.document_evaluator.ollama_client):
+            self.document_evaluator.claude_client):
             
             logger.info(f"🤖 Applying LLM document evaluation to {len(hybrid_results)} documents")
             
@@ -469,7 +469,7 @@ class ResponseGenerator:
             return "The provided context does not include information to answer this query."
         
         # Try LLM answer generation first if available
-        if answer_generator and answer_generator.ollama_client:
+        if answer_generator and answer_generator.claude_client:
             try:
                 logger.info("🤖 Generating LLM answer...")
                 llm_answer = answer_generator.generate_answer(
@@ -612,33 +612,50 @@ class ResponseGenerator:
         return min(confidence, 1.0)
 
 
+    
 class DocumentEvaluator:
     """
-    LLM-based document evaluator with anti-hallucination measures.
-    Uses Ollama for local LLM evaluation of document relevance.
+    Document evaluator using Claude for LLM-based document evaluation.
+    Replaces Ollama-based evaluation with Claude API.
     """
     
-    def __init__(self, model_name: str = "llama3.1:8b", enable_caching: bool = True):
+    def __init__(self, model_name: str = "claude-3-5-sonnet-20240620", enable_caching: bool = True):
         self.model_name = model_name
         self.enable_caching = enable_caching
         self.evaluation_cache = {}
-        self.ollama_client = None
-        self._initialize_ollama()
+        self.claude_client = None
+        self._initialize_claude()
     
-    def _initialize_ollama(self):
-        """Initialize Ollama client with error handling."""
+    def _initialize_claude(self):
+        """Initialize Claude client with error handling."""
         try:
-            import ollama
-            self.ollama_client = ollama.Client()
-            # Test connection
-            self.ollama_client.list()
-            logger.info(f"✅ Ollama client initialized with model: {self.model_name}")
+            import anthropic
+            
+            # Get API key from environment
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            
+            if not api_key:
+                logger.warning("⚠️ ANTHROPIC_API_KEY not found. Document evaluation will be disabled.")
+                self.claude_client = None
+                return
+            
+            self.claude_client = anthropic.Anthropic(api_key=api_key)
+            
+            # Test connection with a simple request
+            self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "test"}]
+            )
+            
+            logger.info(f"✅ Claude Document Evaluator initialized with model: {self.model_name}")
+            
         except ImportError:
-            logger.warning("⚠️ Ollama not installed. Document evaluation will be disabled.")
-            self.ollama_client = None
+            logger.warning("⚠️ Anthropic package not installed. Document evaluation will be disabled.")
+            self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Ollama connection failed: {e}. Document evaluation will be disabled.")
-            self.ollama_client = None
+            logger.warning(f"⚠️ Claude connection failed: {e}. Document evaluation will be disabled.")
+            self.claude_client = None
     
     def evaluate_retrieved_documents(
         self, 
@@ -647,7 +664,7 @@ class DocumentEvaluator:
         max_documents: int = 10
     ) -> List[NodeWithScore]:
         """
-        Evaluate and re-rank retrieved documents using LLM.
+        Evaluate and re-rank retrieved documents using Claude.
         
         Args:
             query: User query
@@ -655,9 +672,9 @@ class DocumentEvaluator:
             max_documents: Maximum number of documents to evaluate
             
         Returns:
-            Re-ranked nodes based on LLM evaluation
+            Re-ranked nodes based on Claude evaluation
         """
-        if not self.ollama_client or not nodes:
+        if not self.claude_client or not nodes:
             return nodes
         
         # Limit documents to avoid token limits
@@ -709,17 +726,14 @@ class DocumentEvaluator:
         prompt = self._build_constrained_prompt(query, doc_content)
         
         try:
-            response = self.ollama_client.generate(
+            response = self.claude_client.messages.create(
                 model=self.model_name,
-                prompt=prompt,
-                options={
-                    'temperature': 0.1,  # Low temperature for consistency
-                    'top_p': 0.9,
-                    'max_tokens': 500
-                }
+                max_tokens=500,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}]
             )
             
-            evaluation = self._parse_evaluation_response(response['response'])
+            evaluation = self._parse_evaluation_response(response.content[0].text)
             
             # Validate facts against original document
             evaluation = self._validate_evaluation_facts(evaluation, node.text)
