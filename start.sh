@@ -11,6 +11,11 @@ echo "🔧 DuraFlex Technical Assistant"
 echo "=========================================="
 echo ""
 
+# Set GPU acceleration environment variables for Ollama
+export OLLAMA_GPU_LAYERS=32
+export OLLAMA_GPU_MEMORY_FRACTION=0.8
+export OLLAMA_HOST=0.0.0.0:11434
+
 # Detect environment
 IS_RUNPOD=false
 if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; then
@@ -231,8 +236,10 @@ if [ "$IS_RUNPOD" = true ] && ! command -v ollama &> /dev/null; then
         # Add Ollama to PATH for current session
         export PATH="$PATH:/usr/local/bin"
         
-        # Start Ollama service in background
-        echo "  🔄 Starting Ollama service..."
+        # Start Ollama service in background with GPU acceleration
+        echo "  🔄 Starting Ollama service with GPU acceleration..."
+        export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
+        export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
         nohup /usr/local/bin/ollama serve > /dev/null 2>&1 &
         sleep 5
         
@@ -276,7 +283,9 @@ if command -v ollama &> /dev/null; then
         echo "  ⚠️  Ollama service not running"
         echo "     Starting Ollama service..."
         
-        # Start Ollama in background
+        # Start Ollama in background with GPU acceleration
+        export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
+        export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
         nohup ollama serve > /dev/null 2>&1 &
         sleep 3
         
