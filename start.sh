@@ -205,6 +205,19 @@ echo ""
 
 OLLAMA_AVAILABLE=false
 
+# Check if ollama Python package is installed
+if ! python -c "import ollama" 2>/dev/null; then
+    echo "  ⚠️  Ollama Python package not found"
+    echo "     Installing ollama package..."
+    
+    if pip install ollama; then
+        echo "  ✅ Ollama Python package installed"
+    else
+        echo "  ❌ Failed to install Ollama Python package"
+        echo "     LLM features will be disabled"
+    fi
+fi
+
 # Auto-install Ollama on RunPod if not available
 if [ "$IS_RUNPOD" = true ] && ! command -v ollama &> /dev/null; then
     echo "  ⚠️  Ollama not found on RunPod"
