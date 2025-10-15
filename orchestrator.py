@@ -661,15 +661,16 @@ class DocumentEvaluator:
         self, 
         query: str, 
         nodes: List[NodeWithScore],
-        max_documents: int = 10
+        max_documents: int = 3  # Reduced from 10 to 3 to limit API calls
     ) -> List[NodeWithScore]:
         """
         Evaluate and re-rank retrieved documents using Claude.
+        LIMITED to prevent excessive API costs.
         
         Args:
             query: User query
             nodes: Retrieved document nodes
-            max_documents: Maximum number of documents to evaluate
+            max_documents: Maximum number of documents to evaluate (limited to 3)
             
         Returns:
             Re-ranked nodes based on Claude evaluation
@@ -677,31 +678,40 @@ class DocumentEvaluator:
         if not self.claude_client or not nodes:
             return nodes
         
-        # Limit documents to avoid token limits
-        nodes_to_evaluate = nodes[:max_documents]
+        # STRICT LIMIT: Only evaluate top 3 documents to prevent API spam
+        nodes_to_evaluate = nodes[:min(3, max_documents)]
+        
+        logger.info(f"🔍 Evaluating only {len(nodes_to_evaluate)} documents to limit API costs")
         
         evaluations = []
-        for node in nodes_to_evaluate:
+        for i, node in enumerate(nodes_to_evaluate):
             try:
+                # Add delay between API calls to prevent rate limiting
+                if i > 0:
+                    import time
+                    time.sleep(0.5)  # 500ms delay between calls
+                
                 evaluation = self._evaluate_single_document(query, node)
                 
                 # Only use high-confidence evaluations
-                if evaluation['confidence'] > 0.6:
+                if evaluation['confidence'] > 0.7:  # Increased threshold
                     # Adjust node score based on LLM evaluation
                     original_score = node.score
                     llm_score = evaluation['relevance_score']
-                    # Weighted combination: 70% original, 30% LLM
-                    node.score = 0.7 * original_score + 0.3 * llm_score
+                    # Weighted combination: 80% original, 20% LLM (reduced LLM weight)
+                    node.score = 0.8 * original_score + 0.2 * llm_score
                     
                     evaluations.append((node, evaluation))
-                    logger.debug(f"Document evaluated: score={node.score:.3f}, confidence={evaluation['confidence']:.3f}")
+                    logger.info(f"Document {i+1} evaluated: score={node.score:.3f}, confidence={evaluation['confidence']:.3f}")
                 else:
                     logger.debug(f"Low confidence evaluation ({evaluation['confidence']:.3f}), using original score")
                     evaluations.append((node, None))
                     
             except Exception as e:
-                logger.warning(f"LLM evaluation failed for document: {e}")
+                logger.warning(f"LLM evaluation failed for document {i+1}: {e}")
                 evaluations.append((node, None))
+                # Stop on first error to prevent API spam
+                break
         
         # Sort by new scores
         evaluations.sort(key=lambda x: x[0].score, reverse=True)
@@ -728,8 +738,9 @@ class DocumentEvaluator:
         try:
             response = self.claude_client.messages.create(
                 model=self.model_name,
-                max_tokens=500,
+                max_tokens=200,  # Reduced from 500 to limit costs
                 temperature=0.1,
+                timeout=10.0,  # 10 second timeout
                 messages=[{"role": "user", "content": prompt}]
             )
             
@@ -1101,7 +1112,7 @@ class RAGOrchestrator:
     and structured response generation.
     """
     
-    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = True, enable_llm_answers: bool = True):
+    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = False, enable_llm_answers: bool = True):
         self.cache_dir = cache_dir
         self.embed_model = None
         self.reranker = None
