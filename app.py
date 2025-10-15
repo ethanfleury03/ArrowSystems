@@ -380,6 +380,14 @@ def main_application():
             **Reranking:** BGE-Reranker-Large  
             **Content Types:** Text, Tables, Images
             """)
+            
+            # RAG system reset button
+            if st.button("🔄 Reset RAG System", use_container_width=True, help="Reinitialize the RAG system with current Claude settings"):
+                st.session_state['models_initialized'] = False
+                st.session_state['rag_system'] = None
+                st.session_state['last_claude_setting'] = None
+                st.success("✅ RAG system reset! Next query will reinitialize with current settings.")
+                st.rerun()
     
     # Main content area - show saved answers or search interface
     if st.session_state.get('show_saved_answers', False):
@@ -391,7 +399,21 @@ def main_application():
     
     # Lazy load models ONLY when first query is made
     if query and not st.session_state.get('models_initialized', False):
-        st.info("🤖 First-time setup: Loading AI models (30-60 seconds)...")
+        # Check if we need to reinitialize based on Claude preference
+        current_claude_setting = st.session_state.get('claude_enabled', True)
+        last_claude_setting = st.session_state.get('last_claude_setting', None)
+        
+        # If Claude setting changed, reinitialize
+        if last_claude_setting is not None and last_claude_setting != current_claude_setting:
+            logger.info(f"🔄 Claude setting changed from {last_claude_setting} to {current_claude_setting}, reinitializing...")
+            st.session_state['models_initialized'] = False
+            st.session_state['rag_system'] = None
+        
+        # Store current setting
+        st.session_state['last_claude_setting'] = current_claude_setting
+        
+        mode_text = "🤖 Production Mode (Claude enabled)" if current_claude_setting else "🔧 Development Mode (Claude disabled)"
+        st.info(f"🤖 First-time setup: Loading AI models in {mode_text} (30-60 seconds)...")
         
         # Progress bar for visual feedback
         progress_bar = st.progress(0, text="Initializing...")
@@ -404,7 +426,8 @@ def main_application():
             
             # Clear progress and show success
             progress_bar.empty()
-            st.success("✅ AI models loaded! Processing your query...")
+            success_text = f"✅ AI models loaded in {mode_text}! Processing your query..."
+            st.success(success_text)
             
         except Exception as e:
             progress_bar.empty()

@@ -304,6 +304,7 @@ def render_user_profile_sidebar(auth_manager: AuthManager):
         # Logout button
         if st.sidebar.button("🚪 Logout", use_container_width=True):
             auth_manager.logout()
+            st.success("✅ Logged out successfully! RAG system will reset on next login.")
             st.rerun()
         
         st.sidebar.markdown("---")
