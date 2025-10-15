@@ -209,139 +209,31 @@ else
     echo ""
 fi
 
-# Check Ollama for LLM document evaluation
-echo "🤖 Checking Ollama for LLM document evaluation..."
+# Check Claude for LLM answer generation
+echo "🤖 Checking Claude for LLM answer generation..."
 echo ""
 
-OLLAMA_AVAILABLE=false
-
-# Check if ollama Python package is installed
-if ! python -c "import ollama" 2>/dev/null; then
-    echo "  ⚠️  Ollama Python package not found"
-    echo "     Installing ollama package..."
+# Check if anthropic package is installed
+if ! python -c "import anthropic" 2>/dev/null; then
+    echo "  ⚠️  Anthropic package not found"
+    echo "     Installing anthropic package..."
     
-    if pip install ollama; then
-        echo "  ✅ Ollama Python package installed"
+    if pip install anthropic; then
+        echo "  ✅ Anthropic package installed"
     else
-        echo "  ❌ Failed to install Ollama Python package"
-        echo "     LLM features will be disabled"
+        echo "  ❌ Failed to install Anthropic package"
+        echo "     LLM answer generation will be disabled"
     fi
 fi
 
-# Auto-install Ollama on RunPod if not available
-if [ "$IS_RUNPOD" = true ] && ! command -v ollama &> /dev/null; then
-    echo "  ⚠️  Ollama not found on RunPod"
-    echo "     Auto-installing Ollama..."
-    echo ""
-    
-    # Install Ollama
-    if curl -fsSL https://ollama.ai/install.sh | sh; then
-        echo "  ✅ Ollama installed successfully"
-        
-        # Add Ollama to PATH for current session
-        export PATH="$PATH:/usr/local/bin"
-        
-        # Start Ollama service in background with GPU acceleration
-        echo "  🔄 Starting Ollama service with GPU acceleration..."
-        export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
-        export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
-        export CUDA_VISIBLE_DEVICES=0
-        export OLLAMA_DEBUG=1
-        nohup /usr/local/bin/ollama serve > /dev/null 2>&1 &
-        sleep 5
-        
-        # Check if service started
-        if /usr/local/bin/ollama list &> /dev/null; then
-            echo "  ✅ Ollama service started"
-        else
-            echo "  ⚠️  Ollama service may need manual start"
-        fi
-    else
-        echo "  ❌ Failed to install Ollama"
-        echo "     LLM document evaluation will be disabled"
-    fi
-fi
-
-if command -v ollama &> /dev/null; then
-    echo "  ✅ Ollama found"
-    
-    # Kill any existing Ollama processes to ensure clean restart
-    echo "  🔄 Ensuring clean Ollama restart..."
-    pkill -f ollama 2>/dev/null || true
-    sleep 2
-    
-    # Check if Ollama service is running
-    if ollama list &> /dev/null; then
-        echo "  ✅ Ollama service is running"
-        
-        # Check if llama3.1:8b model is available
-        if ollama list | grep -q "llama3.1:8b"; then
-            echo "  ✅ llama3.1:8b model found"
-            OLLAMA_AVAILABLE=true
-        else
-            echo "  ⚠️  llama3.1:8b model not found"
-            echo "     Downloading model (this may take a few minutes)..."
-            echo ""
-            
-            if ollama pull llama3.1:8b; then
-                echo "  ✅ llama3.1:8b model downloaded successfully"
-                OLLAMA_AVAILABLE=true
-            else
-                echo "  ❌ Failed to download llama3.1:8b model"
-                echo "     LLM document evaluation will be disabled"
-            fi
-        fi
-    else
-        echo "  ⚠️  Ollama service not running"
-        echo "     Starting Ollama service..."
-        
-        # Start Ollama in background with GPU acceleration
-        export OLLAMA_GPU_LAYERS=32  # Use all GPU layers
-        export OLLAMA_GPU_MEMORY_FRACTION=0.8  # Use 80% of GPU memory
-        export CUDA_VISIBLE_DEVICES=0
-        export OLLAMA_DEBUG=1
-        nohup ollama serve > /dev/null 2>&1 &
-        sleep 3
-        
-        # Check if it started successfully
-        if ollama list &> /dev/null; then
-            echo "  ✅ Ollama service started"
-            
-            # Check/download model
-            if ollama list | grep -q "llama3.1:8b"; then
-                echo "  ✅ llama3.1:8b model found"
-                OLLAMA_AVAILABLE=true
-            else
-                echo "  ⚠️  Downloading llama3.1:8b model..."
-                if ollama pull llama3.1:8b; then
-                    echo "  ✅ llama3.1:8b model downloaded"
-                    OLLAMA_AVAILABLE=true
-                else
-                    echo "  ❌ Failed to download model"
-                fi
-            fi
-        else
-            echo "  ❌ Failed to start Ollama service"
-            echo "     LLM document evaluation will be disabled"
-        fi
-    fi
+# Check if API key is set
+if [ -z "$ANTHROPIC_API_KEY" ]; then
+    echo "  ⚠️  ANTHROPIC_API_KEY not set"
+    echo "     LLM answer generation will be disabled"
 else
-    echo "  ❌ Ollama not installed"
-    echo "     LLM document evaluation will be disabled"
-    echo ""
-    echo "  💡 To enable LLM evaluation:"
-    echo "     1. Install Ollama: https://ollama.ai/"
-    echo "     2. Run: ollama pull llama3.1:8b"
-    echo "     3. Restart this script"
-    echo ""
-fi
-
-if [ "$OLLAMA_AVAILABLE" = true ]; then
-    echo "  🎉 LLM document evaluation enabled!"
-    echo "     Documents will be evaluated for better relevance ranking"
-else
-    echo "  ℹ️  LLM document evaluation disabled"
-    echo "     Using standard hybrid search (dense + BM25)"
+    echo "  ✅ Claude API key found"
+    echo "  🎉 LLM answer generation enabled!"
+    echo "     ChatGPT-style responses will be generated"
 fi
 
 echo ""
