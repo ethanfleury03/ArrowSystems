@@ -860,33 +860,50 @@ RESPOND WITH JSON ONLY (no other text):
         }
 
 
-class LLMAnswerGenerator:
+class ClaudeAnswerGenerator:
     """
-    LLM-based answer generator for ChatGPT-style responses.
+    Claude-based answer generator for ChatGPT-style responses.
     Generates clean, technical answers from retrieved documents.
     """
     
-    def __init__(self, model_name: str = "llama3.1:8b", enable_caching: bool = True):
+    def __init__(self, api_key: str = None, model_name: str = "claude-3-5-sonnet-20241022", enable_caching: bool = True):
         self.model_name = model_name
         self.enable_caching = enable_caching
         self.answer_cache = {}
-        self.ollama_client = None
-        self._initialize_ollama()
+        self.claude_client = None
+        self._initialize_claude(api_key)
     
-    def _initialize_ollama(self):
-        """Initialize Ollama client with error handling."""
+    def _initialize_claude(self, api_key: str = None):
+        """Initialize Claude client with error handling."""
         try:
-            import ollama
-            self.ollama_client = ollama.Client()
-            # Test connection
-            self.ollama_client.list()
-            logger.info(f"✅ LLM Answer Generator initialized with model: {self.model_name}")
+            import anthropic
+            
+            # Get API key from environment or parameter
+            if not api_key:
+                api_key = os.getenv('ANTHROPIC_API_KEY')
+            
+            if not api_key:
+                logger.warning("⚠️ ANTHROPIC_API_KEY not found. Claude answer generation will be disabled.")
+                self.claude_client = None
+                return
+            
+            self.claude_client = anthropic.Anthropic(api_key=api_key)
+            
+            # Test connection with a simple request
+            self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "test"}]
+            )
+            
+            logger.info(f"✅ Claude Answer Generator initialized with model: {self.model_name}")
+            
         except ImportError:
-            logger.warning("⚠️ Ollama not installed. LLM answer generation will be disabled.")
-            self.ollama_client = None
+            logger.warning("⚠️ Anthropic package not installed. Claude answer generation will be disabled.")
+            self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Ollama connection failed: {e}. LLM answer generation will be disabled.")
-            self.ollama_client = None
+            logger.warning(f"⚠️ Claude connection failed: {e}. Claude answer generation will be disabled.")
+            self.claude_client = None
     
     def generate_answer(
         self, 
@@ -905,7 +922,7 @@ class LLMAnswerGenerator:
         Returns:
             Clean, technical answer with citations
         """
-        if not self.ollama_client or not documents:
+        if not self.claude_client or not documents:
             return self._fallback_answer(query, documents)
         
         # Create cache key
@@ -923,18 +940,15 @@ class LLMAnswerGenerator:
             # Build prompt for answer generation
             prompt = self._build_answer_prompt(query, context, intent)
             
-            # Generate answer
-            response = self.ollama_client.generate(
+            # Generate answer with Claude
+            response = self.claude_client.messages.create(
                 model=self.model_name,
-                prompt=prompt,
-                options={
-                    'temperature': 0.1,  # Low temperature for consistency
-                    'top_p': 0.9,
-                    'max_tokens': 1000  # Longer responses for technical answers
-                }
+                max_tokens=1000,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}]
             )
             
-            answer = self._parse_answer_response(response['response'])
+            answer = response.content[0].text
             
             # Validate answer against source documents
             answer = self._validate_answer_facts(answer, documents)
@@ -946,7 +960,7 @@ class LLMAnswerGenerator:
             return answer
             
         except Exception as e:
-            logger.error(f"LLM answer generation failed: {e}")
+            logger.error(f"Claude answer generation failed: {e}")
             return self._fallback_answer(query, documents)
     
     def _prepare_document_context(self, documents: List[NodeWithScore]) -> str:
@@ -1087,7 +1101,7 @@ class RAGOrchestrator:
         self.intent_classifier = IntentClassifier()
         self.response_generator = ResponseGenerator()
         self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
-        self.answer_generator = LLMAnswerGenerator() if enable_llm_answers else None
+        self.answer_generator = ClaudeAnswerGenerator() if enable_llm_answers else None
     
     def initialize_models(self):
         """Initialize embedding and re-ranking models."""
