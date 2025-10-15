@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from collections import defaultdict
 import numpy as np
+import streamlit as st
 
 from llama_index.core import StorageContext, load_index_from_storage, Settings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -624,7 +625,13 @@ class DocumentEvaluator:
         self.enable_caching = enable_caching
         self.evaluation_cache = {}
         self.claude_client = None
-        self._initialize_claude()
+        
+        # Check session state for Claude preference
+        claude_enabled = st.session_state.get('claude_enabled', True)
+        if claude_enabled:
+            self._initialize_claude()
+        else:
+            logger.info("🔧 Claude Document Evaluator disabled via session preference - using standard retrieval only")
     
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
@@ -896,7 +903,13 @@ class ClaudeAnswerGenerator:
         self.enable_caching = enable_caching
         self.answer_cache = {}
         self.claude_client = None
-        self._initialize_claude(api_key)
+        
+        # Check session state for Claude preference
+        claude_enabled = st.session_state.get('claude_enabled', True)
+        if claude_enabled:
+            self._initialize_claude(api_key)
+        else:
+            logger.info("🔧 Claude Answer Generator disabled via session preference - using chunk-based answers")
     
     def _initialize_claude(self, api_key: str = None):
         """Initialize Claude client with error handling."""

@@ -306,6 +306,13 @@ def render_header():
     # Show mock mode indicator
     if os.getenv('USE_MOCK_RAG', 'false').lower() == 'true':
         st.warning("🎭 **MOCK MODE ACTIVE** - Using simulated responses for UI development. Set `USE_MOCK_RAG=false` for real RAG system.", icon="⚠️")
+    
+    # Show Claude mode indicator
+    claude_enabled = st.session_state.get('claude_enabled', True)
+    if not claude_enabled:
+        st.info("🔧 **DEVELOPMENT MODE** - Claude disabled for cost-free testing. Using standard hybrid search.", icon="⚙️")
+    else:
+        st.success("🤖 **PRODUCTION MODE** - Claude enabled for full AI responses.", icon="✅")
 
 
 def render_stats_bar():
