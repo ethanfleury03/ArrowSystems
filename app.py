@@ -12,6 +12,7 @@ import warnings
 from pathlib import Path
 import logging
 from datetime import datetime
+import threading
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -472,6 +473,16 @@ def main():
     # Initialize session state
     init_session_state()
     
+    # Kick off background preload of RAG system (once per session)
+    if not st.session_state.get('preload_started', False):
+        st.session_state['preload_started'] = True
+        try:
+            # initialize_rag_system is @st.cache_resource → warms the cache
+            threading.Thread(target=initialize_rag_system, daemon=True).start()
+            logger.info("🔄 Background preload started for RAG system")
+        except Exception as e:
+            logger.warning(f"Preload thread failed to start: {e}")
+    
     # Initialize auth manager
     if 'auth_manager' not in st.session_state:
         st.session_state['auth_manager'] = AuthManager()
@@ -488,24 +499,16 @@ def main():
             st.warning("⚠️ Your session has expired. Please login again.")
             st.stop()
         
-        # Pre-load RAG system in background after login (only once per session)
+        # Ensure models are ready after login (instant if background preload finished)
         if not st.session_state.get('models_initialized', False):
-            # Show subtle loading indicator at top
-            loading_placeholder = st.empty()
-            loading_placeholder.info("🤖 Loading AI models in background... (This happens once per session)")
-            
             try:
-                # Initialize RAG system (cached, so subsequent calls are instant)
                 st.session_state['rag_system'] = initialize_rag_system()
                 st.session_state['models_initialized'] = True
-                loading_placeholder.success("✅ AI models ready!")
-                import time
-                time.sleep(1)  # Brief success message
-                loading_placeholder.empty()
+                logger.info("✅ RAG system ready after login (preloaded if available)")
             except Exception as e:
-                logger.error(f"Failed to pre-load RAG system: {e}", exc_info=True)
-                loading_placeholder.error(f"⚠️ Model loading failed: {e}. Will retry on first query.")
-                # Don't stop - allow user to proceed, models will load on first query
+                logger.error(f"Failed to initialize RAG system after login: {e}", exc_info=True)
+                st.error("⚠️ Model loading failed. Please refresh.")
+                st.stop()
         
         # Show main application
         main_application()
