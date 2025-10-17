@@ -34,18 +34,17 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
     
     with col1:
         # Thumbs up button (always enabled to allow validating each response instance)
-        if st.button("👍", key=f"thumbs_up_{hash(query)}", 
-                    help="Mark as helpful"):
-                # Save positive feedback
-                success = feedback_manager.save_feedback(
-                    query=query,
-                    answer=response.answer,
-                    is_helpful=True,
-                    confidence=response.confidence,
-                    intent_type=response.intent.intent_type,
-                    sources=source_names,
-                    user=user
-                )
+        if st.button("👍", key=f"thumbs_up_{hash(query)}", help="Mark as helpful"):
+            # Save positive feedback
+            success = feedback_manager.save_feedback(
+                query=query,
+                answer=response.answer,
+                is_helpful=True,
+                confidence=response.confidence,
+                intent_type=response.intent.intent_type,
+                sources=source_names,
+                user=user
+            )
             if success:
                 # Also cache the validated response for instant future answers
                 try:
@@ -67,18 +66,17 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
     
     with col2:
         # Thumbs down button (always enabled)
-        if st.button("👎", key=f"thumbs_down_{hash(query)}", 
-                    help="Mark as unhelpful"):
-                # Save negative feedback
-                success = feedback_manager.save_feedback(
-                    query=query,
-                    answer=response.answer,
-                    is_helpful=False,
-                    confidence=response.confidence,
-                    intent_type=response.intent.intent_type,
-                    sources=source_names,
-                    user=user
-                )
+        if st.button("👎", key=f"thumbs_down_{hash(query)}", help="Mark as unhelpful"):
+            # Save negative feedback
+            success = feedback_manager.save_feedback(
+                query=query,
+                answer=response.answer,
+                is_helpful=False,
+                confidence=response.confidence,
+                intent_type=response.intent.intent_type,
+                sources=source_names,
+                user=user
+            )
             if success:
                 # Ensure any cached version is removed
                 try:
