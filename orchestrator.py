@@ -33,6 +33,88 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# QUERY CACHE - Only caches user-validated good answers
+# ============================================================================
+
+class QueryCache:
+    """
+    In-memory cache for RAG queries.
+    Only caches responses that users marked as helpful (thumbs up 👍).
+    """
+    
+    def __init__(self, max_size: int = 1000):
+        self.cache = {}
+        self.max_size = max_size
+        self.hits = 0
+        self.misses = 0
+        logger.info(f"💾 QueryCache initialized (max_size: {max_size})")
+    
+    def _hash_query(self, query: str, top_k: int = 10, alpha: float = 0.5) -> str:
+        """Create cache key from query parameters."""
+        key = f"{query.lower().strip()}:{top_k}:{alpha}"
+        return hashlib.md5(key.encode()).hexdigest()
+    
+    def get(self, query: str, top_k: int = 10, alpha: float = 0.5):
+        """Try to get cached response."""
+        key = self._hash_query(query, top_k, alpha)
+        
+        if key in self.cache:
+            self.hits += 1
+            hit_rate = self.hits / (self.hits + self.misses) * 100
+            logger.info(f"💾 ✅ CACHE HIT! Serving validated answer instantly")
+            logger.info(f"   Cache stats: {self.hits} hits / {self.misses} misses ({hit_rate:.1f}% hit rate)")
+            return self.cache[key]
+        
+        self.misses += 1
+        total = self.hits + self.misses
+        hit_rate = self.hits / total * 100 if total > 0 else 0
+        logger.info(f"💾 ❌ Cache miss - will run full RAG")
+        logger.info(f"   Cache stats: {self.hits} hits / {self.misses} misses ({hit_rate:.1f}% hit rate)")
+        return None
+    
+    def set(self, query: str, response, top_k: int = 10, alpha: float = 0.5):
+        """Cache a user-validated response."""
+        key = self._hash_query(query, top_k, alpha)
+        
+        # LRU eviction if cache is full
+        if len(self.cache) >= self.max_size:
+            # Remove oldest entry (first in dict)
+            oldest = next(iter(self.cache))
+            del self.cache[oldest]
+            logger.info(f"💾 Evicted oldest cache entry (cache was full)")
+        
+        self.cache[key] = response
+        logger.info(f"💾 ✅ CACHED validated answer (cache size: {len(self.cache)}/{self.max_size})")
+        logger.info(f"   This answer will be served instantly for future identical queries!")
+    
+    def remove(self, query: str, top_k: int = 10, alpha: float = 0.5):
+        """Remove a cached response (e.g., if marked unhelpful later)."""
+        key = self._hash_query(query, top_k, alpha)
+        if key in self.cache:
+            del self.cache[key]
+            logger.info(f"💾 Removed query from cache")
+            return True
+        return False
+    
+    @property
+    def hit_rate(self) -> float:
+        """Get cache hit rate as percentage."""
+        total = self.hits + self.misses
+        return (self.hits / total * 100) if total > 0 else 0.0
+    
+    def stats(self) -> dict:
+        """Get cache statistics."""
+        return {
+            'size': len(self.cache),
+            'max_size': self.max_size,
+            'hits': self.hits,
+            'misses': self.misses,
+            'hit_rate': self.hit_rate,
+            'total_queries': self.hits + self.misses
+        }
+
+
 @dataclass
 class QueryIntent:
     """Classified query intent with metadata."""
@@ -1140,6 +1222,9 @@ class RAGOrchestrator:
         self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
         self.answer_generator = ClaudeAnswerGenerator() if enable_llm_answers else None
 
+        # User-validated cache (only stores answers marked helpful)
+        self.cache = QueryCache(max_size=1000)
+
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         try:
             import yaml
@@ -1318,6 +1403,17 @@ class RAGOrchestrator:
         
         start_time = time.time()
         logger.info(f"🎯 Orchestrating query: {query}")
+
+        # ------------------------------------------------------------------
+        # ⚡ User-validated cache: serve instantly if previously marked helpful
+        # ------------------------------------------------------------------
+        try:
+            cached = self.cache.get(query, top_k, alpha)
+            if cached is not None:
+                logger.info("✅ Served from user-validated cache")
+                return cached
+        except Exception as e:
+            logger.warning(f"Cache lookup failed (continuing without cache): {e}")
         
         # Step 1: Classify intent
         intent = self.intent_classifier.classify(query)
