@@ -40,6 +40,10 @@ backup_storage/
 # Extracted content
 extracted_content/
 
+# Backup directories
+*_backup/
+backup_*/
+
 # Logs
 *.log
 logs/
@@ -48,6 +52,12 @@ logs/
 *.tmp
 *.bak
 *.tar.gz
+temp/
+
+# Test files
+test*.py
+mock_*.py
+*_test.py
 
 # HuggingFace cache (too large for git)
 .cache/
