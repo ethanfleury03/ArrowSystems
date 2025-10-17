@@ -17,6 +17,8 @@ from datetime import datetime
 from collections import defaultdict
 import numpy as np
 import streamlit as st
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 from llama_index.core import StorageContext, load_index_from_storage, Settings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -272,7 +274,7 @@ class HybridRetriever:
         metadata_filters: Optional[Dict[str, Any]] = None
     ) -> List[NodeWithScore]:
         """
-        Perform hybrid search combining BM25 and dense embeddings.
+        Perform hybrid search combining BM25 and dense embeddings (in parallel).
         
         Args:
             query: Search query
@@ -283,11 +285,14 @@ class HybridRetriever:
         Returns:
             Ranked list of nodes
         """
-        # Get dense results
-        dense_results = self.dense_search(query, top_k=top_k * 2)
-        
-        # Get BM25 results
-        bm25_results = self.bm25_search(query, top_k=top_k * 2)
+        # ⚡ PARALLEL EXECUTION: Run BM25 and dense search simultaneously
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            dense_future = executor.submit(self.dense_search, query, top_k * 2)
+            bm25_future = executor.submit(self.bm25_search, query, top_k * 2)
+            
+            # Wait for both to complete
+            dense_results = dense_future.result()
+            bm25_results = bm25_future.result()
         
         # Combine results with scoring
         combined_scores = defaultdict(lambda: {'dense': 0.0, 'bm25': 0.0, 'node': None})
@@ -1311,6 +1316,7 @@ class RAGOrchestrator:
             StructuredResponse with answer, reasoning, and sources
         """
         
+        start_time = time.time()
         logger.info(f"🎯 Orchestrating query: {query}")
         
         # Step 1: Classify intent
@@ -1365,17 +1371,30 @@ class RAGOrchestrator:
             except Exception as e:
                 logger.debug(f"Glossary fast-path failed: {e}")
 
-        # Step 3: Hybrid retrieval with LLM evaluation
+        # Step 3: Hybrid retrieval with LLM evaluation (⚡ PARALLEL)
         all_nodes = []
-        for q_variant in query_variations[:3]:  # Use top 3 variations
-            nodes = self.retriever.hybrid_search_with_llm_evaluation(
-                query=q_variant,
-                top_k=top_k,
-                alpha=alpha,
-                metadata_filters=metadata_filters,
-                enable_llm_evaluation=self.enable_llm_evaluation
-            )
-            all_nodes.extend(nodes)
+        
+        # Run all query variations in parallel for 3x speedup
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = []
+            for q_variant in query_variations[:3]:  # Use top 3 variations
+                future = executor.submit(
+                    self.retriever.hybrid_search_with_llm_evaluation,
+                    query=q_variant,
+                    top_k=top_k,
+                    alpha=alpha,
+                    metadata_filters=metadata_filters,
+                    enable_llm_evaluation=self.enable_llm_evaluation
+                )
+                futures.append(future)
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                try:
+                    nodes = future.result()
+                    all_nodes.extend(nodes)
+                except Exception as e:
+                    logger.warning(f"Query variation failed: {e}")
         
         # Deduplicate by node_id
         seen = set()
@@ -1387,6 +1406,9 @@ class RAGOrchestrator:
         
         # Sort by score and limit
         unique_nodes.sort(key=lambda x: x.score, reverse=True)
+        
+        retrieval_time = time.time() - start_time
+        logger.info(f"⚡ Retrieval completed in {retrieval_time:.2f}s (parallel execution)")
         
         # Step 4: Dynamic context windowing
         if dynamic_windowing:
