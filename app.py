@@ -272,14 +272,19 @@ def initialize_rag_system():
         # Import only when needed (avoids loading torch in mock mode)
         from query import EliteRAGQuery
         
-        # Determine storage path
-        if os.path.exists("/workspace/storage"):
+        # Determine storage path (check latest_model first for two-pod workflow)
+        if os.path.exists("latest_model"):
+            storage_path = "latest_model"
+        elif os.path.exists("/workspace/latest_model"):
+            storage_path = "/workspace/latest_model"
+        # Backward compatibility: check old storage locations
+        elif os.path.exists("/workspace/storage"):
             storage_path = "/workspace/storage"
         elif os.path.exists("./storage"):
             storage_path = "./storage"
         else:
             raise FileNotFoundError(
-                "Storage directory not found. Please run 'python ingest.py' first."
+                "Index not found. Please run 'python ingest.py' first, or pull from git if using pre-built index."
             )
         
         logger.info(f"Using storage path: {storage_path}")
