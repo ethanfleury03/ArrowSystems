@@ -54,3 +54,10 @@ glossary:
   # CSV format: term,definition,aliases (pipe-separated)
   # PDF format: simple "Term: Definition" lines
   auto_populate_acronyms: true  # Auto-populate acronym map from aliases
+
+# Cache Configuration
+cache:
+  semantic:
+    enabled: true
+    threshold: 0.90   # Lower threshold to favor paraphrase hits
+    max_size: 500
