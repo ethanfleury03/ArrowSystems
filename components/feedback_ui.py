@@ -58,8 +58,12 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
                             # Retrieve latest query params if present
                             top_k = st.session_state.get('last_top_k', 10)
                             alpha = st.session_state.get('last_alpha', 0.5)
+                            # Exact cache
                             rag.cache.set(query, response, top_k=top_k, alpha=alpha)
-                    except Exception as e:
+                            # Semantic cache
+                            if getattr(rag, 'semantic_cache', None) is not None:
+                                rag.semantic_cache.set(query, response)
+                    except Exception:
                         # Non-fatal; caching is best-effort
                         pass
                     st.success("✅ Saved to helpful answers!", icon="✅")
@@ -91,6 +95,8 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
                             top_k = st.session_state.get('last_top_k', 10)
                             alpha = st.session_state.get('last_alpha', 0.5)
                             rag.cache.remove(query, top_k=top_k, alpha=alpha)
+                            if getattr(rag, 'semantic_cache', None) is not None:
+                                rag.semantic_cache.remove(query)
                     except Exception:
                         pass
                     st.warning("📝 Marked as unhelpful", icon="📝")
