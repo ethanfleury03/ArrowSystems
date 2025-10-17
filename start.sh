@@ -156,6 +156,20 @@ fi
 
 echo ""
 
+# Smart PyTorch detection - skip re-downloading if already installed
+SKIP_TORCH=false
+if python -c "import torch" 2>/dev/null; then
+    TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+    CUDA_AVAILABLE=$(python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null)
+    
+    echo "🔍 PyTorch Detection:"
+    echo "   ✅ PyTorch $TORCH_VERSION already installed"
+    echo "   ✅ CUDA available: $CUDA_AVAILABLE"
+    echo "   ⚡ Will skip torch in requirements.txt (saves ~2.2GB + 5 min)"
+    echo ""
+    SKIP_TORCH=true
+fi
+
 # Install missing dependencies with smart handling
 if [ "$MISSING_CORE" = true ]; then
     echo "📥 Installing all dependencies from requirements.txt..."
@@ -164,16 +178,24 @@ if [ "$MISSING_CORE" = true ]; then
     
     pip install --upgrade pip -q
     
+    if [ "$SKIP_TORCH" = true ]; then
+        # Create temporary requirements without torch
+        grep -vE "^torch[>=<]|^torchvision" requirements.txt > /tmp/requirements_no_torch.txt
+        REQUIREMENTS_FILE="/tmp/requirements_no_torch.txt"
+    else
+        REQUIREMENTS_FILE="requirements.txt"
+    fi
+    
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install to user directory to avoid system conflicts
-        pip install -r requirements.txt \
+        pip install -r "$REQUIREMENTS_FILE" \
             --user \
             --upgrade-strategy only-if-needed \
             --ignore-installed cryptography \
             --no-warn-script-location
     else
         # On local: Normal install in venv
-        pip install -r requirements.txt
+        pip install -r "$REQUIREMENTS_FILE"
     fi
     
     echo ""
@@ -186,11 +208,19 @@ elif [ "$MISSING_UI" = true ]; then
     
     pip install --upgrade pip -q
     
+    if [ "$SKIP_TORCH" = true ]; then
+        # Use filtered requirements without torch
+        grep -vE "^torch[>=<]|^torchvision" requirements.txt > /tmp/requirements_no_torch.txt
+        REQUIREMENTS_FILE="/tmp/requirements_no_torch.txt"
+    else
+        REQUIREMENTS_FILE="requirements.txt"
+    fi
+    
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install all requirements
         # Use --upgrade-strategy only-if-needed to skip reinstalling satisfied dependencies
         echo "   Note: Skipping already-satisfied dependencies (PyTorch, Transformers, etc.)"
-        pip install -r requirements.txt \
+        pip install -r "$REQUIREMENTS_FILE" \
                     --user \
                     --upgrade-strategy only-if-needed \
                     --ignore-installed cryptography \
@@ -198,8 +228,8 @@ elif [ "$MISSING_UI" = true ]; then
         
         INSTALL_STATUS=$?
     else
-        # On local: Install everything from requirements.txt
-        pip install -r requirements.txt
+        # On local: Install everything from requirements
+        pip install -r "$REQUIREMENTS_FILE"
         
         INSTALL_STATUS=$?
     fi
