@@ -1,5 +1,10 @@
 # Configuration for Technical RAG Pipeline with Non-Text Content Support
 
+# Storage Configuration
+storage:
+  directory: "latest_model"  # Directory for RAG index (tracked in git for two-pod workflow)
+  # Old path was "/workspace/storage" - now using "latest_model" for git tracking
+
 # Qdrant Vector Database Configuration
 qdrant:
   url: "https://your-cluster-url.qdrant.tech"  # Use Qdrant Cloud

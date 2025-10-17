@@ -84,7 +84,7 @@ class TechnicalRAGQuery(EliteRAGQuery):
         self.embed_model = self.orchestrator.embed_model
         self.reranker = self.orchestrator.reranker
     
-    def load_index(self, storage_dir="/workspace/storage"):
+    def load_index(self, storage_dir="latest_model"):
         """Legacy method - redirects to new load."""
         self.orchestrator.load_index(storage_dir=storage_dir)
         self.index = self.orchestrator.index

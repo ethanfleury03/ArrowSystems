@@ -1264,10 +1264,14 @@ class RAGOrchestrator:
         Settings.embed_model = self.embed_model
         logger.info("✅ Models initialized successfully")
     
-    def load_index(self, storage_dir="/workspace/storage"):
-        """Load existing index."""
+    def load_index(self, storage_dir="latest_model"):
+        """Load existing index from latest_model/ directory."""
         if not os.path.exists(storage_dir):
-            raise FileNotFoundError(f"Index not found at {storage_dir}")
+            raise FileNotFoundError(
+                f"Index not found at {storage_dir}. "
+                f"Run 'python ingest.py' to build the index first, "
+                f"or pull from git if using pre-built index."
+            )
         
         logger.info("🔄 Loading index...")
         storage_context = StorageContext.from_defaults(persist_dir=storage_dir)

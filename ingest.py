@@ -8,6 +8,8 @@ import warnings
 # Suppress annoying Pydantic warnings
 warnings.filterwarnings("ignore", message=".*validate_default.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+# Suppress pypdf warnings for malformed PDFs
+warnings.filterwarnings("ignore", message=".*wrong pointing object.*")
 
 import os
 import logging
@@ -41,6 +43,10 @@ import tarfile
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Suppress pypdf warnings for malformed PDFs
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+logging.getLogger("pypdf._reader").setLevel(logging.ERROR)
 
 class NonTextExtractor:
     """Extract and process non-text content from documents."""
@@ -442,7 +448,7 @@ class TechnicalRAGPipeline:
             logger.warning(f"Qdrant not available, using local storage: {e}")
             return None
     
-    def build_index(self, data_dir="data", storage_dir="/workspace/storage", use_qdrant=False):
+    def build_index(self, data_dir="data", storage_dir="latest_model", use_qdrant=False):
         """Build or load vector index with optimized chunking and non-text content."""
         
         # Initialize models
@@ -453,14 +459,15 @@ class TechnicalRAGPipeline:
         if use_qdrant:
             storage_context = self.setup_qdrant_storage()
         
-        # Check if index already exists (only for local storage)
+        # For local storage: always rebuild (clear old index first)
         if not use_qdrant and os.path.exists(storage_dir):
-            logger.info("🔄 Loading existing index...")
-            if storage_context is None:
-                storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
-            self.index = load_index_from_storage(storage_context)
-            logger.info("✅ Index loaded successfully")
-            return self.index
+            logger.info(f"🗑️  Clearing old index from {storage_dir} for fresh rebuild...")
+            shutil.rmtree(storage_dir)
+            logger.info("✅ Old index cleared - ready for fresh build")
+        
+        # Create storage directory if it doesn't exist
+        if not use_qdrant:
+            os.makedirs(storage_dir, exist_ok=True)
         
         print("\n" + "="*70)
         print("📥 BUILDING NEW RAG INDEX")
@@ -566,6 +573,11 @@ class TechnicalRAGPipeline:
         print(f"⏱️  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
         if not use_qdrant:
             print(f"📁 Storage location: {storage_dir}")
+            print(f"\n💡 Two-Pod Workflow:")
+            print(f"   1. git add {storage_dir}/")
+            print(f"   2. git commit -m 'Update RAG index'")
+            print(f"   3. git push")
+            print(f"   4. Switch to cheap pod → git pull → streamlit run app.py")
         print(f"📂 Extracted content: extracted_content/")
         print(f"🔍 Ready to query!")
         print("="*70 + "\n")
