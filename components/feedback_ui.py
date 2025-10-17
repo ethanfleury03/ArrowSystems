@@ -5,6 +5,7 @@ Thumbs up/down buttons and saved answers display
 import streamlit as st
 from typing import Optional
 from utils.feedback_manager import FeedbackManager
+from orchestrator import RAGOrchestrator  # for cache access via session rag_system
 
 def render_feedback_buttons(response, query: str, user: str = "Unknown"):
     """
@@ -50,6 +51,17 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
                     user=user
                 )
                 if success:
+                    # Also cache the validated response for instant future answers
+                    try:
+                        if 'rag_system' in st.session_state and hasattr(st.session_state['rag_system'], 'orchestrator'):
+                            rag = st.session_state['rag_system'].orchestrator
+                            # Retrieve latest query params if present
+                            top_k = st.session_state.get('last_top_k', 10)
+                            alpha = st.session_state.get('last_alpha', 0.5)
+                            rag.cache.set(query, response, top_k=top_k, alpha=alpha)
+                    except Exception as e:
+                        # Non-fatal; caching is best-effort
+                        pass
                     st.success("✅ Saved to helpful answers!", icon="✅")
                     st.rerun()
     
@@ -72,6 +84,15 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
                     user=user
                 )
                 if success:
+                    # Ensure any cached version is removed
+                    try:
+                        if 'rag_system' in st.session_state and hasattr(st.session_state['rag_system'], 'orchestrator'):
+                            rag = st.session_state['rag_system'].orchestrator
+                            top_k = st.session_state.get('last_top_k', 10)
+                            alpha = st.session_state.get('last_alpha', 0.5)
+                            rag.cache.remove(query, top_k=top_k, alpha=alpha)
+                    except Exception:
+                        pass
                     st.warning("📝 Marked as unhelpful", icon="📝")
                     st.rerun()
     

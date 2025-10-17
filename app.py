@@ -401,6 +401,9 @@ def main_application():
             st.stop()
         
         rag_system = st.session_state['rag_system']
+        # Persist last-used query params for caching keys
+        st.session_state['last_top_k'] = query_params['top_k']
+        st.session_state['last_alpha'] = query_params['alpha']
         
         # Add to history
         add_to_query_history(query)
