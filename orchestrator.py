@@ -115,6 +115,75 @@ class QueryCache:
         }
 
 
+# ============================================================================
+# SEMANTIC CACHE - Matches similar queries via embeddings (gated by 👍)
+# ============================================================================
+
+class SemanticCache:
+    """
+    Semantic cache that stores (embedding, query, response) and returns
+    cached responses for semantically similar queries.
+    """
+    def __init__(self, embed_model, threshold: float = 0.95, max_size: int = 500):
+        self.embed_model = embed_model
+        self.threshold = threshold
+        self.max_size = max_size
+        self.entries = []  # list of dicts: {'emb': np.array, 'query': str, 'response': StructuredResponse}
+        logger.info(f"💾 SemanticCache initialized (threshold={threshold}, max_size={max_size})")
+    
+    @staticmethod
+    def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+        if a is None or b is None:
+            return 0.0
+        an = a / (np.linalg.norm(a) + 1e-12)
+        bn = b / (np.linalg.norm(b) + 1e-12)
+        return float(np.dot(an, bn))
+    
+    def get(self, query: str):
+        """Return cached response if similarity exceeds threshold."""
+        try:
+            q_emb = np.array(self.embed_model.get_text_embedding(query), dtype=np.float32)
+        except Exception as e:
+            logger.debug(f"SemanticCache embedding failed: {e}")
+            return None
+        
+        best_score = 0.0
+        best_resp = None
+        for entry in self.entries:
+            score = self._cosine_similarity(q_emb, entry['emb'])
+            if score > best_score:
+                best_score = score
+                best_resp = entry['response']
+        
+        if best_score >= self.threshold and best_resp is not None:
+            logger.info(f"💾 ✅ SEMANTIC CACHE HIT (similarity={best_score:.2f})")
+            return best_resp
+        else:
+            logger.info(f"💾 ❌ Semantic cache miss (best={best_score:.2f} < {self.threshold})")
+            return None
+    
+    def set(self, query: str, response):
+        """Store a validated response with its embedding."""
+        try:
+            q_emb = np.array(self.embed_model.get_text_embedding(query), dtype=np.float32)
+        except Exception as e:
+            logger.debug(f"SemanticCache embedding failed on set: {e}")
+            return
+        # Evict oldest if full
+        if len(self.entries) >= self.max_size:
+            self.entries.pop(0)
+        self.entries.append({'emb': q_emb, 'query': query, 'response': response})
+        logger.info(f"💾 ✅ Added to semantic cache (size: {len(self.entries)}/{self.max_size})")
+    
+    def remove(self, query: str):
+        """Remove entries that match the exact query text."""
+        before = len(self.entries)
+        self.entries = [e for e in self.entries if e['query'] != query]
+        after = len(self.entries)
+        if after < before:
+            logger.info(f"💾 Removed {before-after} entry(ies) from semantic cache for query")
+
+
 @dataclass
 class QueryIntent:
     """Classified query intent with metadata."""
@@ -1224,6 +1293,7 @@ class RAGOrchestrator:
 
         # User-validated cache (only stores answers marked helpful)
         self.cache = QueryCache(max_size=1000)
+        self.semantic_cache = None  # Initialized after models are ready
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         try:
@@ -1350,6 +1420,17 @@ class RAGOrchestrator:
             logger.warning(f"Re-ranker not available: {e}")
             self.reranker = None
         
+        # Initialize semantic cache after embed model is ready
+        try:
+            cache_cfg = (self.config or {}).get('cache', {})
+            sem_cfg = cache_cfg.get('semantic', {})
+            if sem_cfg.get('enabled', True):
+                threshold = float(sem_cfg.get('threshold', 0.95))
+                max_size = int(sem_cfg.get('max_size', 500))
+                self.semantic_cache = SemanticCache(self.embed_model, threshold=threshold, max_size=max_size)
+        except Exception as e:
+            logger.warning(f"Semantic cache init failed: {e}")
+
         # Set global settings
         Settings.embed_model = self.embed_model
         logger.info("✅ Models initialized successfully")
@@ -1406,12 +1487,21 @@ class RAGOrchestrator:
 
         # ------------------------------------------------------------------
         # ⚡ User-validated cache: serve instantly if previously marked helpful
+        #    1) Exact-match cache (query + params)
+        #    2) Semantic cache (embedding similarity >= threshold)
         # ------------------------------------------------------------------
         try:
+            # 1) Exact match
             cached = self.cache.get(query, top_k, alpha)
             if cached is not None:
-                logger.info("✅ Served from user-validated cache")
+                logger.info("✅ Served from user-validated cache (exact match)")
                 return cached
+            # 2) Semantic match
+            if self.semantic_cache is not None:
+                scached = self.semantic_cache.get(query)
+                if scached is not None:
+                    logger.info("✅ Served from user-validated cache (semantic match)")
+                    return scached
         except Exception as e:
             logger.warning(f"Cache lookup failed (continuing without cache): {e}")
         
