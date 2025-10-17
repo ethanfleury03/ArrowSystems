@@ -253,26 +253,19 @@ def render_answer_tab(response: StructuredResponse):
     
     st.markdown("---")
     
-    # SIDE-BY-SIDE LAYOUT: Answer on left, Referenced content on right
-    answer_col, content_col = st.columns([1.5, 1])
+    # Full-width answer layout (sources are in the Sources tab)
+    # Split answer into chunks by citation
+    render_answer_chunks(response)
     
-    with answer_col:
-        # Split answer into chunks by citation
-        render_answer_chunks(response)
-        
-        # Keywords
-        if response.intent.keywords:
-            st.markdown("#### 🔑 Key Terms:")
-            keyword_badges = " ".join([
-                f"<span style='background: #e9ecef; padding: 0.3rem 0.8rem; border-radius: 15px; "
-                f"margin: 0.2rem; display: inline-block; font-size: 0.9rem;'>{kw}</span>"
-                for kw in response.intent.keywords[:10]
-            ])
-            st.markdown(keyword_badges, unsafe_allow_html=True)
-    
-    with content_col:
-        # Display referenced content (tables, images, charts)
-        render_referenced_content(response)
+    # Keywords
+    if response.intent.keywords:
+        st.markdown("#### 🔑 Key Terms:")
+        keyword_badges = " ".join([
+            f"<span style='background: #e9ecef; padding: 0.3rem 0.8rem; border-radius: 15px; "
+            f"margin: 0.2rem; display: inline-block; font-size: 0.9rem;'>{kw}</span>"
+            for kw in response.intent.keywords[:10]
+        ])
+        st.markdown(keyword_badges, unsafe_allow_html=True)
 
 
 def render_referenced_content(response: StructuredResponse):
