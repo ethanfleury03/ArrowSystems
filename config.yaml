@@ -41,3 +41,11 @@ llm_evaluation:
   enable_caching: true  # Cache evaluation results
   temperature: 0.1      # Low temperature for consistency
   max_tokens: 500       # Maximum tokens for LLM response
+
+# Glossary Configuration
+glossary:
+  enabled: true              # Enable glossary-based query augmentation
+  path: "data/glossary.csv"  # Path to glossary file (CSV or PDF)
+  # CSV format: term,definition,aliases (pipe-separated)
+  # PDF format: simple "Term: Definition" lines
+  auto_populate_acronyms: true  # Auto-populate acronym map from aliases

@@ -1,0 +1,17 @@
+term,definition,aliases
+PPU,Printhead Power Unit - provides electrical power to the printhead assembly,ppu|printhead power unit
+DPI,Dots Per Inch - measurement of print resolution,dpi|dots per inch
+CLI,Command Line Interface - text-based user interface,cli|command line|cmd
+GUI,Graphical User Interface - visual user interface with windows and icons,gui|graphical interface
+API,Application Programming Interface - allows software components to communicate,api|application interface
+Firmware,Software embedded in hardware devices that controls basic operations,fw|firm ware
+Substrate,Material being printed on such as fabric or vinyl,substrate|media|material
+RIP,Raster Image Processor - converts vector graphics to raster format,rip|raster processor
+CMYK,Cyan Magenta Yellow Key (black) - four-color printing process,cmyk|four color
+RGB,Red Green Blue - additive color model for displays,rgb|red green blue
+Calibration,Process of adjusting equipment to ensure accurate output,calibration|calibrate
+Resolution,Level of detail in an image measured in DPI or pixels,resolution|image quality
+Throughput,Amount of material or data processed per unit time,throughput|processing speed
+Latency,Time delay between input and response,latency|lag|delay
+Bandwidth,Data transfer capacity measured in bits per second,bw|bandwidth|data rate
+

@@ -1117,7 +1117,7 @@ class RAGOrchestrator:
     and structured response generation.
     """
     
-    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = False, enable_llm_answers: bool = True):
+    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = False, enable_llm_answers: bool = True, config_path: str = "config.yaml"):
         self.cache_dir = cache_dir
         self.embed_model = None
         self.reranker = None
@@ -1125,6 +1125,8 @@ class RAGOrchestrator:
         self.retriever = None
         self.enable_llm_evaluation = enable_llm_evaluation
         self.enable_llm_answers = enable_llm_answers
+        self.config = self._load_config(config_path)
+        self.glossary_index = None
         
         # Components
         self.query_rewriter = QueryRewriter()
@@ -1132,6 +1134,55 @@ class RAGOrchestrator:
         self.response_generator = ResponseGenerator()
         self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
         self.answer_generator = ClaudeAnswerGenerator() if enable_llm_answers else None
+
+    def _load_config(self, config_path: str) -> Dict[str, Any]:
+        try:
+            import yaml
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning(f"Failed to load config: {e}")
+        return {}
+
+    def _load_glossary_index(self):
+        try:
+            glossary_cfg = (self.config or {}).get('glossary', {})
+            if not glossary_cfg or not glossary_cfg.get('enabled', False):
+                return
+            path = glossary_cfg.get('path') or ''
+            if not path:
+                return
+            if not os.path.isabs(path):
+                # Resolve relative to project root
+                path = os.path.join(os.getcwd(), path)
+            if not os.path.exists(path):
+                logger.warning(f"Glossary file not found at {path}")
+                return
+            from glossary_loader import load_glossary_any
+            nodes = load_glossary_any(path)
+            if not nodes:
+                logger.warning("No glossary entries loaded")
+                return
+            from llama_index.core import VectorStoreIndex
+            self.glossary_index = VectorStoreIndex.from_documents(nodes, show_progress=False)
+            logger.info(f"✅ Loaded glossary index with {len(nodes)} entries from {path}")
+            # Optionally enrich acronym map from aliases
+            try:
+                # Fetch all nodes by a dummy query
+                retr = self.glossary_index.as_retriever(similarity_top_k=min(500, len(nodes)))
+                hits = retr.retrieve("glossary")
+                for h in hits:
+                    md = getattr(h, 'metadata', {}) or {}
+                    term = (md.get('term') or '').strip()
+                    for a in md.get('aliases', []) or []:
+                        a_low = a.lower()
+                        if 1 < len(a_low) <= 10 and a_low.isalnum():
+                            self.query_rewriter.acronym_map[a_low] = term
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"Glossary index init failed: {e}")
     
     def initialize_models(self):
         """Initialize embedding and re-ranking models."""
@@ -1231,6 +1282,8 @@ class RAGOrchestrator:
         )
         
         logger.info("✅ Index and retriever initialized")
+        # Initialize glossary if configured
+        self._load_glossary_index()
     
     def orchestrate_query(
         self,
@@ -1260,10 +1313,54 @@ class RAGOrchestrator:
         intent = self.intent_classifier.classify(query)
         logger.info(f"📋 Intent: {intent.intent_type} (confidence: {intent.confidence:.2%})")
         
+        # Optional: glossary augmentation
+        augmented_query = query
+        glossary_defs: List[str] = []
+        if self.glossary_index:
+            try:
+                retr = self.glossary_index.as_retriever(similarity_top_k=5)
+                gloss_hits = retr.retrieve(query)
+                # Build alias expansion and capture up to one definition
+                aliases: List[str] = []
+                for h in gloss_hits[:3]:
+                    md = getattr(h, 'metadata', {}) or {}
+                    aliases.extend(md.get('aliases', []) or [])
+                    term = (md.get('term') or '').strip()
+                    if term and len(glossary_defs) < 1:
+                        # Extract definition from "term: definition"
+                        parts = (h.text or '').split(':', 1)
+                        if len(parts) == 2:
+                            glossary_defs.append(f"{term}: {parts[1].strip()}")
+                aliases = [a for a in dict.fromkeys([a for a in aliases if a])]  # dedupe
+                if aliases:
+                    augmented_query = f"{query} ({' | '.join(aliases)})"
+            except Exception as e:
+                logger.debug(f"Glossary augmentation skipped: {e}")
+
         # Step 2: Rewrite query
-        query_variations = self.query_rewriter.rewrite_query(query, intent)
+        query_variations = self.query_rewriter.rewrite_query(augmented_query, intent)
         logger.info(f"🔄 Generated {len(query_variations)} query variations")
         
+        # If definitional query and glossary available, answer from glossary fast-path
+        is_def = intent.intent_type == 'definition'
+        if is_def and self.glossary_index:
+            try:
+                gloss = self.glossary_index.as_retriever(similarity_top_k=3).retrieve(query)
+                if gloss:
+                    # Build a minimal context-like response from glossary
+                    answer = "\n".join([g.text for g in gloss])
+                    response = StructuredResponse(
+                        query=query,
+                        answer=answer,
+                        reasoning="Answered from glossary entries.",
+                        sources=[{'id': '[G]', 'name': 'Glossary', 'pages': 'N/A', 'content_type': 'text'}],
+                        confidence=0.9,
+                        intent=intent,
+                    )
+                    return response
+            except Exception as e:
+                logger.debug(f"Glossary fast-path failed: {e}")
+
         # Step 3: Hybrid retrieval with LLM evaluation
         all_nodes = []
         for q_variant in query_variations[:3]:  # Use top 3 variations
@@ -1305,6 +1402,11 @@ class RAGOrchestrator:
             intent=intent,
             answer_generator=self.answer_generator
         )
+
+        # Optionally preface with a short glossary definition if we found one
+        if glossary_defs and response and isinstance(response.answer, str):
+            preface = f"Definition: {glossary_defs[0]}\n\n"
+            response.answer = preface + response.answer
         
         logger.info(f"✅ Response generated (confidence: {response.confidence:.2%})")
         
