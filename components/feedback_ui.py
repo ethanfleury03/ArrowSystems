@@ -33,13 +33,9 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
     col1, col2, col3 = st.columns([1, 1, 8])
     
     with col1:
-        # Thumbs up button
-        if existing_rating == True:
-            st.button("👍", disabled=True, key=f"thumbs_up_{hash(query)}", 
-                     help="Already marked as helpful")
-        else:
-            if st.button("👍", key=f"thumbs_up_{hash(query)}", 
-                        help="Mark as helpful"):
+        # Thumbs up button (always enabled to allow validating each response instance)
+        if st.button("👍", key=f"thumbs_up_{hash(query)}", 
+                    help="Mark as helpful"):
                 # Save positive feedback
                 success = feedback_manager.save_feedback(
                     query=query,
@@ -50,33 +46,29 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
                     sources=source_names,
                     user=user
                 )
-                if success:
-                    # Also cache the validated response for instant future answers
-                    try:
-                        if 'rag_system' in st.session_state and hasattr(st.session_state['rag_system'], 'orchestrator'):
-                            rag = st.session_state['rag_system'].orchestrator
-                            # Retrieve latest query params if present
-                            top_k = st.session_state.get('last_top_k', 10)
-                            alpha = st.session_state.get('last_alpha', 0.5)
-                            # Exact cache
-                            rag.cache.set(query, response, top_k=top_k, alpha=alpha)
-                            # Semantic cache
-                            if getattr(rag, 'semantic_cache', None) is not None:
-                                rag.semantic_cache.set(query, response)
-                    except Exception:
-                        # Non-fatal; caching is best-effort
-                        pass
-                    st.success("✅ Saved to helpful answers!", icon="✅")
-                    st.rerun()
+            if success:
+                # Also cache the validated response for instant future answers
+                try:
+                    if 'rag_system' in st.session_state and hasattr(st.session_state['rag_system'], 'orchestrator'):
+                        rag = st.session_state['rag_system'].orchestrator
+                        # Retrieve latest query params if present
+                        top_k = st.session_state.get('last_top_k', 10)
+                        alpha = st.session_state.get('last_alpha', 0.5)
+                        # Exact cache
+                        rag.cache.set(query, response, top_k=top_k, alpha=alpha)
+                        # Semantic cache
+                        if getattr(rag, 'semantic_cache', None) is not None:
+                            rag.semantic_cache.set(query, response)
+                except Exception:
+                    # Non-fatal; caching is best-effort
+                    pass
+                st.success("✅ Saved to helpful answers!", icon="✅")
+                st.rerun()
     
     with col2:
-        # Thumbs down button
-        if existing_rating == False:
-            st.button("👎", disabled=True, key=f"thumbs_down_{hash(query)}", 
-                     help="Already marked as unhelpful")
-        else:
-            if st.button("👎", key=f"thumbs_down_{hash(query)}", 
-                        help="Mark as unhelpful"):
+        # Thumbs down button (always enabled)
+        if st.button("👎", key=f"thumbs_down_{hash(query)}", 
+                    help="Mark as unhelpful"):
                 # Save negative feedback
                 success = feedback_manager.save_feedback(
                     query=query,
@@ -87,20 +79,20 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
                     sources=source_names,
                     user=user
                 )
-                if success:
-                    # Ensure any cached version is removed
-                    try:
-                        if 'rag_system' in st.session_state and hasattr(st.session_state['rag_system'], 'orchestrator'):
-                            rag = st.session_state['rag_system'].orchestrator
-                            top_k = st.session_state.get('last_top_k', 10)
-                            alpha = st.session_state.get('last_alpha', 0.5)
-                            rag.cache.remove(query, top_k=top_k, alpha=alpha)
-                            if getattr(rag, 'semantic_cache', None) is not None:
-                                rag.semantic_cache.remove(query)
-                    except Exception:
-                        pass
-                    st.warning("📝 Marked as unhelpful", icon="📝")
-                    st.rerun()
+            if success:
+                # Ensure any cached version is removed
+                try:
+                    if 'rag_system' in st.session_state and hasattr(st.session_state['rag_system'], 'orchestrator'):
+                        rag = st.session_state['rag_system'].orchestrator
+                        top_k = st.session_state.get('last_top_k', 10)
+                        alpha = st.session_state.get('last_alpha', 0.5)
+                        rag.cache.remove(query, top_k=top_k, alpha=alpha)
+                        if getattr(rag, 'semantic_cache', None) is not None:
+                            rag.semantic_cache.remove(query)
+                except Exception:
+                    pass
+                st.warning("📝 Marked as unhelpful", icon="📝")
+                st.rerun()
     
     with col3:
         # Show status if rated
