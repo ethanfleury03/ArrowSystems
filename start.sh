@@ -258,22 +258,33 @@ if [ ! -f "config/app_config.yaml" ]; then
     echo ""
 fi
 
-# Check if storage/index exists (check multiple locations)
+# Check if index exists in latest_model/ (new location for two-pod workflow)
 STORAGE_PATH=""
-if [ -d "/workspace/storage" ] && [ -f "/workspace/storage/docstore.json" ]; then
+if [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then
+    STORAGE_PATH="latest_model"
+    echo "✅ RAG index found in latest_model/"
+elif [ -d "/workspace/latest_model" ] && [ -f "/workspace/latest_model/docstore.json" ]; then
+    STORAGE_PATH="/workspace/latest_model"
+    echo "✅ RAG index found in /workspace/latest_model/"
+# Fallback: Check old storage locations for backward compatibility
+elif [ -d "/workspace/storage" ] && [ -f "/workspace/storage/docstore.json" ]; then
     STORAGE_PATH="/workspace/storage"
-    echo "✅ RAG index found in /workspace/storage/"
+    echo "✅ RAG index found in /workspace/storage/ (old location)"
+    echo "   💡 Consider migrating: python migrate_to_latest_model.py"
 elif [ -d "storage" ] && [ -f "storage/docstore.json" ]; then
     STORAGE_PATH="storage"
-    echo "✅ RAG index found in ./storage/"
+    echo "✅ RAG index found in ./storage/ (old location)"
+    echo "   💡 Consider migrating: python migrate_to_latest_model.py"
 else
     echo "=========================================="
     echo "⚠️  RAG Index Not Found!"
     echo "=========================================="
     echo ""
     echo "Checked locations:"
-    echo "  • /workspace/storage/"
-    echo "  • ./storage/"
+    echo "  • latest_model/ (default for two-pod workflow)"
+    echo "  • /workspace/latest_model/"
+    echo "  • /workspace/storage/ (legacy)"
+    echo "  • ./storage/ (legacy)"
     echo ""
     echo "The vector index hasn't been built yet."
     echo "You need to run ingestion first to process your PDFs."
