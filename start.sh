@@ -27,6 +27,36 @@ if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; 
     IS_RUNPOD=true
     echo "🖥️  Environment: RunPod GPU Instance"
     echo "📍 GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'Not detected')"
+    
+    # Check for Git LFS and auto-pull large files
+    if [ -f ".gitattributes" ] && grep -q "lfs" .gitattributes 2>/dev/null; then
+        echo ""
+        echo "🔍 Git LFS detected in repository"
+        
+        if ! command -v git-lfs &> /dev/null; then
+            echo "   📥 Installing git-lfs..."
+            apt-get update -qq 2>/dev/null && apt-get install -y git-lfs -qq 2>/dev/null
+            git lfs install --skip-repo 2>/dev/null
+            echo "   ✅ git-lfs installed"
+        fi
+        
+        # Check if LFS files need to be pulled
+        if [ -f "latest_model/default__vector_store.json" ]; then
+            FILE_SIZE=$(stat -f%z "latest_model/default__vector_store.json" 2>/dev/null || stat -c%s "latest_model/default__vector_store.json" 2>/dev/null || echo "0")
+            if [ "$FILE_SIZE" -lt 1000 ]; then
+                echo "   📥 Pulling LFS files (this may take a few minutes)..."
+                git lfs pull 2>/dev/null || git lfs fetch --all && git lfs checkout
+                echo "   ✅ LFS files downloaded (~450MB RAG index)"
+            else
+                echo "   ✅ LFS files already present"
+            fi
+        else
+            echo "   📥 Pulling LFS files..."
+            git lfs pull 2>/dev/null || git lfs fetch --all && git lfs checkout
+            echo "   ✅ LFS files downloaded"
+        fi
+    fi
+    echo ""
 else
     echo "🖥️  Environment: Local Machine"
 fi
