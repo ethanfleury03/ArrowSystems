@@ -387,34 +387,17 @@ def main_application():
     
     query = render_query_input()
     
-    # Lazy load models ONLY when first query is made
-    if query and not st.session_state.get('models_initialized', False):
-        st.info("🤖 First-time setup: Loading AI models (30-60 seconds)...")
-        
-        # Progress bar for visual feedback
-        progress_bar = st.progress(0, text="Initializing...")
-        
-        try:
-            progress_bar.progress(10, text="🔄 Loading embedding model...")
-            st.session_state['rag_system'] = initialize_rag_system()
-            progress_bar.progress(100, text="✅ Models loaded!")
-            st.session_state['models_initialized'] = True
-            
-            # Clear progress and show success
-            progress_bar.empty()
-            st.success("✅ AI models loaded! Processing your query...")
-            
-        except Exception as e:
-            progress_bar.empty()
-            logger.error(f"Failed to initialize AI models: {e}", exc_info=True)
-            st.error(f"❌ Failed to initialize AI models: {e}")
-            st.info("Please refresh the page or contact support if the problem persists.")
-            st.stop()
-    
     if query:
         # Ensure models are loaded before querying
         if not st.session_state.get('models_initialized', False):
-            st.warning("⚠️ Please wait for models to load before querying.")
+            st.warning("⚠️ AI models are still loading. Please wait a moment and try again...")
+            with st.spinner("Loading models now..."):
+                try:
+                    st.session_state['rag_system'] = initialize_rag_system()
+                    st.session_state['models_initialized'] = True
+                    st.success("✅ Models ready! Rerun your query.")
+                except Exception as e:
+                    st.error(f"Failed to load models: {e}")
             st.stop()
         
         rag_system = st.session_state['rag_system']
@@ -501,6 +484,25 @@ def main():
         if not auth_manager.check_session_timeout(timeout_hours=24):
             st.warning("⚠️ Your session has expired. Please login again.")
             st.stop()
+        
+        # Pre-load RAG system in background after login (only once per session)
+        if not st.session_state.get('models_initialized', False):
+            # Show subtle loading indicator at top
+            loading_placeholder = st.empty()
+            loading_placeholder.info("🤖 Loading AI models in background... (This happens once per session)")
+            
+            try:
+                # Initialize RAG system (cached, so subsequent calls are instant)
+                st.session_state['rag_system'] = initialize_rag_system()
+                st.session_state['models_initialized'] = True
+                loading_placeholder.success("✅ AI models ready!")
+                import time
+                time.sleep(1)  # Brief success message
+                loading_placeholder.empty()
+            except Exception as e:
+                logger.error(f"Failed to pre-load RAG system: {e}", exc_info=True)
+                loading_placeholder.error(f"⚠️ Model loading failed: {e}. Will retry on first query.")
+                # Don't stop - allow user to proceed, models will load on first query
         
         # Show main application
         main_application()
