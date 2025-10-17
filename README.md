@@ -99,12 +99,95 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
+---
+
+## 💰 Two-Pod Workflow (Cost Optimization)
+
+Save money by using **two RunPod instances**:
+1. **Ingest Pod** (A100/H100): Fast index building, then terminate
+2. **App Pod** (CPU/small GPU): Cheap runtime with pre-built index
+
+### 🔄 Workflow
+
+#### On Ingest Pod (A100 ~$1.50/hr):
+
+```bash
+# 1. Clone repo
+git clone https://github.com/yourusername/rag_app.py
+cd rag_app.py
+
+# 2. Build index (5-10 minutes on A100)
+python ingest.py
+
+# 3. Push to git
+git add latest_model/
+git commit -m "Update RAG index"
+git push
+
+# 4. Terminate pod (save money!)
+```
+
+#### On App Pod (CPU ~$0.10/hr):
+
+```bash
+# 1. Clone repo with pre-built index
+git clone https://github.com/yourusername/rag_app.py
+cd rag_app.py
+
+# 2. Pull latest index
+git pull
+
+# 3. Run app (works immediately!)
+streamlit run app.py
+```
+
+### 💡 Benefits:
+
+- ✅ **Fast ingestion**: A100 builds index in 5-10 minutes
+- ✅ **Cheap runtime**: CPU pod costs $0.10/hr vs $1.50/hr
+- ✅ **No setup**: Clone and run, index included
+- ✅ **Version controlled**: Index matches code version
+- ✅ **10x cost savings**: Only pay for GPU during ingestion
+
+### 📊 Cost Comparison:
+
+| Scenario | GPU Hours | Cost/Week | Savings |
+|----------|-----------|-----------|---------|
+| **Always A100** | 168 hrs | $252 | - |
+| **Two-Pod Workflow** | 1 hr ingest + 167 hrs CPU | $~18 | **93%** |
+
+### 🔄 When to Re-Ingest:
+
+- Added new PDFs to `data/`
+- Changed chunking settings
+- Updated embedding model
+- Changed glossary
+
+**Otherwise**: Just pull and run! The index is ready.
+
+---
+
 ### Initialize Index
 
 ```bash
 # Build vector index from PDF documents
 python ingest.py
+
+# For two-pod workflow, push to git after ingestion
+git add latest_model/
+git commit -m "Update RAG index"
+git push
 ```
+
+**Migrating from old `storage/` directory?**
+
+If you have an existing `storage/` folder, use the migration script:
+
+```bash
+python migrate_to_latest_model.py
+```
+
+This will copy your existing index to `latest_model/` for the two-pod workflow.
 
 ### Run Queries
 

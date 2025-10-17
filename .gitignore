@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Old storage directory (deprecated - use latest_model/ instead)
+storage/
+backup_storage/
+
+# Extracted content
+extracted_content/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.tar.gz
+
+# HuggingFace cache (too large for git)
+.cache/
+models/
+
+# DO NOT IGNORE: latest_model/ should be tracked in git for two-pod workflow
+# latest_model/ contains the pre-built RAG index for immediate use
+
