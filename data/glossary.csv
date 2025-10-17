@@ -1,0 +1,85 @@
+term,definition,aliases
+AC,Alternating Current - electrical current that reverses direction periodically,ac|alternating current
+Aerosol Extraction System,Extracts and disposes of ink mist from the print zone,aes|aerosol extraction|ink mist extraction
+AES,Aerosol Extraction System - extracts ink mist from print zone,aes|aerosol extraction system
+Back Ink Delivery System,Provides functions of ink pressure regulation filtration and interface to user replaceable tanks,bids|back ink delivery|ink delivery
+BIDS,Back Ink Delivery System - ink pressure regulation and filtration,bids|back ink delivery system
+Cap,Component of Maintenance Module that seals printhead surface when not in use to prevent ink dehydration,cap|printhead cap|nozzle cap
+Cap Cover,Fixed component that covers the cap when not in use to prevent dehydration or contamination,cap cover|protective cover
+Chroma,Measure of saturation and color intensity,chroma|color saturation|color intensity
+Datapath PCA,PCA board with microprocessor RIP and FPGA to operate the printhead,datapath|datapath board|data path pca
+DC,Direct Current - electrical current flowing in one constant direction,dc|direct current
+De-ink,Process of removing ink from the BIDS IR tank,deink|de-inking|ink removal
+Deprime,Process of removing ink from printhead in preparation for printhead removal,deprime|depriming|printhead deprime
+DPI,Dots Per Inch - linear measurement of resolution for scanning and printing,dpi|dots per inch|print resolution
+DuraFlex Ink,Memjet aqueous pigment ink used with DuraFlex Print Engine,duraflex ink|memjet ink
+Electrical Module,Consists of Datapath PCA Mechanical Controller PCA and Printhead Power PCA with sensors actuators and motors,electrical module|electronics module
+Engine Stage,Grouping of printheads used in duplex printers to distinguish front and back printing,engine stage|print stage
+FIDS,Front Ink Delivery System - part of IDS for priming and depriming printhead,fids|front ink delivery system
+Field Replaceable Unit,Items that OEMs can replace at their own site without returning to Memjet,fru|field replaceable|replaceable unit
+Flushing,Removing small air bubbles in ink that accumulate after jobs or idle periods,flushing|ink flushing|bubble removal
+FPGA,Field Programmable Gate Array - programmable integrated circuit,fpga|field programmable gate array
+fpm,Feet Per Minute - measurement of printing speed,fpm|feet per minute
+Front Ink Delivery System,Part of IDS closely located with print module for priming and depriming printhead,fids|front ink delivery
+FRU,Field Replaceable Unit - OEM replaceable components,fru|field replaceable unit
+GbE,Gigabit Ethernet - high-speed network connection,gbe|gigabit ethernet
+GBOR,Glenbeigh Borealis format - Memjet proprietary print data file format,gbor|glenbeigh borealis
+IDL,Interface Description Language - Apache Swift specification for API description,idl|interface description language
+Interface Description Language,Apache Swift specification for API communication between software components,idl|swift|api description
+ips,Inches Per Second - measurement of printing speed,ips|inches per second
+IR Tank,Intermediate Reservoir Tank - draws ink supply and regulates pressure,ir tank|intermediate reservoir|ink reservoir
+Keep Wet Spitting,Printhead maintenance process that periodically fires sparse ink drops for nozzle health,keep wet|spitting|nozzle maintenance
+Lift Mechanism,Moves printhead cradle to home cap/wipe and print positions,lift mechanism|cradle lift
+m/min,Meters Per Minute - measurement of printing speed,m/min|meters per minute|mpm
+Maintenance Module,Comprises wiper and printhead cap drive assembly for cleaning and sealing,maintenance module|maintenance assembly
+Mechanical Controller PCA,PCA board controlling motors and sensors on all DuraFlex modules,mechanical controller|mech controller pca
+Media Encoder,Electrical component measuring media direction and speed at high accuracy,media encoder|encoder
+Media Handling System,Equipment and controller for managing media path provided by OEM,mhs|media handling|media path
+Media Timing Interface,Provides synchronization between printing and media using two electrical signals,mti|media timing|timing interface
+MHS,Media Handling System - equipment for media path management,mhs|media handling system
+MTI,Media Timing Interface - synchronization between printing and media,mti|media timing interface
+Next Gen QA,Program to replace Quality Assurance chips with newer more secure devices,ngq|next gen qa|next generation qa
+NGQ,Next Gen QA - replacement QA chip program,ngq|next gen qa
+Nozzle,Part of printhead that ejects ink onto media,nozzle|printhead nozzle|ink nozzle
+ODC,Optical Density Compensation - smooths ink density variations,odc|optical density compensation
+OEM,Original Equipment Manufacturer - Memjet partner integrating components,oem|original equipment manufacturer
+OEM Component,Component that OEM must provide to build printer such as Media Encoder or TOF Sensor,oem component|oem part
+OEM PCS,OEM-developed printer control software,oem pcs|oem control software
+OEM Plate,OEM-supplied Print Bar for mounting Print Module,oem plate|print bar|mounting plate
+Optical Density,Measure of darkness of printed content,optical density|print darkness
+Optical Density Compensation,Process that smooths ink density variation by adjusting ink amount in different regions,odc|density compensation
+PCA,Printed Circuit Assembly - PCB with all components loaded,pca|printed circuit assembly
+PCB,Printed Circuit Board without components,pcb|printed circuit board|circuit board
+PCS,Printer Control Software - software controlling OEM printer,pcs|printer control software
+Pen to Paper Spacing,Distance between printhead nozzle plate and media surface,pps|printhead to paper spacing|nozzle spacing
+PES,Print Engine Supervisor - interface between Print Modules and OEM Printer Controller,pes|print engine supervisor
+PPS,Printhead to Paper Spacing - distance between printhead and media surface,pps|pen to paper spacing|nozzle spacing
+Priming,Filling printhead with ink and removing trapped air for printing preparation,priming|printhead priming|ink priming
+Print Artifact,Unwanted visual anomalies in printed content,print artifact|printing defect|visual anomaly
+Print Bar,OEM-provided plate for mounting Print Module to OEM system,print bar|oem plate|mounting bar
+Print Engine,Subsystem driving printheads including maintenance and control components,print engine|printing engine
+Print Engine Supervisor,Interface between Print Modules and OEM Controller using Apache Thrift,pes|print supervisor
+Print Module,Comprises Printhead Cradle Module Maintenance Module and Lift Mechanism,print module|printing module
+Printer Signal Combiner,Interface using electrical signals to coordinate real-time printing operations,psc|signal combiner
+Print Unit,Complete system with Print Module Maintenance CMYK IDS WIMM AES and Electrical Module,print unit|printing unit
+Print Zone,Area where media moves directly under printheads where printing occurs,print zone|printing area
+Printer,Overall printing system designed by OEM from components and DuraFlex modules,printer|printing system
+Printer Control Software,Software controlling OEM printer and DuraFlex print engine via PES interface,pcs|control software
+Printhead,Device transferring ink onto media - page-wide 1600 dpi device,printhead|print head
+Printhead Cradle,Houses printhead cartridge power supply boards and fluidic couplings,printhead cradle|cradle|print cradle
+Printhead Power PCA,PCA board supplying power to printhead,printhead power|power pca
+Printhead to Paper Spacing,Distance between printhead nozzle plate and media surface,pps|pen to paper spacing|printhead spacing
+PSC,Print Signals Combined - coordinated printing signals,psc|print signals combined
+Raster Image Processor,Converts high-level printer language into low-level image for printhead,rip|raster processor
+RIP,Raster Image Processor - converts printer language to printhead image,rip|raster image processor
+Stitching,Software process disguising join between printed images in multi-printhead engines,stitching|image stitching
+TOF,Top of Form - electrical signal synchronizing print start with page top,tof|top of form
+Top of Form,Electrical input signal synchronizing printing start with top of page location,tof|page top signal
+Waste Ink Management Module,Module receiving waste ink from wiper and cap for disposal to OEM waste tank,wimm|waste ink management
+WIMM,Waste Ink Management Module - receives and disposes waste ink,wimm|waste ink management module
+Wiper Cartridge,Cartridge with microfiber tape reel for cleaning printhead in Maintenance Module,wiper cartridge|wiper|cleaning cartridge
+X-axis,Direction across media travel,x-axis|x axis|horizontal axis
+Y-axis,Direction of media travel also known as print direction,y-axis|y axis|print direction|vertical axis
+Z-axis,Direction perpendicular to printed surface or up direction from media,z-axis|z axis|vertical direction
+CMYK,Cyan Magenta Yellow Key (black) - four-color printing process,cmyk|four color|cyan magenta yellow black
+
