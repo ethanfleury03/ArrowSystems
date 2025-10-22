@@ -252,6 +252,25 @@ def load_custom_css():
 
 
 @st.cache_resource(show_spinner=False)
+def initialize_database():
+    """Initialize DynamoDB connection (cached for performance)."""
+    from utils.dynamodb_manager import DynamoDBManager
+    import os
+    try:
+        # Auto-detect: Use AWS if credentials are set, otherwise local
+        use_aws = bool(os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY'))
+        db = DynamoDBManager(local_mode=not use_aws)
+        
+        mode = "AWS DynamoDB" if use_aws else "Local DynamoDB"
+        logger.info(f"✅ Database connection initialized ({mode})")
+        return db
+    except Exception as e:
+        logger.warning(f"⚠️ Database initialization failed: {e}")
+        logger.warning("Application will continue without database persistence")
+        return None
+
+
+@st.cache_resource(show_spinner=False)
 def initialize_rag_system():
     """Initialize RAG system (cached for performance)."""
     import os
@@ -289,9 +308,15 @@ def initialize_rag_system():
             )
         
         logger.info(f"Using storage path: {storage_path}")
-        rag = EliteRAGQuery(cache_dir="/root/.cache/huggingface/hub")
+        
+        # Get database manager if available
+        db = st.session_state.get('db', None) if hasattr(st, 'session_state') else None
+        
+        rag = EliteRAGQuery(cache_dir="/root/.cache/huggingface/hub", db_manager=db)
         rag.initialize(storage_dir=storage_path)
         logger.info("RAG system initialized successfully")
+        if db:
+            logger.info("✅ RAG system connected to DynamoDB for validated Q&A fast-path")
         return rag
     except Exception as e:
         logger.error(f"Failed to initialize RAG system: {e}", exc_info=True)
@@ -413,6 +438,9 @@ def main_application():
         # Execute query
         with st.spinner("🔍 Searching knowledge base and generating answer..."):
             try:
+                import time
+                start_time = time.time()
+                
                 response = rag_system.query(
                     query=query,
                     top_k=query_params['top_k'],
@@ -421,10 +449,31 @@ def main_application():
                     dynamic_windowing=query_params.get('dynamic_windowing', True)
                 )
                 
+                response_time_ms = int((time.time() - start_time) * 1000)
+                
                 # Store in session
                 st.session_state['current_response'] = response
                 st.session_state['last_processed_query'] = query
                 st.session_state['feedback_query'] = query  # For feedback system (different key to avoid conflict)
+                
+                # Save to database
+                if 'db' in st.session_state and st.session_state['db'] is not None:
+                    try:
+                        query_id = st.session_state['db'].save_query(
+                            user=st.session_state.get('username', 'unknown'),
+                            query_text=query,
+                            answer_text=response.answer,
+                            intent_type=response.intent.intent_type,
+                            intent_confidence=response.intent.confidence,
+                            sources=[s['name'] for s in response.sources],
+                            confidence=response.confidence,
+                            response_time_ms=response_time_ms,
+                            session_id=st.session_state.get('session_id', 'unknown')
+                        )
+                        st.session_state['current_query_id'] = query_id
+                        logger.info(f"Query saved to database: {query_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save query to database: {e}")
                 
                 logger.info(f"Query processed successfully: {query[:50]}...")
                 
@@ -509,6 +558,10 @@ def main():
                 logger.error(f"Failed to initialize RAG system after login: {e}", exc_info=True)
                 st.error("⚠️ Model loading failed. Please refresh.")
                 st.stop()
+        
+        # Initialize database (once per session)
+        if 'db' not in st.session_state:
+            st.session_state['db'] = initialize_database()
         
         # Show main application
         main_application()

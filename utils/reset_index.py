@@ -20,13 +20,31 @@ def reset_index(confirm=True, verbose=True):
         bool: True if successful, False otherwise
     """
     
-    # Paths to delete
+    # Determine project root (go up from utils/ to project root)
+    script_dir = Path(__file__).parent  # utils/
+    project_root = script_dir.parent     # project root
+    
+    # Change to project root for consistent path resolution
+    original_dir = os.getcwd()
+    os.chdir(project_root)
+    
+    if verbose:
+        print(f"📂 Working from: {project_root}")
+    
+    # Paths to delete (relative to project root)
     paths_to_delete = [
         "storage",
-        "/workspace/storage",
+        "latest_model",  # Current default storage location
         "extracted_content",
         ".qdrant",  # If using Qdrant local
     ]
+    
+    # Add absolute workspace paths if on RunPod/cloud
+    if os.path.exists("/workspace"):
+        paths_to_delete.extend([
+            "/workspace/storage",
+            "/workspace/latest_model",
+        ])
     
     deleted_items = []
     
@@ -79,6 +97,9 @@ def reset_index(confirm=True, verbose=True):
         else:
             if verbose:
                 print(f"   ⏭️  Skipped: {path}/ (doesn't exist)")
+    
+    # Restore original directory
+    os.chdir(original_dir)
     
     if verbose:
         print("")

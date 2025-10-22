@@ -6,6 +6,12 @@ import streamlit as st
 from typing import Optional
 from utils.feedback_manager import FeedbackManager
 from orchestrator import RAGOrchestrator  # for cache access via session rag_system
+from components.feedback_ui_dynamodb import (
+    render_helpful_answers_db,
+    render_unhelpful_answers_db, 
+    render_feedback_stats_db,
+    render_analytics_dashboard
+)
 
 def render_feedback_buttons(response, query: str, user: str = "Unknown"):
     """
@@ -16,7 +22,9 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
         query: The original query
         user: Current username
     """
-    feedback_manager = FeedbackManager()
+    # Get database from session, fallback to JSON if not available
+    db = st.session_state.get('db', None)
+    feedback_manager = FeedbackManager() if not db else None
     
     # Extract source names
     source_names = []
@@ -27,7 +35,15 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
             source_names.append(source.get('name', 'Unknown'))
     
     # Check if already rated
-    existing_rating = feedback_manager.check_if_rated(query, response.answer)
+    if db and 'current_query_id' in st.session_state:
+        # Check via DynamoDB
+        feedback_list = db.get_query_feedback(st.session_state['current_query_id'])
+        existing_rating = feedback_list[0]['is_helpful'] if feedback_list else None
+    elif feedback_manager:
+        # Fallback to JSON
+        existing_rating = feedback_manager.check_if_rated(query, response.answer)
+    else:
+        existing_rating = None
     
     # Create columns for buttons
     col1, col2, col3 = st.columns([1, 1, 8])
@@ -36,15 +52,27 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
         # Thumbs up button (always enabled to allow validating each response instance)
         if st.button("👍", key=f"thumbs_up_{hash(query)}", help="Mark as helpful"):
             # Save positive feedback
-            success = feedback_manager.save_feedback(
-                query=query,
-                answer=response.answer,
-                is_helpful=True,
-                confidence=response.confidence,
-                intent_type=response.intent.intent_type,
-                sources=source_names,
-                user=user
-            )
+            if db and 'current_query_id' in st.session_state:
+                # Save to DynamoDB
+                success = db.save_feedback(
+                    query_id=st.session_state['current_query_id'],
+                    user=user,
+                    is_helpful=True,
+                    feedback_text=None
+                )
+            elif feedback_manager:
+                # Fallback to JSON
+                success = feedback_manager.save_feedback(
+                    query=query,
+                    answer=response.answer,
+                    is_helpful=True,
+                    confidence=response.confidence,
+                    intent_type=response.intent.intent_type,
+                    sources=source_names,
+                    user=user
+                )
+            else:
+                success = False
             if success:
                 # Also cache the validated response for instant future answers
                 try:
@@ -68,15 +96,27 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
         # Thumbs down button (always enabled)
         if st.button("👎", key=f"thumbs_down_{hash(query)}", help="Mark as unhelpful"):
             # Save negative feedback
-            success = feedback_manager.save_feedback(
-                query=query,
-                answer=response.answer,
-                is_helpful=False,
-                confidence=response.confidence,
-                intent_type=response.intent.intent_type,
-                sources=source_names,
-                user=user
-            )
+            if db and 'current_query_id' in st.session_state:
+                # Save to DynamoDB
+                success = db.save_feedback(
+                    query_id=st.session_state['current_query_id'],
+                    user=user,
+                    is_helpful=False,
+                    feedback_text=None
+                )
+            elif feedback_manager:
+                # Fallback to JSON
+                success = feedback_manager.save_feedback(
+                    query=query,
+                    answer=response.answer,
+                    is_helpful=False,
+                    confidence=response.confidence,
+                    intent_type=response.intent.intent_type,
+                    sources=source_names,
+                    user=user
+                )
+            else:
+                success = False
             if success:
                 # Ensure any cached version is removed
                 try:
@@ -102,21 +142,38 @@ def render_feedback_buttons(response, query: str, user: str = "Unknown"):
 
 def render_saved_answers_page():
     """Render the saved answers page"""
-    st.title("💾 Saved Answers")
+    st.title("💾 Saved Answers & Analytics")
     
-    feedback_manager = FeedbackManager()
+    # Get database, fallback to JSON
+    db = st.session_state.get('db', None)
+    feedback_manager = FeedbackManager() if not db else None
     
-    # Tabs for helpful/unhelpful
-    tab1, tab2, tab3 = st.tabs(["👍 Helpful Answers", "👎 Unhelpful Answers", "📊 Statistics"])
+    # Tabs for helpful/unhelpful/stats
+    tab1, tab2, tab3, tab4 = st.tabs(["👍 Helpful Answers", "👎 Unhelpful Answers", "📊 Statistics", "📈 Analytics"])
     
     with tab1:
-        render_helpful_answers(feedback_manager)
+        if db:
+            render_helpful_answers_db(db)
+        else:
+            render_helpful_answers(feedback_manager)
     
     with tab2:
-        render_unhelpful_answers(feedback_manager)
+        if db:
+            render_unhelpful_answers_db(db)
+        else:
+            render_unhelpful_answers(feedback_manager)
     
     with tab3:
-        render_feedback_stats(feedback_manager)
+        if db:
+            render_feedback_stats_db(db)
+        else:
+            render_feedback_stats(feedback_manager)
+    
+    with tab4:
+        if db:
+            render_analytics_dashboard(db)
+        else:
+            st.info("📊 Advanced analytics available when using DynamoDB")
 
 
 def render_helpful_answers(feedback_manager: FeedbackManager):

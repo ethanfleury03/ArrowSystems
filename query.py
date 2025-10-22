@@ -23,11 +23,12 @@ class EliteRAGQuery:
     and structured response generation.
     """
     
-    def __init__(self, cache_dir="/root/.cache/huggingface/hub"):
+    def __init__(self, cache_dir="/root/.cache/huggingface/hub", db_manager=None):
         self.cache_dir = cache_dir
-        self.orchestrator = RAGOrchestrator(cache_dir=cache_dir)
+        self.db_manager = db_manager
+        self.orchestrator = RAGOrchestrator(cache_dir=cache_dir, db_manager=db_manager)
         
-    def initialize(self, storage_dir="/workspace/storage"):
+    def initialize(self, storage_dir="latest_model"):
         """Initialize models and load index."""
         self.orchestrator.initialize_models()
         self.orchestrator.load_index(storage_dir=storage_dir)
