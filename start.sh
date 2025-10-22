@@ -28,6 +28,9 @@ if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; 
     echo "🖥️  Environment: RunPod GPU Instance"
     echo "📍 GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'Not detected')"
     
+    # Configure Git credential caching (cache for 24 hours to avoid repeated prompts)
+    git config --global credential.helper 'cache --timeout=86400'
+    
     # Check for Git LFS and auto-pull large files
     if [ -f ".gitattributes" ] && grep -q "lfs" .gitattributes 2>/dev/null; then
         echo ""
@@ -216,6 +219,10 @@ if [ "$MISSING_CORE" = true ]; then
         REQUIREMENTS_FILE="requirements.txt"
     fi
     
+    # Pre-install blinker to avoid distutils conflict (common on RunPod/system Python)
+    echo "   🔧 Pre-installing blinker to avoid conflicts..."
+    pip install --ignore-installed blinker>=1.6.0 -q 2>/dev/null || true
+    
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install to user directory to avoid system conflicts
         pip install -r "$REQUIREMENTS_FILE" \
@@ -245,6 +252,10 @@ elif [ "$MISSING_UI" = true ]; then
     else
         REQUIREMENTS_FILE="requirements.txt"
     fi
+    
+    # Pre-install blinker to avoid distutils conflict (common on RunPod/system Python)
+    echo "   🔧 Pre-installing blinker to avoid conflicts..."
+    pip install --ignore-installed blinker>=1.6.0 -q 2>/dev/null || true
     
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install all requirements
