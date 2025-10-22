@@ -351,22 +351,34 @@ if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
                 echo "  ✅ Docker installed successfully"
                 
                 # Start Docker daemon (try multiple methods)
+                echo "  🔄 Starting Docker daemon..."
                 if systemctl start docker > /dev/null 2>&1; then
+                    sleep 3
                     echo "  ✅ Docker daemon started (systemctl)"
                 elif service docker start > /dev/null 2>&1; then
+                    sleep 3
                     echo "  ✅ Docker daemon started (service)"
                 else
                     # Start dockerd directly in background
-                    dockerd > /dev/null 2>&1 &
-                    sleep 5
-                    echo "  ✅ Docker daemon started (dockerd)"
+                    dockerd > /tmp/dockerd.log 2>&1 &
+                    echo "  ⏳ Waiting for Docker daemon to initialize (15 seconds)..."
+                    
+                    # Wait up to 15 seconds for dockerd to be ready
+                    for i in {1..15}; do
+                        if docker ps > /dev/null 2>&1; then
+                            echo "  ✅ Docker daemon ready after ${i} seconds"
+                            break
+                        fi
+                        sleep 1
+                    done
                 fi
                 
-                # Verify Docker is working
+                # Final verification that Docker is working
                 if docker ps > /dev/null 2>&1; then
-                    echo "  ✅ Docker is ready"
+                    echo "  ✅ Docker is ready to use"
                 else
-                    echo "  ⚠️  Docker daemon failed to start"
+                    echo "  ⚠️  Docker daemon failed to start after 15 seconds"
+                    echo "     Check logs: tail /tmp/dockerd.log"
                     echo "     Using JSON-based feedback storage (fallback)"
                 fi
             else
