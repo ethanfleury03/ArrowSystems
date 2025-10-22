@@ -255,9 +255,14 @@ def load_custom_css():
 def initialize_database():
     """Initialize DynamoDB connection (cached for performance)."""
     from utils.dynamodb_manager import DynamoDBManager
+    import os
     try:
-        db = DynamoDBManager()
-        logger.info("✅ Database connection initialized")
+        # Auto-detect: Use AWS if credentials are set, otherwise local
+        use_aws = bool(os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY'))
+        db = DynamoDBManager(local_mode=not use_aws)
+        
+        mode = "AWS DynamoDB" if use_aws else "Local DynamoDB"
+        logger.info(f"✅ Database connection initialized ({mode})")
         return db
     except Exception as e:
         logger.warning(f"⚠️ Database initialization failed: {e}")
