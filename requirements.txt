@@ -28,6 +28,7 @@ ollama>=0.1.0
 anthropic>=0.40.0
 
 # UI and Web Application
+blinker>=1.6.0  # Pin version to avoid distutils conflict (required by streamlit)
 streamlit>=1.28.0
 streamlit-authenticator>=0.2.3
 plotly>=5.17.0
