@@ -338,7 +338,7 @@ if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
     if curl -s http://localhost:8000/ > /dev/null 2>&1; then
         echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
     else
-        # Check if Docker is available, install if needed
+        # First, ensure Docker is installed
         if ! command -v docker &> /dev/null || ! command -v docker-compose &> /dev/null; then
             echo "  🔄 Docker not found - installing..."
             echo "     This is a one-time setup (~2 minutes)"
@@ -387,8 +387,43 @@ if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
             fi
         fi
         
-        # Now try to start DynamoDB if Docker is available
-        if command -v docker &> /dev/null && command -v docker-compose &> /dev/null && [ -f "docker-compose.dynamodb.yml" ]; then
+        # Ensure Docker daemon is running (even if Docker was already installed)
+        if command -v docker &> /dev/null; then
+            if ! docker ps > /dev/null 2>&1; then
+                echo "  🔄 Docker installed but daemon not running, starting..."
+                
+                if systemctl start docker > /dev/null 2>&1; then
+                    sleep 3
+                    echo "  ✅ Docker daemon started (systemctl)"
+                elif service docker start > /dev/null 2>&1; then
+                    sleep 3
+                    echo "  ✅ Docker daemon started (service)"
+                else
+                    # Start dockerd directly in background
+                    dockerd > /tmp/dockerd.log 2>&1 &
+                    echo "  ⏳ Waiting for Docker daemon to initialize..."
+                    
+                    # Wait up to 15 seconds for dockerd to be ready
+                    for i in {1..15}; do
+                        if docker ps > /dev/null 2>&1; then
+                            echo "  ✅ Docker daemon ready after ${i} seconds"
+                            break
+                        fi
+                        sleep 1
+                    done
+                fi
+                
+                # Verify it's working now
+                if ! docker ps > /dev/null 2>&1; then
+                    echo "  ⚠️  Docker daemon failed to start"
+                    echo "     Check logs: tail /tmp/dockerd.log"
+                    echo "     Using JSON-based feedback storage (fallback)"
+                fi
+            fi
+        fi
+        
+        # Now try to start DynamoDB if Docker is available and working
+        if docker ps > /dev/null 2>&1 && [ -f "docker-compose.dynamodb.yml" ]; then
             echo "  🔄 Starting DynamoDB Local..."
             # Start DynamoDB in background
             docker-compose -f docker-compose.dynamodb.yml up -d > /dev/null 2>&1
