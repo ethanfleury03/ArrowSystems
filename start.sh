@@ -332,30 +332,73 @@ if ! python -c "import boto3" 2>/dev/null; then
     fi
 fi
 
-# Check if DynamoDB Local is running (for local development)
+# Auto-start DynamoDB Local if not running (on RunPod/cloud)
 if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
-    # On RunPod or AWS - might be using AWS DynamoDB or Local
+    # Check if DynamoDB Local is running
     if curl -s http://localhost:8000/ > /dev/null 2>&1; then
         echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
-        # Check if tables exist
+    else
+        echo "  🔄 Starting DynamoDB Local..."
+        # Check if docker-compose file exists
+        if [ -f "docker-compose.dynamodb.yml" ]; then
+            # Start DynamoDB in background
+            docker-compose -f docker-compose.dynamodb.yml up -d > /dev/null 2>&1
+            
+            # Wait for it to be ready (max 15 seconds)
+            for i in {1..15}; do
+                if curl -s http://localhost:8000/ > /dev/null 2>&1; then
+                    echo "  ✅ DynamoDB Local started successfully"
+                    break
+                fi
+                sleep 1
+            done
+            
+            # Check if it actually started
+            if ! curl -s http://localhost:8000/ > /dev/null 2>&1; then
+                echo "  ⚠️  DynamoDB Local failed to start (timeout)"
+                echo "     App will work without database, using JSON fallback"
+            fi
+        else
+            echo "  ⚠️  docker-compose.dynamodb.yml not found"
+            echo "     App will work without database, using JSON fallback"
+        fi
+    fi
+    
+    # Check if tables exist, create if needed
+    if curl -s http://localhost:8000/ > /dev/null 2>&1; then
         if python -c "from utils.dynamodb_manager import DynamoDBManager; DynamoDBManager()" 2>/dev/null; then
             echo "  ✅ Database tables ready"
         else
-            echo "  ⚠️  Database tables not found"
-            echo "     Run: python setup_dynamodb.py"
+            echo "  🔄 Creating database tables..."
+            if [ -f "setup_dynamodb.py" ]; then
+                python setup_dynamodb.py > /dev/null 2>&1
+                if [ $? -eq 0 ]; then
+                    echo "  ✅ Database tables created successfully"
+                else
+                    echo "  ⚠️  Failed to create tables"
+                    echo "     App will work without database, using JSON fallback"
+                fi
+            else
+                echo "  ⚠️  setup_dynamodb.py not found"
+                echo "     App will work without database, using JSON fallback"
+            fi
         fi
-    else
-        echo "  ℹ️  DynamoDB Local not running"
-        echo "     To start: docker-compose -f docker-compose.dynamodb.yml up -d"
-        echo "     Then run: python setup_dynamodb.py"
-        echo "     (App will work without database, using JSON fallback)"
     fi
 else
-    # Local machine
-    echo "  ℹ️  DynamoDB setup:"
-    echo "     1. Start local: docker-compose -f docker-compose.dynamodb.yml up -d"
-    echo "     2. Create tables: python setup_dynamodb.py"
-    echo "     (App will work without database, using JSON fallback)"
+    # Local machine - just check status, don't auto-start
+    if curl -s http://localhost:8000/ > /dev/null 2>&1; then
+        echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
+        if python -c "from utils.dynamodb_manager import DynamoDBManager; DynamoDBManager()" 2>/dev/null; then
+            echo "  ✅ Database tables ready"
+        else
+            echo "  🔄 Creating database tables..."
+            python setup_dynamodb.py > /dev/null 2>&1 && echo "  ✅ Tables created"
+        fi
+    else
+        echo "  ℹ️  DynamoDB Local not running (optional)"
+        echo "     To start: docker-compose -f docker-compose.dynamodb.yml up -d"
+        echo "     (App will work without database, using JSON fallback)"
+    fi
 fi
 
 echo ""
