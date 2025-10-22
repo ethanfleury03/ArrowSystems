@@ -356,7 +356,14 @@ class DynamoDBManager:
     # ==================== Validated Q&A Operations ====================
     
     def _update_validated_qna(self, query_id: str, is_helpful: bool):
-        """Internal method to update validated Q&A based on feedback."""
+        """
+        Internal method to update validated Q&A based on feedback.
+        
+        Strategy: First validated answer wins (never overwrite).
+        - First thumbs up: Saves the answer as canonical
+        - Subsequent thumbs up: Only increment helpful_count
+        - This prevents Claude's answer variations from overwriting good answers
+        """
         try:
             # Get the original query
             query = self.get_query_by_id(query_id)
@@ -368,11 +375,15 @@ class DynamoDBManager:
             query_hash = hashlib.md5(query['query_text'].lower().encode()).hexdigest()
             
             # Update or create validated QnA entry
+            # Use if_not_exists() to preserve the first validated answer
             self.validated_qna_table.update_item(
                 Key={'query_hash': query_hash},
-                UpdateExpression='SET query_text = :query, answer_text = :answer, '
-                               'sources = :sources, helpful_count = if_not_exists(helpful_count, :zero) + :inc, '
-                               'last_used = :timestamp, is_active = :active',
+                UpdateExpression='SET query_text = if_not_exists(query_text, :query), '
+                               'answer_text = if_not_exists(answer_text, :answer), '
+                               'sources = if_not_exists(sources, :sources), '
+                               'helpful_count = if_not_exists(helpful_count, :zero) + :inc, '
+                               'last_used = :timestamp, is_active = :active, '
+                               'first_validated = if_not_exists(first_validated, :timestamp)',
                 ExpressionAttributeValues={
                     ':query': query['query_text'],
                     ':answer': query['answer_text'],
@@ -383,6 +394,7 @@ class DynamoDBManager:
                     ':active': True
                 }
             )
+            logger.info(f"✅ Updated ValidatedQnA for query (helpful_count +1, answer preserved)")
         except Exception as e:
             logger.error(f"Error updating validated QnA: {e}")
     
