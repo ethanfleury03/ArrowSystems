@@ -16,7 +16,7 @@ scikit-learn
 qdrant-client
 pyyaml
 PyMuPDF
-pandas
+pandas<2.2.0  # Pin to version with Python 3.14 wheels
 Pillow
 numpy
 tabulate
