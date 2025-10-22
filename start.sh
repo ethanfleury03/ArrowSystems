@@ -4,27 +4,27 @@
 # Works on local machines and RunPod GPU instances
 # Usage: ./start.sh
 
-set -e  # Exit on error
+# ============================================================================
+# CRITICAL: Set API Keys and Credentials FIRST (before anything else)
+# ============================================================================
+export ANTHROPIC_API_KEY="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"
+export AWS_ACCESS_KEY_ID="AKIAXNHTG4AMCE54I36Y"
+export AWS_SECRET_ACCESS_KEY="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"
+export AWS_DEFAULT_REGION="us-east-1"
 
-echo "=========================================="
-echo "🔧 DuraFlex Technical Assistant"
-echo "=========================================="
-echo ""
-
-# Set GPU acceleration environment variables for Ollama
+# GPU acceleration environment variables for Ollama
 export OLLAMA_GPU_LAYERS=32
 export OLLAMA_GPU_MEMORY_FRACTION=0.8
 export OLLAMA_HOST=0.0.0.0:11434
 export CUDA_VISIBLE_DEVICES=0
 export OLLAMA_DEBUG=1
 
-# Set Claude API key for LLM answer generation
-export ANTHROPIC_API_KEY=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
+set -e  # Exit on error
 
-# AWS Credentials for DynamoDB (Automatic for all users)
-export AWS_ACCESS_KEY_ID="AKIAXNHTG4AMCE54I36Y"
-export AWS_SECRET_ACCESS_KEY="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"
-export AWS_DEFAULT_REGION="us-east-1"
+echo "=========================================="
+echo "🔧 DuraFlex Technical Assistant"
+echo "=========================================="
+echo ""
 
 # Detect environment
 IS_RUNPOD=false
@@ -67,6 +67,80 @@ if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; 
     echo ""
 else
     echo "🖥️  Environment: Local Machine"
+    
+    # Check for Git LFS and auto-pull large files (works on all environments)
+    if [ -f ".gitattributes" ] && grep -q "lfs" .gitattributes 2>/dev/null; then
+        echo ""
+        echo "🔍 Git LFS detected in repository"
+        
+        # Check if git-lfs is installed
+        if ! command -v git-lfs &> /dev/null; then
+            echo "   ⚠️  git-lfs not found"
+            echo "   📥 Installing git-lfs for Windows..."
+            
+            # Detect Windows and install Git LFS automatically
+            if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" || "$OSTYPE" == "cygwin" ]]; then
+                # Download Git LFS installer for Windows
+                LFS_VERSION="3.4.0"
+                LFS_URL="https://github.com/git-lfs/git-lfs/releases/download/v${LFS_VERSION}/git-lfs-windows-v${LFS_VERSION}.exe"
+                LFS_INSTALLER="/tmp/git-lfs-installer.exe"
+                
+                echo "   📥 Downloading Git LFS v${LFS_VERSION}..."
+                if command -v curl &> /dev/null; then
+                    curl -L -o "$LFS_INSTALLER" "$LFS_URL" 2>/dev/null
+                elif command -v wget &> /dev/null; then
+                    wget -O "$LFS_INSTALLER" "$LFS_URL" 2>/dev/null
+                fi
+                
+                if [ -f "$LFS_INSTALLER" ]; then
+                    echo "   🔧 Installing Git LFS (silent installation)..."
+                    "$LFS_INSTALLER" /VERYSILENT /NORESTART /SP- 2>/dev/null || true
+                    sleep 3
+                    
+                    # Refresh PATH to find git-lfs
+                    export PATH="/c/Program Files/Git LFS:$PATH"
+                    
+                    # Verify installation
+                    if command -v git-lfs &> /dev/null; then
+                        echo "   ✅ Git LFS installed successfully"
+                    else
+                        echo "   ⚠️  Git LFS installation may require a restart of Git Bash"
+                        echo "   💡 If LFS files don't download, close Git Bash and reopen it"
+                    fi
+                    
+                    rm -f "$LFS_INSTALLER" 2>/dev/null || true
+                else
+                    echo "   ⚠️  Could not download Git LFS installer"
+                    echo "   💡 Manual install: https://git-lfs.github.com/"
+                fi
+            fi
+        fi
+        
+        # Initialize git-lfs (even if already installed, ensure it's configured)
+        if command -v git-lfs &> /dev/null; then
+            echo "   🔧 Configuring Git LFS..."
+            git lfs install 2>/dev/null || git lfs install --skip-repo 2>/dev/null || true
+            echo "   ✅ Git LFS configured"
+        fi
+        
+        # Check if LFS files need to be pulled
+        if [ -f "latest_model/default__vector_store.json" ]; then
+            # Use wc -c for file size (works on Windows Git Bash)
+            FILE_SIZE=$(wc -c < "latest_model/default__vector_store.json" 2>/dev/null || echo "0")
+            if [ "$FILE_SIZE" -lt 1000 ]; then
+                echo "   📥 Pulling LFS files (this may take a few minutes)..."
+                git lfs pull 2>/dev/null || git lfs fetch --all && git lfs checkout
+                echo "   ✅ LFS files downloaded (~450MB RAG index)"
+            else
+                echo "   ✅ LFS files already present ($(numfmt --to=iec $FILE_SIZE 2>/dev/null || echo "${FILE_SIZE} bytes"))"
+            fi
+        else
+            echo "   📥 Pulling LFS files..."
+            git lfs pull 2>/dev/null || git lfs fetch --all && git lfs checkout
+            echo "   ✅ LFS files downloaded"
+        fi
+        echo ""
+    fi
 fi
 echo ""
 
