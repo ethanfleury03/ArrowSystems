@@ -21,7 +21,6 @@ Pillow
 numpy
 tabulate
 rank-bm25
-spacy
 symspellpy
 openai
 ollama>=0.1.0
