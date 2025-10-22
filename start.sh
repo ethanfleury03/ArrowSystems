@@ -338,9 +338,38 @@ if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
     if curl -s http://localhost:8000/ > /dev/null 2>&1; then
         echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
     else
-        echo "  🔄 Starting DynamoDB Local..."
-        # Check if docker-compose file exists
-        if [ -f "docker-compose.dynamodb.yml" ]; then
+        # Check if Docker is available, install if needed
+        if ! command -v docker &> /dev/null || ! command -v docker-compose &> /dev/null; then
+            echo "  🔄 Docker not found - installing..."
+            echo "     This is a one-time setup (~2 minutes)"
+            
+            # Install Docker and Docker Compose
+            apt-get update -qq > /dev/null 2>&1
+            apt-get install -y docker.io docker-compose -qq > /dev/null 2>&1
+            
+            if [ $? -eq 0 ]; then
+                echo "  ✅ Docker installed successfully"
+                
+                # Start Docker service
+                service docker start > /dev/null 2>&1
+                sleep 3
+                
+                # Verify installation
+                if command -v docker &> /dev/null && command -v docker-compose &> /dev/null; then
+                    echo "  ✅ Docker service started"
+                else
+                    echo "  ⚠️  Docker installation failed"
+                    echo "     Using JSON-based feedback storage (fallback)"
+                fi
+            else
+                echo "  ⚠️  Docker installation failed"
+                echo "     Using JSON-based feedback storage (fallback)"
+            fi
+        fi
+        
+        # Now try to start DynamoDB if Docker is available
+        if command -v docker &> /dev/null && command -v docker-compose &> /dev/null && [ -f "docker-compose.dynamodb.yml" ]; then
+            echo "  🔄 Starting DynamoDB Local..."
             # Start DynamoDB in background
             docker-compose -f docker-compose.dynamodb.yml up -d > /dev/null 2>&1
             
