@@ -28,7 +28,7 @@ class EliteRAGQuery:
         self.db_manager = db_manager
         self.orchestrator = RAGOrchestrator(cache_dir=cache_dir, db_manager=db_manager)
         
-    def initialize(self, storage_dir="/workspace/storage"):
+    def initialize(self, storage_dir="latest_model"):
         """Initialize models and load index."""
         self.orchestrator.initialize_models()
         self.orchestrator.load_index(storage_dir=storage_dir)
