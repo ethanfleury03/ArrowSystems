@@ -21,6 +21,11 @@ export OLLAMA_DEBUG=1
 # Set Claude API key for LLM answer generation
 export ANTHROPIC_API_KEY=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
 
+# AWS Credentials for DynamoDB (Automatic for all users)
+export AWS_ACCESS_KEY_ID="AKIAXNHTG4AMCE54I36Y"
+export AWS_SECRET_ACCESS_KEY="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"
+export AWS_DEFAULT_REGION="us-east-1"
+
 # Detect environment
 IS_RUNPOD=false
 if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; then
