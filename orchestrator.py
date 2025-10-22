@@ -1452,7 +1452,7 @@ class RAGOrchestrator:
     and structured response generation.
     """
     
-    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = False, enable_llm_answers: bool = True, config_path: str = "config.yaml"):
+    def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = False, enable_llm_answers: bool = True, config_path: str = "config.yaml", db_manager=None):
         self.cache_dir = cache_dir
         self.embed_model = None
         self.reranker = None
@@ -1462,6 +1462,7 @@ class RAGOrchestrator:
         self.enable_llm_answers = enable_llm_answers
         self.config = self._load_config(config_path)
         self.glossary_index = None
+        self.db_manager = db_manager  # 🗄️ DynamoDB manager for validated Q&A fast-path
         
         # Components
         self.query_rewriter = QueryRewriter()
@@ -1683,6 +1684,41 @@ class RAGOrchestrator:
                     return scached
         except Exception as e:
             logger.warning(f"Cache lookup failed (continuing without cache): {e}")
+        
+        # ------------------------------------------------------------------
+        # 🗄️ DynamoDB Validated Q&A Fast-Path (NEW!)
+        #    Check database for user-validated answers before expensive RAG
+        # ------------------------------------------------------------------
+        if self.db_manager:
+            try:
+                validated = self.db_manager.get_validated_answer(query)
+                if validated and validated.get('helpful_count', 0) >= 2:
+                    # At least 2 users marked this as helpful - serve it!
+                    logger.info(f"⚡ Served from validated Q&A database! (helpful_count: {validated['helpful_count']})")
+                    
+                    # Classify intent for metadata (fast)
+                    intent = self.intent_classifier.classify(query)
+                    
+                    # Build response from validated Q&A
+                    sources = []
+                    for i, source_name in enumerate(validated.get('sources', []), 1):
+                        sources.append({
+                            'id': f'[{i}]',
+                            'name': source_name,
+                            'pages': 'N/A',
+                            'content_type': 'text'
+                        })
+                    
+                    return StructuredResponse(
+                        query=query,
+                        answer=validated['answer_text'],
+                        reasoning="✅ Served from validated Q&A database (user-approved answer)",
+                        sources=sources,
+                        confidence=0.95,  # High confidence - users validated this
+                        intent=intent
+                    )
+            except Exception as e:
+                logger.debug(f"Validated Q&A lookup skipped: {e}")
         
         # Step 1: Classify intent
         intent = self.intent_classifier.classify(query)
