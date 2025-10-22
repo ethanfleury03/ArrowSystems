@@ -216,6 +216,10 @@ if [ "$MISSING_CORE" = true ]; then
         REQUIREMENTS_FILE="requirements.txt"
     fi
     
+    # Pre-install blinker to avoid distutils conflict (common on RunPod/system Python)
+    echo "   🔧 Pre-installing blinker to avoid conflicts..."
+    pip install --ignore-installed blinker>=1.6.0 -q 2>/dev/null || true
+    
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install to user directory to avoid system conflicts
         pip install -r "$REQUIREMENTS_FILE" \
@@ -245,6 +249,10 @@ elif [ "$MISSING_UI" = true ]; then
     else
         REQUIREMENTS_FILE="requirements.txt"
     fi
+    
+    # Pre-install blinker to avoid distutils conflict (common on RunPod/system Python)
+    echo "   🔧 Pre-installing blinker to avoid conflicts..."
+    pip install --ignore-installed blinker>=1.6.0 -q 2>/dev/null || true
     
     if [ "$IS_RUNPOD" = true ]; then
         # On RunPod: Install all requirements
