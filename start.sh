@@ -317,6 +317,49 @@ fi
 
 echo ""
 
+# Check DynamoDB setup
+echo "🗄️  Checking DynamoDB database..."
+echo ""
+
+# Check if boto3 is installed
+if ! python -c "import boto3" 2>/dev/null; then
+    echo "  ⚠️  boto3 package not found"
+    echo "     Installing boto3 package..."
+    if pip install boto3 botocore; then
+        echo "  ✅ boto3 installed"
+    else
+        echo "  ❌ Failed to install boto3"
+    fi
+fi
+
+# Check if DynamoDB Local is running (for local development)
+if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
+    # On RunPod or AWS - might be using AWS DynamoDB or Local
+    if curl -s http://localhost:8000/ > /dev/null 2>&1; then
+        echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
+        # Check if tables exist
+        if python -c "from utils.dynamodb_manager import DynamoDBManager; DynamoDBManager()" 2>/dev/null; then
+            echo "  ✅ Database tables ready"
+        else
+            echo "  ⚠️  Database tables not found"
+            echo "     Run: python setup_dynamodb.py"
+        fi
+    else
+        echo "  ℹ️  DynamoDB Local not running"
+        echo "     To start: docker-compose -f docker-compose.dynamodb.yml up -d"
+        echo "     Then run: python setup_dynamodb.py"
+        echo "     (App will work without database, using JSON fallback)"
+    fi
+else
+    # Local machine
+    echo "  ℹ️  DynamoDB setup:"
+    echo "     1. Start local: docker-compose -f docker-compose.dynamodb.yml up -d"
+    echo "     2. Create tables: python setup_dynamodb.py"
+    echo "     (App will work without database, using JSON fallback)"
+fi
+
+echo ""
+
 # Check if config files exist
 if [ ! -f "config/users.yaml" ]; then
     echo "⚠️  Warning: config/users.yaml not found!"
