@@ -339,8 +339,20 @@ fi
 
 # Auto-start DynamoDB Local if not running (on RunPod/cloud)
 if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
+    # Check if AWS credentials are set - if so, use AWS DynamoDB (skip local)
+    if [ ! -z "$AWS_ACCESS_KEY_ID" ] && [ ! -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        echo "  ✅ AWS DynamoDB credentials detected"
+        echo "     Using AWS DynamoDB (no local Docker needed)"
+        
+        # Verify connection to AWS DynamoDB
+        if python -c "from utils.dynamodb_manager import DynamoDBManager; DynamoDBManager(local_mode=False)" 2>/dev/null; then
+            echo "  ✅ Connected to AWS DynamoDB successfully"
+        else
+            echo "  ⚠️  Could not connect to AWS DynamoDB"
+            echo "     Using JSON-based feedback storage (fallback)"
+        fi
     # Check if DynamoDB Local is running
-    if curl -s http://localhost:8000/ > /dev/null 2>&1; then
+    elif curl -s http://localhost:8000/ > /dev/null 2>&1; then
         echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
     else
         # First, ensure Docker is installed
