@@ -54,8 +54,7 @@ logs/
 *.tar.gz
 temp/
 
-# Test files
-test*.py
+# Test files (but allow test_claude_intent.py)
 mock_*.py
 *_test.py
 
