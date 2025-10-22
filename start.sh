@@ -28,6 +28,9 @@ if [ -d "/runpod-volume" ] || [ -d "/workspace" ] || [ ! -z "$RUNPOD_POD_ID" ]; 
     echo "🖥️  Environment: RunPod GPU Instance"
     echo "📍 GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'Not detected')"
     
+    # Configure Git credential caching (cache for 24 hours to avoid repeated prompts)
+    git config --global credential.helper 'cache --timeout=86400'
+    
     # Check for Git LFS and auto-pull large files
     if [ -f ".gitattributes" ] && grep -q "lfs" .gitattributes 2>/dev/null; then
         echo ""
