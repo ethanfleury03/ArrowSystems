@@ -350,15 +350,23 @@ if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
             if [ $? -eq 0 ]; then
                 echo "  ✅ Docker installed successfully"
                 
-                # Start Docker service
-                service docker start > /dev/null 2>&1
-                sleep 3
-                
-                # Verify installation
-                if command -v docker &> /dev/null && command -v docker-compose &> /dev/null; then
-                    echo "  ✅ Docker service started"
+                # Start Docker daemon (try multiple methods)
+                if systemctl start docker > /dev/null 2>&1; then
+                    echo "  ✅ Docker daemon started (systemctl)"
+                elif service docker start > /dev/null 2>&1; then
+                    echo "  ✅ Docker daemon started (service)"
                 else
-                    echo "  ⚠️  Docker installation failed"
+                    # Start dockerd directly in background
+                    dockerd > /dev/null 2>&1 &
+                    sleep 5
+                    echo "  ✅ Docker daemon started (dockerd)"
+                fi
+                
+                # Verify Docker is working
+                if docker ps > /dev/null 2>&1; then
+                    echo "  ✅ Docker is ready"
+                else
+                    echo "  ⚠️  Docker daemon failed to start"
                     echo "     Using JSON-based feedback storage (fallback)"
                 fi
             else
