@@ -84,74 +84,86 @@ class DynamoDBManager:
         """
         try:
             # Table 1: QueryHistory
-            self.dynamodb.create_table(
-                TableName=self.query_table_name,
-                KeySchema=[
-                    {'AttributeName': 'PK', 'KeyType': 'HASH'},   # USER#username
-                    {'AttributeName': 'SK', 'KeyType': 'RANGE'}   # QUERY#timestamp
+            # Build GSI configuration based on mode
+            gsi_config = {
+                'IndexName': 'DateIndex',
+                'KeySchema': [
+                    {'AttributeName': 'GSI1PK', 'KeyType': 'HASH'},
+                    {'AttributeName': 'GSI1SK', 'KeyType': 'RANGE'}
                 ],
-                AttributeDefinitions=[
-                    {'AttributeName': 'PK', 'AttributeType': 'S'},
-                    {'AttributeName': 'SK', 'AttributeType': 'S'},
-                    {'AttributeName': 'GSI1PK', 'AttributeType': 'S'},  # For querying by date
-                    {'AttributeName': 'GSI1SK', 'AttributeType': 'S'}
-                ],
-                GlobalSecondaryIndexes=[
-                    {
-                        'IndexName': 'DateIndex',
-                        'KeySchema': [
-                            {'AttributeName': 'GSI1PK', 'KeyType': 'HASH'},
-                            {'AttributeName': 'GSI1SK', 'KeyType': 'RANGE'}
-                        ],
-                        'Projection': {'ProjectionType': 'ALL'},
-                        'ProvisionedThroughput': {
-                            'ReadCapacityUnits': 1,
-                            'WriteCapacityUnits': 1
-                        } if self.local_mode else None
-                    }
-                ],
-                BillingMode='PAY_PER_REQUEST' if not self.local_mode else 'PROVISIONED',
-                ProvisionedThroughput={
+                'Projection': {'ProjectionType': 'ALL'}
+            }
+            if self.local_mode:
+                gsi_config['ProvisionedThroughput'] = {
                     'ReadCapacityUnits': 1,
                     'WriteCapacityUnits': 1
-                } if self.local_mode else None
-            )
+                }
+            
+            # Build table configuration
+            table_config = {
+                'TableName': self.query_table_name,
+                'KeySchema': [
+                    {'AttributeName': 'PK', 'KeyType': 'HASH'},
+                    {'AttributeName': 'SK', 'KeyType': 'RANGE'}
+                ],
+                'AttributeDefinitions': [
+                    {'AttributeName': 'PK', 'AttributeType': 'S'},
+                    {'AttributeName': 'SK', 'AttributeType': 'S'},
+                    {'AttributeName': 'GSI1PK', 'AttributeType': 'S'},
+                    {'AttributeName': 'GSI1SK', 'AttributeType': 'S'}
+                ],
+                'GlobalSecondaryIndexes': [gsi_config],
+                'BillingMode': 'PROVISIONED' if self.local_mode else 'PAY_PER_REQUEST'
+            }
+            if self.local_mode:
+                table_config['ProvisionedThroughput'] = {
+                    'ReadCapacityUnits': 1,
+                    'WriteCapacityUnits': 1
+                }
+            
+            self.dynamodb.create_table(**table_config)
             logger.info(f"Created table: {self.query_table_name}")
             
             # Table 2: Feedback
-            self.dynamodb.create_table(
-                TableName=self.feedback_table_name,
-                KeySchema=[
-                    {'AttributeName': 'PK', 'KeyType': 'HASH'},   # QUERY#query_id
-                    {'AttributeName': 'SK', 'KeyType': 'RANGE'}   # FEEDBACK#timestamp
+            table2_config = {
+                'TableName': self.feedback_table_name,
+                'KeySchema': [
+                    {'AttributeName': 'PK', 'KeyType': 'HASH'},
+                    {'AttributeName': 'SK', 'KeyType': 'RANGE'}
                 ],
-                AttributeDefinitions=[
+                'AttributeDefinitions': [
                     {'AttributeName': 'PK', 'AttributeType': 'S'},
                     {'AttributeName': 'SK', 'AttributeType': 'S'}
                 ],
-                BillingMode='PAY_PER_REQUEST' if not self.local_mode else 'PROVISIONED',
-                ProvisionedThroughput={
+                'BillingMode': 'PROVISIONED' if self.local_mode else 'PAY_PER_REQUEST'
+            }
+            if self.local_mode:
+                table2_config['ProvisionedThroughput'] = {
                     'ReadCapacityUnits': 1,
                     'WriteCapacityUnits': 1
-                } if self.local_mode else None
-            )
+                }
+            
+            self.dynamodb.create_table(**table2_config)
             logger.info(f"Created table: {self.feedback_table_name}")
             
             # Table 3: ValidatedQnA
-            self.dynamodb.create_table(
-                TableName=self.validated_qna_table_name,
-                KeySchema=[
+            table3_config = {
+                'TableName': self.validated_qna_table_name,
+                'KeySchema': [
                     {'AttributeName': 'query_hash', 'KeyType': 'HASH'}
                 ],
-                AttributeDefinitions=[
+                'AttributeDefinitions': [
                     {'AttributeName': 'query_hash', 'AttributeType': 'S'}
                 ],
-                BillingMode='PAY_PER_REQUEST' if not self.local_mode else 'PROVISIONED',
-                ProvisionedThroughput={
+                'BillingMode': 'PROVISIONED' if self.local_mode else 'PAY_PER_REQUEST'
+            }
+            if self.local_mode:
+                table3_config['ProvisionedThroughput'] = {
                     'ReadCapacityUnits': 1,
                     'WriteCapacityUnits': 1
-                } if self.local_mode else None
-            )
+                }
+            
+            self.dynamodb.create_table(**table3_config)
             logger.info(f"Created table: {self.validated_qna_table_name}")
             
             logger.info("✅ All tables created successfully!")
