@@ -1308,7 +1308,7 @@ class ClaudeAnswerGenerator:
             # Generate answer with Claude
             response = self.claude_client.messages.create(
                 model=self.model_name,
-                max_tokens=1000,
+                max_tokens=2000,  # Increased for more detailed technical answers
                 temperature=0.1,
                 messages=[{"role": "user", "content": prompt}]
             )
