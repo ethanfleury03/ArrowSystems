@@ -303,9 +303,15 @@ def initialize_rag_system():
             )
         
         logger.info(f"Using storage path: {storage_path}")
-        rag = EliteRAGQuery(cache_dir="/root/.cache/huggingface/hub")
+        
+        # Get database manager if available
+        db = st.session_state.get('db', None) if hasattr(st, 'session_state') else None
+        
+        rag = EliteRAGQuery(cache_dir="/root/.cache/huggingface/hub", db_manager=db)
         rag.initialize(storage_dir=storage_path)
         logger.info("RAG system initialized successfully")
+        if db:
+            logger.info("✅ RAG system connected to DynamoDB for validated Q&A fast-path")
         return rag
     except Exception as e:
         logger.error(f"Failed to initialize RAG system: {e}", exc_info=True)
