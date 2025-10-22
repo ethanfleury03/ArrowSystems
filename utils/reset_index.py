@@ -24,6 +24,8 @@ def reset_index(confirm=True, verbose=True):
     paths_to_delete = [
         "storage",
         "/workspace/storage",
+        "latest_model",  # Current default storage location
+        "/workspace/latest_model",
         "extracted_content",
         ".qdrant",  # If using Qdrant local
     ]
