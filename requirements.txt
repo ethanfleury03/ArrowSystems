@@ -1,53 +1,71 @@
-llama-index
-llama-index-embeddings-huggingface
-llama-index-llms-huggingface
-llama-index-vector-stores-qdrant
-sentence-transformers
-torch
-transformers
-accelerate
-bitsandbytes
-optimum
-huggingface-hub
-hf-transfer
-safetensors
-xformers
-scikit-learn
-qdrant-client
-pyyaml
-PyMuPDF
-pandas<2.2.0  # Pin to version with Python 3.14 wheels
-Pillow
-numpy
-tabulate
-rank-bm25
-symspellpy
-openai
-ollama>=0.1.0
-anthropic>=0.40.0
+# Core ML and AI
+torch==2.5.1+cu121       # CUDA 12.1 support
+transformers==4.57.1
+sentence-transformers==5.1.2
+accelerate==1.11.0
+huggingface-hub==0.36.0
+safetensors==0.6.2
+scikit-learn==1.7.2
+
+# LlamaIndex
+llama-index==0.14.5
+llama-index-core==0.14.5
+llama-index-embeddings-huggingface==0.6.1
+llama-index-llms-huggingface==0.6.1
+llama-index-readers-file==0.5.4
+
+# API and LLM
+anthropic==0.71.0
+openai==2.6.1
 
 # Database
-boto3>=1.28.0
-botocore>=1.31.0
+boto3==1.40.58
 
-# UI and Web Application
-# blinker>=1.6.0  # Commented out to avoid distutils conflict - use system blinker
-streamlit>=1.28.0
-streamlit-authenticator>=0.2.3
-plotly>=5.17.0
-pydeck>=0.8.0
+# UI
+streamlit==1.50.0
+streamlit-authenticator==0.4.2
+plotly==6.3.1
+pydeck==0.9.1
 
 # FastAPI Backend
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-pydantic>=2.0.0
+fastapi==0.120.0
+uvicorn[standard]==0.38.0
+pydantic==2.12.3
 
-# Export and Reporting
-reportlab>=4.0.0
-openpyxl>=3.1.0
-python-docx>=1.0.0
+# Document Processing
+PyMuPDF==1.26.5
+pandas==2.1.4
+numpy==2.2.6
+Pillow==11.3.0            # Fixed version to resolve conflict
+reportlab==4.4.4
+openpyxl==3.1.5
+python-docx==1.2.0
+python-dotenv==1.1.1
 
 # Utilities
-python-dotenv>=1.0.0
-watchdog>=3.0.0
-tqdm>=4.65.0
+watchdog==6.0.0
+tqdm==4.67.1
+nltk==3.9.2
+rank-bm25==0.2.2
+symspellpy==6.9.0
+tabulate==0.9.0
+pyyaml==6.0.3
+
+# Core Dependencies
+requests==2.32.5
+urllib3==2.5.0
+certifi==2025.10.5
+typing-extensions==4.15.0
+packaging==25.0
+setuptools==80.9.0
+filelock==3.20.0
+fsspec==2025.9.0
+networkx==3.4.2
+jinja2==3.1.6
+click==8.3.0
+h11==0.16.0
+anyio==4.11.0
+starlette==0.48.0
+annotated-types==0.7.0
+pydantic-core==2.41.4
+annotated-doc==0.0.2
