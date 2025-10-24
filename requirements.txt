@@ -1,14 +1,14 @@
 # -----------------------------
 # Core ML and AI
 # -----------------------------
-torch==2.5.1                # Install CUDA 12.1 wheel separately
+torch==2.5.1                # Install CUDA wheel separately
 transformers==4.57.1
 sentence-transformers==5.1.2
 accelerate==1.11.0
 huggingface-hub==0.36.0
 safetensors==0.6.2
 scikit-learn==1.7.2
-numpy==1.27.6               # Fixed to latest 1.x compatible version
+numpy==2.2.6                # Latest compatible with Python 3.10
 
 # -----------------------------
 # LlamaIndex
@@ -37,7 +37,7 @@ streamlit==1.50.0
 streamlit-authenticator==0.4.2
 plotly==6.3.1
 pydeck==0.9.1
-Pillow==11.3.0               # Compatible with Streamlit
+Pillow==11.3.0               # Compatible with Streamlit 1.50.0
 
 # -----------------------------
 # FastAPI Backend
