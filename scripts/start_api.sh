@@ -12,8 +12,8 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
     echo "⚠️  Warning: ANTHROPIC_API_KEY not set. LLM features will be disabled."
 fi
 
-# Check if index exists
-if [ ! -d "latest_model" ] && [ ! -d "/workspace/latest_model" ]; then
+# Check if index exists in multiple locations
+if [ ! -d "latest_model" ] && [ ! -d "../latest_model" ] && [ ! -d "/workspace/latest_model" ] && [ ! -d "/workspace/ArrowSystems/latest_model" ]; then
     echo "❌ Error: Index not found. Please run 'python ingest.py' first."
     echo "   Or ensure the latest_model directory exists."
     exit 1
@@ -21,6 +21,9 @@ fi
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
+
+# Change to project root directory (where api.py is located)
+cd "$(dirname "$0")/.."
 
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
