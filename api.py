@@ -62,17 +62,28 @@ async def lifespan(app: FastAPI):
     
     # Initialize RAG pipeline
     try:
-        # Determine storage path
-        if os.path.exists("latest_model"):
-            storage_path = "latest_model"
-        elif os.path.exists("/workspace/latest_model"):
-            storage_path = "/workspace/latest_model"
-        elif os.path.exists("/workspace/storage"):
-            storage_path = "/workspace/storage"
-        elif os.path.exists("./storage"):
-            storage_path = "./storage"
-        else:
-            raise FileNotFoundError("Index not found. Please run 'python ingest.py' first.")
+        # Determine storage path - check multiple locations
+        possible_paths = [
+            "latest_model",  # Current directory
+            "../latest_model",  # Parent directory (for scripts/)
+            "/workspace/latest_model",  # RunPod workspace
+            "/workspace/ArrowSystems/latest_model",  # RunPod with ArrowSystems
+            "/workspace/storage",  # Old storage location
+            "./storage"  # Local storage
+        ]
+        
+        storage_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                storage_path = path
+                break
+        
+        if not storage_path:
+            raise FileNotFoundError(
+                "Index not found. Please run 'python ingest.py' first, "
+                "or ensure the latest_model directory exists. "
+                f"Checked paths: {possible_paths}"
+            )
         
         logger.info(f"Using storage path: {storage_path}")
         
