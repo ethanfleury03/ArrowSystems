@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     wget \
-    libgl1-mesa-glx \
+    libgl1-mesa-dri \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -24,14 +24,17 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy requirements first (for better Docker layer caching)
-COPY requirements-production.txt .
+COPY requirements.txt .
 
 # Install Python dependencies with specific versions that work together
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements-production.txt
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
+
+# Copy .env file if it exists
+COPY .env* ./
 
 # Create necessary directories
 RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage
@@ -61,28 +64,45 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD /app/healthcheck.sh
 
-# Startup script that handles everything
-COPY --chown=appuser:appuser <<EOF /app/start.sh
-#!/bin/bash
-set -e
+# Environment variables will be set at runtime for security
+# These are just defaults - override them when running the container
+ENV ANTHROPIC_API_KEY=""
+ENV AWS_ACCESS_KEY_ID=""
+ENV AWS_SECRET_ACCESS_KEY=""
+ENV AWS_DEFAULT_REGION="us-east-1"
 
-echo "🚀 Starting RAG Application..."
-
-# Check if we need to ingest data
-if [ ! -f "/app/latest_model/index_store.json" ] || [ ! -f "/app/latest_model/docstore.json" ]; then
-    echo "📚 No existing index found. Starting data ingestion..."
-    python ingest.py
-    echo "✅ Data ingestion completed!"
-else
-    echo "📚 Existing index found. Skipping ingestion."
-fi
-
-# Start the Streamlit app
-echo "🌐 Starting Streamlit application..."
-exec streamlit run app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
-EOF
-
-RUN chmod +x /app/start.sh
+# Create startup script with proper Unix line endings
+RUN echo '#!/bin/bash' > /app/start.sh && \
+    echo 'set -e' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Load .env file if it exists' >> /app/start.sh && \
+    echo 'if [ -f ".env" ]; then' >> /app/start.sh && \
+    echo '    echo "📋 Loading environment variables from .env file..."' >> /app/start.sh && \
+    echo '    set -a' >> /app/start.sh && \
+    echo '    source .env' >> /app/start.sh && \
+    echo '    set +a' >> /app/start.sh && \
+    echo '    echo "✅ Environment variables loaded"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo 'echo "=========================================="' >> /app/start.sh && \
+    echo 'echo "🔧 DuraFlex Technical Assistant"' >> /app/start.sh && \
+    echo 'echo "=========================================="' >> /app/start.sh && \
+    echo 'echo ""' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Check if index exists' >> /app/start.sh && \
+    echo 'if [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then' >> /app/start.sh && \
+    echo '    echo "✅ RAG index found in latest_model/"' >> /app/start.sh && \
+    echo '    echo "   📊 Indexed chunks: $(python -c "import json; print(len(json.load(open(\"latest_model/docstore.json\"))[\"docstore/data\"]))" 2>/dev/null || echo "unknown")"' >> /app/start.sh && \
+    echo '    echo ""' >> /app/start.sh && \
+    echo 'else' >> /app/start.sh && \
+    echo '    echo "⚠️  RAG Index Not Found! Running ingestion..."' >> /app/start.sh && \
+    echo '    python ingest.py' >> /app/start.sh && \
+    echo '    echo "✅ Ingestion complete!"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo 'echo "🔐 Login: admin/admin123 or tech1/tech123"' >> /app/start.sh && \
+    echo 'echo "🚀 Starting Streamlit server..."' >> /app/start.sh && \
+    echo 'exec python -m streamlit run app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true' >> /app/start.sh
 
 # Start the application
-CMD ["/app/start.sh"]
+CMD ["/bin/bash", "/app/start.sh"]
