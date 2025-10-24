@@ -1,6 +1,8 @@
 """
 Elite RAG Query Interface with Hybrid Search & Structured Responses
 Implements the complete RAG orchestration pipeline
+
+Updated to use the new RAG pipeline module for better architecture.
 """
 
 import warnings
@@ -11,7 +13,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 import os
 import logging
 from typing import List, Optional, Dict, Any
-from orchestrator import RAGOrchestrator, StructuredResponse
+from rag_pipeline import RAGPipeline, StructuredResponse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,17 +23,18 @@ class EliteRAGQuery:
     """
     Elite RAG query interface with hybrid search, query orchestration,
     and structured response generation.
+    
+    Updated to use the new RAG pipeline module for better architecture.
     """
     
     def __init__(self, cache_dir="/root/.cache/huggingface/hub", db_manager=None):
         self.cache_dir = cache_dir
         self.db_manager = db_manager
-        self.orchestrator = RAGOrchestrator(cache_dir=cache_dir, db_manager=db_manager)
+        self.pipeline = RAGPipeline(cache_dir=cache_dir, db_manager=db_manager)
         
     def initialize(self, storage_dir="latest_model"):
         """Initialize models and load index."""
-        self.orchestrator.initialize_models()
-        self.orchestrator.load_index(storage_dir=storage_dir)
+        self.pipeline.initialize(storage_dir=storage_dir)
         logger.info("✅ Elite RAG system initialized")
     
     def query(
@@ -55,7 +58,7 @@ class EliteRAGQuery:
         Returns:
             StructuredResponse with answer, reasoning, and sources
         """
-        return self.orchestrator.orchestrate_query(
+        return self.pipeline.query(
             query=query,
             top_k=top_k,
             alpha=alpha,
@@ -65,7 +68,7 @@ class EliteRAGQuery:
     
     def format_response(self, response: StructuredResponse) -> str:
         """Format structured response for display."""
-        return self.orchestrator.format_response(response)
+        return self.pipeline.format_response(response)
 
 
 # Legacy compatibility wrapper
@@ -81,14 +84,14 @@ class TechnicalRAGQuery(EliteRAGQuery):
     
     def initialize_models(self):
         """Legacy method - redirects to new initialize."""
-        self.orchestrator.initialize_models()
-        self.embed_model = self.orchestrator.embed_model
-        self.reranker = self.orchestrator.reranker
+        self.pipeline.initialize()
+        self.embed_model = self.pipeline.orchestrator.embed_model
+        self.reranker = self.pipeline.orchestrator.reranker
     
     def load_index(self, storage_dir="latest_model"):
         """Legacy method - redirects to new load."""
-        self.orchestrator.load_index(storage_dir=storage_dir)
-        self.index = self.orchestrator.index
+        self.pipeline.initialize(storage_dir=storage_dir)
+        self.index = self.pipeline.orchestrator.index
         return self.index
     
     def search(self, query: str, top_k: int = 10, use_reranking: bool = True):

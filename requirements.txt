@@ -37,6 +37,11 @@ streamlit-authenticator>=0.2.3
 plotly>=5.17.0
 pydeck>=0.8.0
 
+# FastAPI Backend
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
 # Export and Reporting
 reportlab>=4.0.0
 openpyxl>=3.1.0
