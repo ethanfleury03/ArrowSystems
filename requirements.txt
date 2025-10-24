@@ -1,7 +1,7 @@
 # -----------------------------
 # Core ML and AI
 # -----------------------------
-torch==2.5.1                # Install CUDA wheel separately
+torch==2.5.1
 transformers==4.57.1
 sentence-transformers==5.1.2
 accelerate==1.11.0
@@ -59,7 +59,6 @@ python-dotenv==1.1.1
 # -----------------------------
 # Utilities
 # -----------------------------
-watchdog==6.0.0
 tqdm==4.67.1
 nltk==3.9.2
 rank-bm25==0.2.2
@@ -86,4 +85,3 @@ anyio==4.11.0
 starlette==0.48.0
 annotated-types==0.7.0
 pydantic-core==2.41.4
-annotated-doc==0.0.2
