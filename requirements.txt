@@ -1,5 +1,5 @@
 # Core ML and AI
-torch==2.5.1+cu121       # CUDA 12.1 support
+torch==2.5.1
 transformers==4.57.1
 sentence-transformers==5.1.2
 accelerate==1.11.0
