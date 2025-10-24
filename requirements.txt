@@ -23,7 +23,7 @@ llama-index-readers-file==0.5.4
 # API and LLM
 # -----------------------------
 anthropic==0.71.0
-openai==2.6.1
+openai==1.54.4
 
 # -----------------------------
 # Database
