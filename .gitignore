@@ -47,6 +47,7 @@ backup_*/
 # Logs
 *.log
 logs/
+api.log
 
 # Temporary files
 *.tmp
@@ -57,6 +58,9 @@ temp/
 # Test files (but allow test_claude_intent.py)
 mock_*.py
 *_test.py
+
+# Cleanup and migration files (one-time use)
+CLEANUP_SUMMARY.md
 
 # HuggingFace cache (too large for git)
 .cache/
