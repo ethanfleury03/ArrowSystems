@@ -31,7 +31,7 @@ boto3>=1.28.0
 botocore>=1.31.0
 
 # UI and Web Application
-blinker>=1.6.0  # Pin version to avoid distutils conflict (required by streamlit)
+# blinker>=1.6.0  # Commented out to avoid distutils conflict - use system blinker
 streamlit>=1.28.0
 streamlit-authenticator>=0.2.3
 plotly>=5.17.0
