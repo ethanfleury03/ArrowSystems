@@ -64,12 +64,8 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD /app/healthcheck.sh
 
-# Environment variables will be set at runtime for security
-# These are just defaults - override them when running the container
-ENV ANTHROPIC_API_KEY=""
-ENV AWS_ACCESS_KEY_ID=""
-ENV AWS_SECRET_ACCESS_KEY=""
-ENV AWS_DEFAULT_REGION="us-east-1"
+# Environment variables will be loaded from .env file at runtime
+# No default values set here to avoid overriding .env file
 
 # Create startup script with proper Unix line endings
 RUN echo '#!/bin/bash' > /app/start.sh && \
