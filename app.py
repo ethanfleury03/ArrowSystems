@@ -253,16 +253,11 @@ def load_custom_css():
 
 @st.cache_resource(show_spinner=False)
 def initialize_database():
-    """Initialize DynamoDB connection (cached for performance)."""
-    from utils.dynamodb_manager import DynamoDBManager
-    import os
+    """Initialize PostgreSQL connection (cached for performance)."""
+    from utils.postgres_manager import PostgresManager
     try:
-        # Auto-detect: Use AWS if credentials are set, otherwise local
-        use_aws = bool(os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY'))
-        db = DynamoDBManager(local_mode=not use_aws)
-        
-        mode = "AWS DynamoDB" if use_aws else "Local DynamoDB"
-        logger.info(f"✅ Database connection initialized ({mode})")
+        db = PostgresManager()
+        logger.info(f"✅ Database connection initialized (Google Cloud SQL)")
         return db
     except Exception as e:
         logger.warning(f"⚠️ Database initialization failed: {e}")
@@ -316,7 +311,7 @@ def initialize_rag_system():
         rag.initialize(storage_dir=storage_path)
         logger.info("RAG system initialized successfully")
         if db:
-            logger.info("✅ RAG system connected to DynamoDB for validated Q&A fast-path")
+            logger.info("✅ RAG system connected to PostgreSQL for validated Q&A fast-path")
         return rag
     except Exception as e:
         logger.error(f"Failed to initialize RAG system: {e}", exc_info=True)

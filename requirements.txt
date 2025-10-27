@@ -26,9 +26,10 @@ anthropic==0.71.0
 openai>=1.108.1,<2.0
 
 # -----------------------------
-# Database
+# Database (PostgreSQL for Google Cloud SQL)
 # -----------------------------
-boto3==1.40.58
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.25
 
 # -----------------------------
 # UI

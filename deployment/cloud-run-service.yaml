@@ -1,0 +1,69 @@
+# Google Cloud Run Service Configuration
+# This file defines the Cloud Run service configuration
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: rag-app
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/execution-environment: gen2
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cpu-throttling: "false"
+        autoscaling.knative.dev/maxScale: "10"
+        autoscaling.knative.dev/minScale: "0"
+    spec:
+      containerConcurrency: 100
+      timeoutSeconds: 3600
+      containers:
+      - image: gcr.io/ragapp-476414/rag-app:latest
+        ports:
+        - containerPort: 8501
+        env:
+        - name: PYTHONPATH
+          value: "/app"
+        - name: PORT
+          value: "8501"
+        resources:
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+          requests:
+            cpu: "1"
+            memory: "1Gi"
+        startupProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/data
+          readOnly: true
+        - name: model-volume
+          mountPath: /app/latest_model
+          readOnly: true
+      volumes:
+      - name: data-volume
+        gcs:
+          bucketName: ragapp-data
+          readOnly: true
+      - name: model-volume
+        gcs:
+          bucketName: ragapp-models
+          readOnly: true

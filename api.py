@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 from rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
-from utils.dynamodb_manager import DynamoDBManager
+from utils.postgres_manager import PostgresManager
 
 # Configure logging
 logging.basicConfig(
@@ -53,9 +53,8 @@ async def lifespan(app: FastAPI):
     
     try:
         # Initialize database manager
-        use_aws = bool(os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY'))
-        db_manager = DynamoDBManager(local_mode=not use_aws)
-        logger.info(f"✅ Database connection initialized ({'AWS DynamoDB' if use_aws else 'Local DynamoDB'})")
+        db_manager = PostgresManager()
+        logger.info(f"✅ Database connection initialized (Google Cloud SQL)")
     except Exception as e:
         logger.warning(f"⚠️ Database initialization failed: {e}")
         db_manager = None

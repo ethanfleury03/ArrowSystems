@@ -1,0 +1,134 @@
+# Git and version control
+.git
+.gitignore
+.gitattributes
+.gitmodules
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment files (keep .env.example)
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Logs
+*.log
+logs/
+log/
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+
+# pytest
+.pytest_cache/
+.tox/
+
+# Documentation
+docs/
+*.md
+README*
+
+# Docker files (except the one we're using)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Node.js (if any)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Large model files (if not using Git LFS)
+*.bin
+*.safetensors
+models/
+checkpoints/
+
+# Data files (keep structure but exclude large files)
+data/*.pdf
+data/*.docx
+data/*.xlsx
+data/*.csv
+!data/.gitkeep
+
+# Cache directories
+.cache/
+cache/
+.huggingface/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Test files
+test/
+tests/
+*_test.py
+test_*.py
