@@ -257,7 +257,11 @@ def initialize_database():
     from utils.postgres_manager import PostgresManager
     try:
         db = PostgresManager()
-        logger.info(f"✅ Database connection initialized (Google Cloud SQL)")
+        # Check if connection actually works
+        if db.connection_pool is None:
+            logger.warning("⚠️ PostgreSQL not available - database features disabled")
+            return None
+        logger.info(f"✅ Database connection initialized")
         return db
     except Exception as e:
         logger.warning(f"⚠️ Database initialization failed: {e}")
@@ -304,10 +308,24 @@ def initialize_rag_system():
         
         logger.info(f"Using storage path: {storage_path}")
         
-        # Get database manager if available
-        db = st.session_state.get('db', None) if hasattr(st, 'session_state') else None
+        # Get database manager if available (only if called from main thread)
+        db = None
+        try:
+            # Only try to access session_state if we're in the main Streamlit thread
+            # In background threads, this will fail gracefully
+            import streamlit.runtime.scriptrunner.script_runner as script_runner
+            if script_runner.get_script_run_ctx() is not None:
+                db = st.session_state.get('db', None)
+        except (AttributeError, RuntimeError, ImportError):
+            # We're in a background thread - this is expected and fine
+            # The database connection will be None for background preload
+            pass
         
-        rag = EliteRAGQuery(cache_dir="/root/.cache/huggingface/hub", db_manager=db)
+        # Use environment variable for cache directory if set, otherwise use default
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+        if not cache_dir.endswith('hub'):
+            cache_dir = os.path.join(cache_dir, 'hub')
+        rag = EliteRAGQuery(cache_dir=cache_dir, db_manager=db)
         rag.initialize(storage_dir=storage_path)
         logger.info("RAG system initialized successfully")
         if db:
