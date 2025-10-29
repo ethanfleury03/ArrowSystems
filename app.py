@@ -13,6 +13,8 @@ from pathlib import Path
 import logging
 from datetime import datetime
 import threading
+import time
+import os
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -561,14 +563,15 @@ def main():
             st.warning("⚠️ Your session has expired. Please login again.")
             st.stop()
         
-        # Ensure models are ready after login (instant if background preload finished)
+        # Initialize RAG system (cached by @st.cache_resource - only loads once)
         if not st.session_state.get('models_initialized', False):
             try:
+                # This will be fast if models are already cached from Dockerfile preload
                 st.session_state['rag_system'] = initialize_rag_system()
                 st.session_state['models_initialized'] = True
-                logger.info("✅ RAG system ready after login (preloaded if available)")
+                logger.info("✅ RAG system ready")
             except Exception as e:
-                logger.error(f"Failed to initialize RAG system after login: {e}", exc_info=True)
+                logger.error(f"Failed to initialize RAG system: {e}", exc_info=True)
                 st.error("⚠️ Model loading failed. Please refresh.")
                 st.stop()
         
