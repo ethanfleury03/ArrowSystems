@@ -381,8 +381,10 @@ class ClaudeIntentClassifier:
         try:
             import anthropic
             
-            # Get API key from environment
+            # Get API key from environment and strip any Windows line endings
             api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                api_key = api_key.strip().rstrip('\r\n')  # Remove any trailing whitespace/CRLF
             
             if not api_key:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Using fallback pattern-matching for intent.")
@@ -391,12 +393,17 @@ class ClaudeIntentClassifier:
             
             self.claude_client = anthropic.Anthropic(api_key=api_key)
             
-            # Test connection with minimal request
-            self.claude_client.messages.create(
-                model=self.model_name,
-                max_tokens=10,
-                messages=[{"role": "user", "content": "test"}]
-            )
+            # Test connection with minimal request (with timeout)
+            try:
+                self.claude_client.messages.create(
+                    model=self.model_name,
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": "test"}],
+                    timeout=30.0  # 30 second timeout
+                )
+            except Exception as test_error:
+                logger.warning(f"Claude test request failed: {type(test_error).__name__}: {test_error}")
+                raise
             
             logger.info(f"✅ Claude Intent Classifier initialized with model: {self.model_name}")
             
@@ -404,7 +411,12 @@ class ClaudeIntentClassifier:
             logger.warning("⚠️ Anthropic package not installed. Using fallback pattern-matching.")
             self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Claude connection failed: {e}. Using fallback pattern-matching.")
+            error_type = type(e).__name__
+            error_msg = str(e)
+            import traceback
+            logger.error(f"⚠️ Claude connection failed: {error_type}: {error_msg}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            logger.warning("Using fallback pattern-matching.")
             self.claude_client = None
     
     def classify(self, query: str) -> QueryIntent:
@@ -546,27 +558,54 @@ class HybridRetriever:
     def _initialize_bm25(self):
         """Initialize BM25 index from document corpus."""
         try:
-            # Get all nodes from the index
             logger.info("🔧 Initializing BM25 index...")
             
-            # Retrieve a large set of documents to build BM25 corpus
-            retriever = self.index.as_retriever(similarity_top_k=1000)
-            # Use a generic query to get diverse documents
-            dummy_nodes = retriever.retrieve("technical documentation system")
+            # Ensure embedding model is set before creating retriever
+            if self.embed_model:
+                Settings.embed_model = self.embed_model
             
-            if dummy_nodes:
-                self.corpus_nodes = dummy_nodes
-                
-                # Tokenize corpus for BM25
+            # Try to get nodes directly from docstore (most reliable)
+            if hasattr(self.index, 'docstore') and self.index.docstore:
+                try:
+                    all_doc_ids = list(self.index.docstore.docs.keys())
+                    if all_doc_ids:
+                        # Get first 1000 document IDs
+                        for doc_id in all_doc_ids[:1000]:
+                            try:
+                                doc = self.index.docstore.get_document(doc_id)
+                                if doc:
+                                    self.corpus_nodes.append(doc)
+                            except:
+                                continue
+                        logger.info(f"Loaded {len(self.corpus_nodes)} nodes directly from docstore")
+                except Exception as e:
+                    logger.warning(f"Direct docstore access failed: {e}")
+            
+            # Fallback: try retrieving with queries if docstore didn't work
+            if not self.corpus_nodes:
+                retriever = self.index.as_retriever(similarity_top_k=1000)
+                dummy_queries = ["system", "installation", "configuration", "overview"]
+                for query in dummy_queries:
+                    try:
+                        nodes = retriever.retrieve(query)
+                        if nodes:
+                            self.corpus_nodes.extend(nodes)
+                            if len(self.corpus_nodes) >= 100:
+                                break
+                    except:
+                        continue
+            
+            if self.corpus_nodes:
+                self.corpus_nodes = self.corpus_nodes[:1000]  # Limit to 1000
                 tokenized_corpus = [node.text.lower().split() for node in self.corpus_nodes]
                 self.bm25 = BM25Okapi(tokenized_corpus)
-                
                 logger.info(f"✅ BM25 initialized with {len(self.corpus_nodes)} documents")
             else:
                 logger.warning("⚠️ No documents found for BM25 initialization")
+                self.bm25 = None
         
         except Exception as e:
-            logger.warning(f"BM25 initialization failed: {e}")
+            logger.error(f"BM25 initialization failed: {e}", exc_info=True)
             self.bm25 = None
     
     def bm25_search(self, query: str, top_k: int = 20) -> List[Tuple[NodeWithScore, float]]:
@@ -583,18 +622,65 @@ class HybridRetriever:
         # Get top-k indices
         top_indices = np.argsort(scores)[-top_k:][::-1]
         
-        # Return nodes with scores
+        # Return nodes with scores - ensure we return NodeWithScore objects
         results = []
         for idx in top_indices:
             if scores[idx] > 0:  # Only include non-zero scores
-                results.append((self.corpus_nodes[idx], float(scores[idx])))
+                node_wrapper = self.corpus_nodes[idx]
+                # Ensure it's a NodeWithScore with the BM25 score
+                if isinstance(node_wrapper, NodeWithScore):
+                    # Create new NodeWithScore with BM25 score
+                    result_node = NodeWithScore(
+                        node=node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper,
+                        score=float(scores[idx])
+                    )
+                    results.append((result_node, float(scores[idx])))
+                else:
+                    # Wrap plain node in NodeWithScore
+                    results.append((NodeWithScore(node=node_wrapper, score=float(scores[idx])), float(scores[idx])))
         
         return results
     
     def dense_search(self, query: str, top_k: int = 20) -> List[NodeWithScore]:
         """Perform dense embedding search."""
-        retriever = self.index.as_retriever(similarity_top_k=top_k)
-        return retriever.retrieve(query)
+        try:
+            # CRITICAL: Ensure embedding model is set before creating retriever
+            # This must match the model used when building the index
+            if not self.embed_model:
+                logger.error("No embedding model available for dense search!")
+                return []
+            
+            # Set embedding model globally BEFORE creating retriever
+            Settings.embed_model = self.embed_model
+            
+            # Create retriever with explicit embedding model if possible
+            retriever = self.index.as_retriever(similarity_top_k=top_k)
+            
+            # Double-check: ensure retriever uses the correct embedding model
+            # Some LlamaIndex versions need explicit setting
+            if hasattr(retriever, 'service_context') and retriever.service_context:
+                if hasattr(retriever.service_context, 'embed_model'):
+                    retriever.service_context.embed_model = self.embed_model
+            
+            results = retriever.retrieve(query)
+            
+            if not results:
+                logger.warning(f"Dense search returned 0 results for query: {query[:50]}")
+                # Try once more with a simpler approach
+                try:
+                    # Direct vector store access as fallback
+                    if hasattr(self.index, 'vector_store'):
+                        query_embedding = self.embed_model.get_query_embedding(query)
+                        if query_embedding:
+                            # Try direct vector similarity search
+                            logger.debug("Attempting direct vector store query...")
+                except Exception as fallback_error:
+                    logger.debug(f"Fallback retrieval also failed: {fallback_error}")
+            
+            return results
+        except Exception as e:
+            logger.error(f"Dense search failed: {e}", exc_info=True)
+            return []
     
     def hybrid_search(
         self,
@@ -623,6 +709,29 @@ class HybridRetriever:
             # Wait for both to complete
             dense_results = dense_future.result()
             bm25_results = bm25_future.result()
+            
+            # Log diagnostic info
+            logger.debug(f"🔍 Dense search returned {len(dense_results)} results")
+            logger.debug(f"🔍 BM25 search returned {len(bm25_results)} results")
+            if not dense_results and not bm25_results:
+                logger.warning(f"⚠️ Both dense and BM25 searches returned 0 results for query: {query[:100]}")
+                logger.debug(f"Index type: {type(self.index)}, BM25 initialized: {self.bm25 is not None}, corpus_nodes: {len(self.corpus_nodes)}")
+        
+        # Fallback: If both searches returned 0 results, try direct index access
+        if not dense_results and not bm25_results:
+            logger.warning("⚠️ Both searches failed - attempting fallback retrieval...")
+            try:
+                # Try to get results with a very generic query
+                fallback_retriever = self.index.as_retriever(similarity_top_k=top_k)
+                fallback_results = fallback_retriever.retrieve("system")
+                if fallback_results:
+                    logger.info(f"✅ Fallback retrieval found {len(fallback_results)} results")
+                    dense_results = fallback_results
+                else:
+                    # Last resort: try getting any nodes from the index
+                    logger.error("⚠️ All retrieval methods failed - index may be corrupted or incompatible")
+            except Exception as e:
+                logger.error(f"Fallback retrieval also failed: {e}", exc_info=True)
         
         # Combine results with scoring
         combined_scores = defaultdict(lambda: {'dense': 0.0, 'bm25': 0.0, 'node': None})
@@ -631,7 +740,13 @@ class HybridRetriever:
         if dense_results:
             max_dense = max(node.score for node in dense_results) if dense_results else 1.0
             for node in dense_results:
-                node_id = node.node_id
+                # Extract node_id safely
+                if isinstance(node, NodeWithScore):
+                    node_id = node.node_id if hasattr(node, 'node_id') else (node.node.node_id if hasattr(node.node, 'node_id') else str(id(node)))
+                else:
+                    node_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                    # Wrap in NodeWithScore if needed
+                    node = NodeWithScore(node=node, score=0.0) if not isinstance(node, NodeWithScore) else node
                 combined_scores[node_id]['dense'] = node.score / max_dense
                 combined_scores[node_id]['node'] = node
         
@@ -639,7 +754,13 @@ class HybridRetriever:
         if bm25_results:
             max_bm25 = max(score for _, score in bm25_results) if bm25_results else 1.0
             for node, score in bm25_results:
-                node_id = node.node_id
+                # Extract node_id safely - node should already be NodeWithScore from bm25_search
+                if isinstance(node, NodeWithScore):
+                    node_id = node.node_id if hasattr(node, 'node_id') else (node.node.node_id if hasattr(node.node, 'node_id') else str(id(node)))
+                else:
+                    # Wrap in NodeWithScore if somehow it's not
+                    node_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                    node = NodeWithScore(node=node, score=score)
                 combined_scores[node_id]['bm25'] = score / max_bm25
                 if combined_scores[node_id]['node'] is None:
                     combined_scores[node_id]['node'] = node
@@ -657,8 +778,15 @@ class HybridRetriever:
                         continue
                 
                 # Create new NodeWithScore with hybrid score
+                # Handle both NodeWithScore and plain nodes
+                node_wrapper = scores['node']
+                if isinstance(node_wrapper, NodeWithScore):
+                    underlying_node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+                else:
+                    underlying_node = node_wrapper
+                
                 scored_node = NodeWithScore(
-                    node=scores['node'].node,
+                    node=underlying_node,
                     score=hybrid_score
                 )
                 hybrid_results.append(scored_node)
@@ -666,9 +794,15 @@ class HybridRetriever:
         # Sort by hybrid score
         hybrid_results.sort(key=lambda x: x.score, reverse=True)
         
-        # Apply re-ranking if available
+        # Apply re-ranking if available (skip on CPU for performance)
+        # Re-ranker adds ~90 seconds on CPU, only use on GPU
         if self.reranker and len(hybrid_results) > 1:
-            hybrid_results = self._rerank(query, hybrid_results[:top_k * 2])
+            import torch
+            if torch.cuda.is_available():
+                # Only re-rank on GPU (fast) - skip on CPU (too slow)
+                hybrid_results = self._rerank(query, hybrid_results[:top_k * 2])
+            else:
+                logger.debug("Skipping re-ranker on CPU for performance (would take ~90s)")
         
         return hybrid_results[:top_k]
     
@@ -702,26 +836,33 @@ class HybridRetriever:
         )
         
         # Apply LLM evaluation if enabled and evaluator is available
+        # PERFORMANCE: Skip LLM evaluation on CPU or for simple queries (saves 30-60s)
         if (enable_llm_evaluation and 
             self.document_evaluator and 
             self.document_evaluator.claude_client):
             
-            logger.info(f"🤖 Applying LLM document evaluation to {len(hybrid_results)} documents")
-            
-            try:
-                # Evaluate documents with LLM
-                evaluated_results = self.document_evaluator.evaluate_retrieved_documents(
-                    query=query,
-                    nodes=hybrid_results,
-                    max_documents=min(10, len(hybrid_results))  # Limit for performance
-                )
-                
-                # Sort by new scores and return top_k
-                evaluated_results.sort(key=lambda x: x.score, reverse=True)
-                return evaluated_results[:top_k]
-                
-            except Exception as e:
-                logger.warning(f"LLM evaluation failed, falling back to standard ranking: {e}")
+            import torch
+            # Only use LLM evaluation on GPU or when explicitly needed (it's slow!)
+            # For CPU, rely on hybrid search + BM25 scoring which is already good
+            if torch.cuda.is_available() or len(hybrid_results) > 20:
+                logger.info(f"🤖 Applying LLM document evaluation to {len(hybrid_results)} documents")
+                try:
+                    # Evaluate documents with LLM (limit to top 3 for speed)
+                    evaluated_results = self.document_evaluator.evaluate_retrieved_documents(
+                        query=query,
+                        nodes=hybrid_results,
+                        max_documents=min(3, len(hybrid_results))  # Reduced from 10 to 3 for speed
+                    )
+                    
+                    # Sort by new scores and return top_k
+                    evaluated_results.sort(key=lambda x: x.score, reverse=True)
+                    return evaluated_results[:top_k]
+                    
+                except Exception as e:
+                    logger.warning(f"LLM evaluation failed, falling back to standard ranking: {e}")
+                    return hybrid_results[:top_k]
+            else:
+                logger.debug("Skipping LLM evaluation on CPU for performance")
                 return hybrid_results[:top_k]
         else:
             # No LLM evaluation, return standard results
@@ -969,8 +1110,10 @@ class DocumentEvaluator:
         try:
             import anthropic
             
-            # Get API key from environment
+            # Get API key from environment and strip any Windows line endings
             api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                api_key = api_key.strip().rstrip('\r\n')  # Remove any trailing whitespace/CRLF
             
             if not api_key:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Document evaluation will be disabled.")
@@ -992,7 +1135,10 @@ class DocumentEvaluator:
             logger.warning("⚠️ Anthropic package not installed. Document evaluation will be disabled.")
             self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Claude connection failed: {e}. Document evaluation will be disabled.")
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logger.warning(f"⚠️ Claude connection failed: {error_type}: {error_msg[:200]}. Document evaluation will be disabled.")
+            logger.debug(f"Full Claude error: {e}", exc_info=True)
             self.claude_client = None
     
     def evaluate_retrieved_documents(
@@ -1247,6 +1393,10 @@ class ClaudeAnswerGenerator:
             if not api_key:
                 api_key = os.getenv('ANTHROPIC_API_KEY')
             
+            # Strip any Windows line endings from API key
+            if api_key:
+                api_key = api_key.strip().rstrip('\r\n')  # Remove any trailing whitespace/CRLF
+            
             if not api_key:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Claude answer generation will be disabled.")
                 self.claude_client = None
@@ -1267,7 +1417,10 @@ class ClaudeAnswerGenerator:
             logger.warning("⚠️ Anthropic package not installed. Claude answer generation will be disabled.")
             self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Claude connection failed: {e}. Claude answer generation will be disabled.")
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logger.warning(f"⚠️ Claude connection failed: {error_type}: {error_msg[:200]}. Claude answer generation will be disabled.")
+            logger.debug(f"Full Claude error: {e}", exc_info=True)
             self.claude_client = None
     
     def generate_answer(
@@ -1582,7 +1735,10 @@ class RAGOrchestrator:
         if not self.embed_model:
             # Emergency fallback
             try:
-                self.embed_model = HuggingFaceEmbedding(model_name="all-MiniLM-L6-v2")
+                self.embed_model = HuggingFaceEmbedding(
+                    model_name="all-MiniLM-L6-v2",
+                    cache_folder=self.cache_dir
+                )
                 logger.info("✅ Loaded with emergency fallback")
             except:
                 raise RuntimeError("Could not load embedding model. Check internet connection.")
@@ -1625,6 +1781,15 @@ class RAGOrchestrator:
             )
         
         logger.info("🔄 Loading index...")
+        
+        # CRITICAL: Set embedding model in Settings BEFORE loading index
+        # This ensures the retriever uses the correct embedding model
+        if self.embed_model:
+            Settings.embed_model = self.embed_model
+            logger.info(f"✅ Set global embedding model: {type(self.embed_model).__name__}")
+        else:
+            logger.warning("⚠️ No embedding model set - retrieval may fail!")
+        
         storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
         self.index = load_index_from_storage(storage_context)
         
@@ -1801,8 +1966,16 @@ class RAGOrchestrator:
         seen = set()
         unique_nodes = []
         for node in all_nodes:
-            if node.node_id not in seen:
-                seen.add(node.node_id)
+            # Extract node_id safely
+            if isinstance(node, NodeWithScore):
+                node_id = node.node_id if hasattr(node, 'node_id') else (node.node.node_id if hasattr(node.node, 'node_id') else str(id(node)))
+            else:
+                node_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                # Wrap in NodeWithScore if needed
+                node = NodeWithScore(node=node, score=0.0) if not isinstance(node, NodeWithScore) else node
+            
+            if node_id not in seen:
+                seen.add(node_id)
                 unique_nodes.append(node)
         
         # Sort by score and limit

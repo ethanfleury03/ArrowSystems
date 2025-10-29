@@ -7,7 +7,7 @@ ARG BUILD_ENV=production
 # =============================================================================
 # Base Stage - Common dependencies and system setup
 # =============================================================================
-FROM python:3.11-slim as base
+FROM python:3.11-slim AS base
 
 # Set environment variables
 ENV PYTHONPATH=/app \
@@ -38,7 +38,10 @@ RUN useradd -m -u 1000 appuser
 # =============================================================================
 # Dependencies Stage - Install Python packages
 # =============================================================================
-FROM base as dependencies
+FROM base AS dependencies
+
+# Redeclare ARG for this stage (required - ARGs don't persist across FROM)
+ARG BUILD_ENV=production
 
 WORKDIR /app
 
@@ -52,102 +55,51 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Conditionally install development dependencies
 RUN if [ "$BUILD_ENV" = "development" ]; then \
-        --mount=type=cache,target=/root/.cache/pip \
         pip install watchdog python-dotenv; \
     fi
 
 # =============================================================================
 # Final Stage - Application setup
 # =============================================================================
-FROM dependencies as final
+FROM dependencies AS final
+
+# Redeclare ARG for this stage (required - ARGs don't persist across FROM)
+ARG BUILD_ENV=production
+
+# Set as ENV so it's available at runtime (for script conditionals)
+ENV BUILD_ENV=${BUILD_ENV}
+
+# Set HuggingFace cache directory to a location appuser can write to
+ENV HF_HOME=/app/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+ENV HF_DATASETS_CACHE=/app/.cache/huggingface
+ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
 
 # Copy application code
 COPY --chown=appuser:appuser . .
 
-# Create necessary directories
-RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage && \
-    chown -R appuser:appuser /app
+# Create necessary directories including cache directory for HuggingFace
+# MUST create cache directory BEFORE switching to appuser
+RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/huggingface && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app/.cache
 
 # Switch to non-root user
 USER appuser
 
 # Create startup script that adapts to environment
-COPY --chown=appuser:appuser <<EOF /app/start.sh
-#!/bin/bash
-set -e
+# Using RUN heredoc instead of COPY heredoc for better compatibility
+# Note: Single quotes around 'EOF' prevent variable expansion at build time
+# BUILD_ENV will be evaluated at runtime via ENV variable
+RUN printf '#!/bin/bash\nset -e\n\n# Load .env file if it exists\nif [ -f ".env" ]; then\n    echo "📋 Loading environment variables from .env file..."\n    set -a\n    # Use a while loop to load .env and strip carriage returns\n    while IFS= read -r line || [ -n "$line" ]; do\n        # Skip empty lines and comments\n        if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then\n            continue\n        fi\n        # Strip carriage returns and export\n        export "$(echo "$line" | tr -d '\''\r'\'')"\n    done < .env\n    set +a\n    echo "✅ Environment variables loaded"\nfi\n\necho "=========================================="\nif [ "$BUILD_ENV" = "development" ]; then\n    echo "🔧 DuraFlex Technical Assistant (DEV)"\nelse\n    echo "🔧 DuraFlex Technical Assistant"\nfi\necho "=========================================="\necho ""\n\n# Check if index exists\nif [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then\n    echo "✅ RAG index found in latest_model/"\n    echo "   📊 Indexed chunks: $(python -c '\''import json; print(len(json.load(open("latest_model/docstore.json"))["docstore/data"]))'\'' 2>/dev/null || echo '\''unknown'\'')"\n    echo ""\nelse\n    echo "⚠️  RAG Index Not Found! Running ingestion..."\n    python ingest.py\n    echo "✅ Ingestion complete!"\nfi\n\necho "🔐 Login: admin/admin123 or tech1/tech123"\necho "🚀 Starting Streamlit server..."\necho ""\n\n# Start Streamlit with environment-specific settings\nif [ "$BUILD_ENV" = "development" ]; then\n    # Development: Enable hot reloading\n    exec python -m streamlit run app.py \\\n        --server.port=8501 \\\n        --server.address=0.0.0.0 \\\n        --server.headless=true \\\n        --server.runOnSave=true \\\n        --server.fileWatcherType=poll\nelse\n    # Production: Optimized settings\n    exec python -m streamlit run app.py \\\n        --server.port=8501 \\\n        --server.address=0.0.0.0 \\\n        --server.headless=true \\\n        --server.enableCORS=false \\\n        --server.enableXsrfProtection=false\nfi\n' > /app/start.sh && chmod +x /app/start.sh
 
-# Load .env file if it exists
-if [ -f ".env" ]; then
-    echo "📋 Loading environment variables from .env file..."
-    set -a
-    source .env
-    set +a
-    echo "✅ Environment variables loaded"
-fi
-
-echo "=========================================="
-if [ "$BUILD_ENV" = "development" ]; then
-    echo "🔧 DuraFlex Technical Assistant (DEV)"
-else
-    echo "🔧 DuraFlex Technical Assistant"
-fi
-echo "=========================================="
-echo ""
-
-# Check if index exists
-if [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then
-    echo "✅ RAG index found in latest_model/"
-    echo "   📊 Indexed chunks: \$(python -c "import json; print(len(json.load(open('latest_model/docstore.json'))['docstore/data']))" 2>/dev/null || echo "unknown")"
-    echo ""
-else
-    echo "⚠️  RAG Index Not Found! Running ingestion..."
-    python ingest.py
-    echo "✅ Ingestion complete!"
-fi
-
-echo "🔐 Login: admin/admin123 or tech1/tech123"
-echo "🚀 Starting Streamlit server..."
-echo ""
-
-# Start Streamlit with environment-specific settings
-if [ "$BUILD_ENV" = "development" ]; then
-    # Development: Enable hot reloading
-    exec python -m streamlit run app.py \
-        --server.port=8501 \
-        --server.address=0.0.0.0 \
-        --server.headless=true \
-        --server.runOnSave=true \
-        --server.fileWatcherType=poll
-else
-    # Production: Optimized settings
-    exec python -m streamlit run app.py \
-        --server.port=8501 \
-        --server.address=0.0.0.0 \
-        --server.headless=true \
-        --server.enableCORS=false \
-        --server.enableXsrfProtection=false
-fi
-EOF
-
-RUN chmod +x /app/start.sh
-
-# Health check script (only for production)
-COPY --chown=appuser:appuser <<EOF /app/healthcheck.sh
-#!/bin/bash
-if curl -f http://localhost:8501/_stcore/health > /dev/null 2>&1; then
-    exit 0
-else
-    exit 1
-fi
-EOF
-
-RUN chmod +x /app/healthcheck.sh
+# Create health check script
+RUN printf '#!/bin/bash\nif curl -f http://localhost:8501/_stcore/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && chmod +x /app/healthcheck.sh
 
 EXPOSE 8501
 
-# Conditional health check (only for production)
-RUN if [ "$BUILD_ENV" = "production" ]; then \
-        echo "HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 CMD /app/healthcheck.sh" >> /tmp/healthcheck; \
-    fi
+# Health check (always enabled for production)
+HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
+    CMD /app/healthcheck.sh || exit 1
 
 CMD ["/bin/bash", "/app/start.sh"]

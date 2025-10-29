@@ -13,7 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 
 logger = logging.getLogger(__name__)
 
-class PostgreSQLManager:
+class PostgresManager:
     """PostgreSQL database manager for RAG application"""
     
     def __init__(self):
@@ -39,16 +39,21 @@ class PostgreSQLManager:
                 **db_config
             )
             
+            # Test the connection
+            conn = self.connection_pool.getconn()
+            self.connection_pool.putconn(conn)
+            
             logger.info("PostgreSQL connection pool initialized")
             
         except Exception as e:
-            logger.error(f"Failed to initialize PostgreSQL connection: {e}")
+            logger.warning(f"PostgreSQL connection not available: {e}")
+            logger.warning("Application will continue without database persistence")
             self.connection_pool = None
     
     def get_connection(self):
         """Get a connection from the pool"""
         if not self.connection_pool:
-            raise Exception("PostgreSQL connection pool not initialized")
+            raise Exception("PostgreSQL connection pool not initialized - database not available")
         return self.connection_pool.getconn()
     
     def return_connection(self, conn):
@@ -144,11 +149,39 @@ class PostgreSQLManager:
             if conn:
                 self.return_connection(conn)
     
-    def save_query(self, session_id: str, query_text: str, response_text: str = None, 
-                   response_time_ms: int = None, metadata: Dict = None) -> Optional[int]:
-        """Save a query and return query_id"""
+    def save_query(self, user: str = None, query_text: str = None, answer_text: str = None,
+                   intent_type: str = None, intent_confidence: float = None, sources: List[str] = None,
+                   confidence: float = None, response_time_ms: int = None, session_id: str = None,
+                   **kwargs) -> Optional[int]:
+        """Save a query and return query_id - supports multiple call signatures"""
+        # Check if database is available
+        if not self.connection_pool:
+            logger.debug("Database not available, skipping query save")
+            return None
+            
         conn = None
         try:
+            # Handle different call patterns
+            if not session_id:
+                session_id = kwargs.get('session_id', 'unknown')
+            if not query_text:
+                query_text = kwargs.get('query_text', '')
+            
+            response_text = answer_text or kwargs.get('response_text')
+            
+            # Build metadata from additional parameters
+            metadata = {
+                'user': user or kwargs.get('user'),
+                'intent_type': intent_type,
+                'intent_confidence': intent_confidence,
+                'sources': sources or [],
+                'confidence': confidence,
+            }
+            # Add any additional kwargs to metadata
+            for k, v in kwargs.items():
+                if k not in ['session_id', 'query_text', 'response_text', 'response_time_ms', 'user', 'answer_text']:
+                    metadata[k] = v
+            
             conn = self.get_connection()
             cursor = conn.cursor()
             
@@ -163,7 +196,7 @@ class PostgreSQLManager:
             return query_id
             
         except Exception as e:
-            logger.error(f"Failed to save query: {e}")
+            logger.warning(f"Failed to save query to database: {e}")
             if conn:
                 conn.rollback()
             return None

@@ -86,9 +86,15 @@ async def lifespan(app: FastAPI):
         
         logger.info(f"Using storage path: {storage_path}")
         
+        # Use environment variable for cache directory if set
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface/hub')
+        if cache_dir.endswith('huggingface'):
+            cache_dir = os.path.join(cache_dir, 'hub')
+        
         # Initialize RAG pipeline
         rag_pipeline = initialize_rag_pipeline(
             storage_dir=storage_path,
+            cache_dir=cache_dir,
             db_manager=db_manager
         )
         logger.info("✅ RAG pipeline initialized successfully")
