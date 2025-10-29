@@ -847,11 +847,11 @@ class HybridRetriever:
             if torch.cuda.is_available() or len(hybrid_results) > 20:
                 logger.info(f"🤖 Applying LLM document evaluation to {len(hybrid_results)} documents")
                 try:
-                    # Evaluate documents with LLM (limit to top 3 for speed)
+                    # Evaluate documents with LLM (limit to top 15 for better coverage)
                     evaluated_results = self.document_evaluator.evaluate_retrieved_documents(
                         query=query,
                         nodes=hybrid_results,
-                        max_documents=min(3, len(hybrid_results))  # Reduced from 10 to 3 for speed
+                        max_documents=min(15, len(hybrid_results))  # Increased from 3 to 15 for better coverage
                     )
                     
                     # Sort by new scores and return top_k
@@ -1145,16 +1145,15 @@ class DocumentEvaluator:
         self, 
         query: str, 
         nodes: List[NodeWithScore],
-        max_documents: int = 3  # Reduced from 10 to 3 to limit API calls
+        max_documents: int = 15  # Increased from 3 to 15 for better coverage
     ) -> List[NodeWithScore]:
         """
         Evaluate and re-rank retrieved documents using Claude.
-        LIMITED to prevent excessive API costs.
         
         Args:
             query: User query
             nodes: Retrieved document nodes
-            max_documents: Maximum number of documents to evaluate (limited to 3)
+            max_documents: Maximum number of documents to evaluate (default: 15)
             
         Returns:
             Re-ranked nodes based on Claude evaluation
@@ -1162,8 +1161,8 @@ class DocumentEvaluator:
         if not self.claude_client or not nodes:
             return nodes
         
-        # STRICT LIMIT: Only evaluate top 3 documents to prevent API spam
-        nodes_to_evaluate = nodes[:min(3, max_documents)]
+        # Evaluate up to max_documents to provide better coverage
+        nodes_to_evaluate = nodes[:max_documents]
         
         logger.info(f"🔍 Evaluating only {len(nodes_to_evaluate)} documents to limit API costs")
         
