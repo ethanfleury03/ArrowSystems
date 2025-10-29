@@ -1913,89 +1913,36 @@ class RAGOrchestrator:
             except Exception as e:
                 logger.debug(f"Glossary augmentation skipped: {e}")
 
-        # Step 2: Rewrite query
-        query_variations = self.query_rewriter.rewrite_query(augmented_query, intent)
-        logger.info(f"🔄 Generated {len(query_variations)} query variations")
+        # Step 2: Simple retrieval - just get the top_k best chunks directly
+        # Use the augmented query (which may include glossary aliases) or original query
+        search_query = augmented_query if augmented_query != query else query
+        logger.info(f"🔍 Retrieving top {top_k} chunks for query: {search_query}")
         
-        # If definitional query and glossary available, answer from glossary fast-path
-        is_def = intent.intent_type == 'definition'
-        if is_def and self.glossary_index:
-            try:
-                gloss = self.glossary_index.as_retriever(similarity_top_k=3).retrieve(query)
-                if gloss:
-                    # Build a minimal context-like response from glossary
-                    answer = "\n".join([g.text for g in gloss])
-                    response = StructuredResponse(
-                        query=query,
-                        answer=answer,
-                        reasoning="Answered from glossary entries.",
-                        sources=[{'id': '[G]', 'name': 'Glossary', 'pages': 'N/A', 'content_type': 'text'}],
-                        confidence=0.9,
-                        intent=intent,
-                    )
-                    return response
-            except Exception as e:
-                logger.debug(f"Glossary fast-path failed: {e}")
-
-        # Step 3: Hybrid retrieval with LLM evaluation (⚡ PARALLEL)
-        all_nodes = []
+        # Run single hybrid search (no variations, no parallel complexity)
+        # This gives us exactly the top_k best chunks based on hybrid search scoring
+        unique_nodes = self.retriever.hybrid_search_with_llm_evaluation(
+            query=search_query,
+            top_k=top_k,
+            alpha=alpha,
+            metadata_filters=metadata_filters,
+            enable_llm_evaluation=self.enable_llm_evaluation
+        )
         
-        # Run all query variations in parallel for 3x speedup
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = []
-            for q_variant in query_variations[:3]:  # Use top 3 variations
-                future = executor.submit(
-                    self.retriever.hybrid_search_with_llm_evaluation,
-                    query=q_variant,
-                    top_k=top_k,
-                    alpha=alpha,
-                    metadata_filters=metadata_filters,
-                    enable_llm_evaluation=self.enable_llm_evaluation
-                )
-                futures.append(future)
-            
-            # Collect results as they complete
-            for future in as_completed(futures):
-                try:
-                    nodes = future.result()
-                    all_nodes.extend(nodes)
-                except Exception as e:
-                    logger.warning(f"Query variation failed: {e}")
-        
-        # Deduplicate by node_id
-        seen = set()
-        unique_nodes = []
-        for node in all_nodes:
-            # Extract node_id safely
-            if isinstance(node, NodeWithScore):
-                node_id = node.node_id if hasattr(node, 'node_id') else (node.node.node_id if hasattr(node.node, 'node_id') else str(id(node)))
-            else:
-                node_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
-                # Wrap in NodeWithScore if needed
-                node = NodeWithScore(node=node, score=0.0) if not isinstance(node, NodeWithScore) else node
-            
-            if node_id not in seen:
-                seen.add(node_id)
-                unique_nodes.append(node)
-        
-        # Sort by score and limit
-        unique_nodes.sort(key=lambda x: x.score, reverse=True)
+        # Ensure we have exactly top_k results (in case hybrid search returned fewer)
+        unique_nodes = unique_nodes[:top_k]
         
         retrieval_time = time.time() - start_time
-        logger.info(f"⚡ Retrieval completed in {retrieval_time:.2f}s (parallel execution)")
+        logger.info(f"⚡ Retrieval completed in {retrieval_time:.2f}s (simple single-query search)")
         
-        # Step 4: Dynamic context windowing
-        if dynamic_windowing:
-            unique_nodes = self._apply_dynamic_windowing(unique_nodes, top_k)
-        else:
-            unique_nodes = unique_nodes[:top_k]
+        # Skip dynamic windowing - just use the top_k chunks directly
+        # (Simple approach: just get the requested number of best chunks)
         
         logger.info(f"📚 Retrieved {len(unique_nodes)} unique chunks")
         
-        # Step 5: Build retrieval context
+        # Step 3: Build retrieval context
         context = self._build_retrieval_context(unique_nodes)
         
-        # Step 6: Generate structured response
+        # Step 4: Generate structured response
         response = self.response_generator.generate_structured_response(
             query=query,
             context=context,
