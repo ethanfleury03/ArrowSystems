@@ -44,7 +44,10 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "==========================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "To run the container locally:" -ForegroundColor Cyan
-    Write-Host "  docker run -p 8501:8501 rag-app:local" -ForegroundColor White
+    Write-Host "  docker run -p 8000:8000 rag-app:local" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Or use docker-compose to run both backend and frontend:" -ForegroundColor Cyan
+    Write-Host "  docker-compose up" -ForegroundColor White
     Write-Host ""
 } else {
     Write-Host ""

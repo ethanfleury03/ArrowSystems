@@ -10,13 +10,25 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip first
+RUN pip install --upgrade pip
+
+# Install PyTorch separately with CPU-only build (much faster for GCP)
+# This is ~300MB vs ~900MB for full CUDA build
+RUN pip install --no-cache-dir --timeout=300 --default-timeout=300 \
+    torch==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cpu
 
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install remaining Python dependencies
+# Filter out torch from requirements using Python since we installed it above with CPU build
+RUN python -c "import sys; lines = [l for l in open('requirements.txt') if not l.startswith('torch==')]; open('requirements_no_torch.txt', 'w').writelines(lines)" && \
+    pip install --no-cache-dir --timeout=300 --default-timeout=300 -r requirements_no_torch.txt
 
 # Copy application code
 COPY . .
