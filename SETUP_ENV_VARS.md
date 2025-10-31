@@ -40,3 +40,4 @@ Add-Content $PROFILE '$env:ANTHROPIC_API_KEY = "sk-ant-api03-0MFFVrfgzl_oXf2By0d
 
 The errors you're seeing (`/root/.cache/huggingface/` permission denied) are from the **old container** that was built before the fixes. You **must rebuild** the image for the fixes to take effect!
 
+

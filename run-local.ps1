@@ -19,7 +19,11 @@ if (-not $imageExists) {
 Write-Host "✅ Image found" -ForegroundColor Green
 Write-Host ""
 Write-Host "Starting container..." -ForegroundColor Yellow
-Write-Host "The app will be available at: http://localhost:8501" -ForegroundColor Cyan
+Write-Host "The backend API will be available at: http://localhost:8000" -ForegroundColor Cyan
+Write-Host "API docs available at: http://localhost:8000/docs" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "⚠️  Note: This runs the backend API only." -ForegroundColor Yellow
+Write-Host "   Use 'docker-compose up' to run both backend and frontend together." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Press Ctrl+C to stop the container" -ForegroundColor Yellow
 Write-Host ""
@@ -37,7 +41,7 @@ if ($env:ANTHROPIC_API_KEY) {
 
 # Run the container
 docker run -it --rm `
-    -p 8501:8501 `
+    -p 8000:8000 `
     $envVars `
     rag-app:local
 
