@@ -891,18 +891,27 @@ class TechnicalRAGPipeline:
         # Combine all nodes
         all_nodes = filtered_nodes + non_text_nodes
         
-        # Create index from nodes (with progress bar)
+        # Create index from nodes (LlamaIndex API)
         if storage_context:
-            self.index = VectorStoreIndex.from_nodes(
-                all_nodes,
+            # Create index with storage context
+            self.index = VectorStoreIndex(
+                nodes=[],
                 storage_context=storage_context,
-                show_progress=True  # Built-in LlamaIndex progress bar!
+                show_progress=True
             )
         else:
-            self.index = VectorStoreIndex.from_nodes(
-                all_nodes,
-                show_progress=True  # Built-in LlamaIndex progress bar!
+            # Create index without storage context (will use default)
+            self.index = VectorStoreIndex(
+                nodes=[],
+                show_progress=True
             )
+        
+        # Insert all nodes into the index (batch insert for better performance)
+        print(f"   Inserting {len(all_nodes)} nodes into index...")
+        batch_size = 100  # Insert in batches
+        for i in tqdm(range(0, len(all_nodes), batch_size), desc="   Inserting nodes", unit="batch"):
+            batch = all_nodes[i:i + batch_size]
+            self.index.insert_nodes(batch)
         
         elapsed = time.time() - start_time
         print(f"\n   ✅ Vector index created in {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
