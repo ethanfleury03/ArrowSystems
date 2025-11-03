@@ -57,30 +57,31 @@ class TextPreprocessor:
     
     def __init__(self):
         # Compile regex patterns for common boilerplate text
+        # Using more specific patterns to avoid catastrophic backtracking
         self.boilerplate_patterns = [
-            # Page numbers (various formats)
-            re.compile(r'^\s*[Pp]age\s+\d+\s*$', re.MULTILINE),
-            re.compile(r'^\s*\d+\s*$', re.MULTILINE),  # Standalone page numbers
-            re.compile(r'^\s*-\s*\d+\s*-\s*$', re.MULTILINE),  # "- 5 -"
+            # Page numbers (various formats) - more specific to avoid hanging
+            re.compile(r'^[ \t]*[Pp]age[ \t]+\d+[ \t]*$', re.MULTILINE),
+            re.compile(r'^[ \t]*\d{1,4}[ \t]*$', re.MULTILINE),  # Standalone page numbers (limit digits)
+            re.compile(r'^[ \t]*-[ \t]*\d+[ \t]*-[ \t]*$', re.MULTILINE),  # "- 5 -"
             
             # Confidential/Proprietary markings
-            re.compile(r'\b[Mm]emjet\s+[Cc]onfidential\b', re.IGNORECASE),
+            re.compile(r'\b[Mm]emjet[ \t]+[Cc]onfidential\b', re.IGNORECASE),
             re.compile(r'\b[Cc]onfidential\b', re.IGNORECASE),
             re.compile(r'\b[Pp]roprietary\b', re.IGNORECASE),
             
-            # Copyright notices (various formats)
-            re.compile(r'©\s*\d{4}.*?$', re.MULTILINE | re.IGNORECASE),
-            re.compile(r'Copyright\s+©?\s*\d{4}.*?$', re.MULTILINE | re.IGNORECASE),
-            re.compile(r'All rights reserved\.?', re.IGNORECASE),
+            # Copyright notices (various formats) - limit length to prevent hanging
+            re.compile(r'©[ \t]*\d{4}[^\n]{0,100}$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'Copyright[ \t]+©?[ \t]*\d{4}[^\n]{0,100}$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'All[ \t]+rights[ \t]+reserved\.?', re.IGNORECASE),
             
             # Common header/footer patterns
-            re.compile(r'^\s*(Document|Version|Rev|Revision)\s*[:]\s*[\w\.-]+\s*$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'^[ \t]*(Document|Version|Rev|Revision)[ \t]*:[ \t]*[\w\.-]+[ \t]*$', re.MULTILINE | re.IGNORECASE),
             
             # Repeated section titles (if they appear multiple times)
-            re.compile(r'^\s*(Table of Contents|Contents|Index)\s*$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'^[ \t]*(Table[ \t]+of[ \t]+Contents|Contents|Index)[ \t]*$', re.MULTILINE | re.IGNORECASE),
             
             # Date stamps in headers/footers
-            re.compile(r'^\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s*$', re.MULTILINE),
+            re.compile(r'^[ \t]*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}[ \t]*$', re.MULTILINE),
         ]
         
         # Patterns for structured lines that should be preserved (for smart chunking)
@@ -95,29 +96,39 @@ class TextPreprocessor:
         """Remove common boilerplate text patterns from the input."""
         cleaned = text
         
-        # Apply each boilerplate pattern
+        # Apply each boilerplate pattern with error handling
         for pattern in self.boilerplate_patterns:
-            cleaned = pattern.sub('', cleaned)
+            try:
+                cleaned = pattern.sub('', cleaned)
+            except Exception as e:
+                # If regex fails, skip this pattern and continue
+                logger.debug(f"Regex pattern failed, skipping: {e}")
+                continue
         
         return cleaned
     
     def normalize_whitespace(self, text: str) -> str:
         """Normalize whitespace: collapse multiple spaces/tabs, normalize newlines."""
-        # Replace tabs with spaces
-        text = text.replace('\t', ' ')
-        
-        # Collapse multiple spaces into single space
-        text = re.sub(r' +', ' ', text)
-        
-        # Normalize line breaks: multiple newlines -> double newline (paragraph break)
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        
-        # Remove leading/trailing whitespace from each line
-        lines = [line.strip() for line in text.split('\n')]
-        text = '\n'.join(lines)
-        
-        # Remove leading/trailing whitespace from entire text
-        text = text.strip()
+        try:
+            # Replace tabs with spaces
+            text = text.replace('\t', ' ')
+            
+            # Collapse multiple spaces into single space (limit to prevent hanging)
+            text = re.sub(r' {2,}', ' ', text)
+            
+            # Normalize line breaks: multiple newlines -> double newline (paragraph break)
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            
+            # Remove leading/trailing whitespace from each line
+            lines = [line.strip() for line in text.split('\n')]
+            text = '\n'.join(lines)
+            
+            # Remove leading/trailing whitespace from entire text
+            text = text.strip()
+        except Exception as e:
+            logger.debug(f"Whitespace normalization failed: {e}")
+            # Return original text if normalization fails
+            pass
         
         return text
     
@@ -295,35 +306,66 @@ class SmartChunkSplitter:
         all_nodes = []
         
         for doc in tqdm(documents, desc="Splitting documents", disable=not show_progress):
-            text = doc.text or ""
-            
-            # Clean the text first
-            text = self.preprocessor.clean_text(text)
-            
-            # Check if page/document should be skipped (low content)
-            if self.preprocessor.is_low_content_page(text):
-                logger.debug(f"Skipping low-content page: {doc.metadata.get('file_name', 'unknown')}")
-                continue
-            
-            # Split into chunks
-            chunks = self.split_text(text)
-            
-            # Create nodes from chunks
-            for chunk_idx, chunk_text in enumerate(chunks):
-                # Skip if chunk is too short
-                if self.preprocessor.should_skip_node(chunk_text):
-                    continue
+            try:
+                text = doc.text or ""
+                doc_name = doc.metadata.get('file_name', 'unknown')
                 
-                # Create node with metadata
-                node = TextNode(
-                    text=chunk_text,
-                    metadata={
-                        **doc.metadata,
-                        "chunk_index": chunk_idx,
-                        "total_chunks": len(chunks)
-                    }
-                )
-                all_nodes.append(node)
+                # Clean the text first (with error handling)
+                try:
+                    text = self.preprocessor.clean_text(text)
+                except Exception as e:
+                    logger.warning(f"Error cleaning text for {doc_name}: {e}")
+                    # Use original text if cleaning fails
+                    text = doc.text or ""
+                
+                # Check if page/document should be skipped (low content)
+                try:
+                    if self.preprocessor.is_low_content_page(text):
+                        logger.debug(f"Skipping low-content page: {doc_name}")
+                        continue
+                except Exception as e:
+                    logger.debug(f"Error checking low-content for {doc_name}: {e}")
+                    # Continue processing if check fails
+                
+                # Split into chunks (with error handling)
+                try:
+                    chunks = self.split_text(text)
+                except Exception as e:
+                    logger.error(f"Error splitting text for {doc_name}: {e}")
+                    # Fallback to simple split if smart chunking fails
+                    if text:
+                        chunks = [text]
+                    else:
+                        chunks = []
+                
+                # Create nodes from chunks
+                for chunk_idx, chunk_text in enumerate(chunks):
+                    # Skip if chunk is too short
+                    try:
+                        if self.preprocessor.should_skip_node(chunk_text):
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Error checking skip node: {e}")
+                        # Continue if check fails
+                    
+                    # Create node with metadata
+                    try:
+                        node = TextNode(
+                            text=chunk_text,
+                            metadata={
+                                **doc.metadata,
+                                "chunk_index": chunk_idx,
+                                "total_chunks": len(chunks)
+                            }
+                        )
+                        all_nodes.append(node)
+                    except Exception as e:
+                        logger.error(f"Error creating node for {doc_name}, chunk {chunk_idx}: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"Error processing document {doc.metadata.get('file_name', 'unknown')}: {e}")
+                continue
         
         return all_nodes
 
@@ -495,8 +537,8 @@ class TechnicalRAGPipeline:
                 "reranker": "BAAI/bge-reranker-large"
             },
             "chunking": {
-                "chunk_size": 350,
-                "chunk_overlap": 88
+                "chunk_size": 512,
+                "chunk_overlap": 128
             }
         }
         
