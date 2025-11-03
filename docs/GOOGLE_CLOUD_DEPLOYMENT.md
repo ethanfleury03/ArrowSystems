@@ -9,7 +9,7 @@
 4. **API Keys** for:
    - Anthropic (Claude)
    - OpenAI
-   - AWS (for DynamoDB)
+   - Google Cloud SQL (PostgreSQL)
 
 ## Step 1: Initial Setup
 

@@ -60,3 +60,33 @@ export async function getHealth(): Promise<boolean> {
   }
 }
 
+export interface ChatHistoryItem {
+  id: string;
+  query: string;
+  answer: string;
+  timestamp: string;
+  intent_type?: string;
+  confidence?: number;
+  sources?: string[];
+  response_time_ms?: number;
+}
+
+export interface ChatHistoryResponse {
+  status: string;
+  count: number;
+  history: ChatHistoryItem[];
+}
+
+export async function getChatHistory(user: string = 'api_user', limit: number = 50): Promise<ChatHistoryResponse> {
+  try {
+    const response = await apiClient.get<ChatHistoryResponse>(`/history?user=${user}&limit=${limit}`);
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to get chat history';
+      throw new Error(errorMessage);
+    }
+    throw error;
+  }
+}
+
