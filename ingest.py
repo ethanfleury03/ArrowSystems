@@ -16,6 +16,7 @@ import logging
 import time
 import json
 import yaml
+import re
 from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -31,7 +32,7 @@ from tqdm import tqdm
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, load_index_from_storage, Settings
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core.schema import NodeWithScore, TextNode, ImageNode
+from llama_index.core.schema import NodeWithScore, TextNode, ImageNode, Document
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.storage.index_store import SimpleIndexStore
@@ -47,6 +48,285 @@ logger = logging.getLogger(__name__)
 # Suppress pypdf warnings for malformed PDFs
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pypdf._reader").setLevel(logging.ERROR)
+
+
+class TextPreprocessor:
+    """
+    Preprocesses text to remove boilerplate, normalize whitespace, and filter low-quality content.
+    """
+    
+    def __init__(self):
+        # Compile regex patterns for common boilerplate text
+        self.boilerplate_patterns = [
+            # Page numbers (various formats)
+            re.compile(r'^\s*[Pp]age\s+\d+\s*$', re.MULTILINE),
+            re.compile(r'^\s*\d+\s*$', re.MULTILINE),  # Standalone page numbers
+            re.compile(r'^\s*-\s*\d+\s*-\s*$', re.MULTILINE),  # "- 5 -"
+            
+            # Confidential/Proprietary markings
+            re.compile(r'\b[Mm]emjet\s+[Cc]onfidential\b', re.IGNORECASE),
+            re.compile(r'\b[Cc]onfidential\b', re.IGNORECASE),
+            re.compile(r'\b[Pp]roprietary\b', re.IGNORECASE),
+            
+            # Copyright notices (various formats)
+            re.compile(r'©\s*\d{4}.*?$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'Copyright\s+©?\s*\d{4}.*?$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'All rights reserved\.?', re.IGNORECASE),
+            
+            # Common header/footer patterns
+            re.compile(r'^\s*(Document|Version|Rev|Revision)\s*[:]\s*[\w\.-]+\s*$', re.MULTILINE | re.IGNORECASE),
+            
+            # Repeated section titles (if they appear multiple times)
+            re.compile(r'^\s*(Table of Contents|Contents|Index)\s*$', re.MULTILINE | re.IGNORECASE),
+            
+            # Date stamps in headers/footers
+            re.compile(r'^\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s*$', re.MULTILINE),
+        ]
+        
+        # Patterns for structured lines that should be preserved (for smart chunking)
+        self.preserve_patterns = [
+            re.compile(r'^(Usage|Command|Example|Syntax|Parameters?|Options?|Steps?|Procedure|Note|Warning|Important):\s*', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'^\s*\d+[\.\)]\s+', re.MULTILINE),  # Numbered lists: "1. ", "2) "
+            re.compile(r'^[-*•]\s+', re.MULTILINE),  # Bullet points
+            re.compile(r'^\s*[A-Z][a-z]+:\s*$', re.MULTILINE),  # Section headers ending with colon
+        ]
+    
+    def remove_boilerplate(self, text: str) -> str:
+        """Remove common boilerplate text patterns from the input."""
+        cleaned = text
+        
+        # Apply each boilerplate pattern
+        for pattern in self.boilerplate_patterns:
+            cleaned = pattern.sub('', cleaned)
+        
+        return cleaned
+    
+    def normalize_whitespace(self, text: str) -> str:
+        """Normalize whitespace: collapse multiple spaces/tabs, normalize newlines."""
+        # Replace tabs with spaces
+        text = text.replace('\t', ' ')
+        
+        # Collapse multiple spaces into single space
+        text = re.sub(r' +', ' ', text)
+        
+        # Normalize line breaks: multiple newlines -> double newline (paragraph break)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # Remove leading/trailing whitespace from each line
+        lines = [line.strip() for line in text.split('\n')]
+        text = '\n'.join(lines)
+        
+        # Remove leading/trailing whitespace from entire text
+        text = text.strip()
+        
+        return text
+    
+    def should_preserve_line(self, line: str) -> bool:
+        """Check if a line matches patterns that should be preserved as-is."""
+        for pattern in self.preserve_patterns:
+            if pattern.search(line):
+                return True
+        return False
+    
+    def clean_text(self, text: str) -> str:
+        """Apply all cleaning steps: remove boilerplate and normalize whitespace."""
+        cleaned = self.remove_boilerplate(text)
+        cleaned = self.normalize_whitespace(cleaned)
+        return cleaned
+    
+    def is_low_content_page(self, text: str, min_words: int = 15) -> bool:
+        """Check if a page has too little content to be useful."""
+        words = len(text.split())
+        return words < min_words
+    
+    def should_skip_node(self, text: str, min_chars: int = 30) -> bool:
+        """Check if a node should be skipped (too short or empty)."""
+        if not text or len(text.strip()) < min_chars:
+            return True
+        
+        # Check if it's mostly whitespace or special characters
+        alpha_chars = len(re.findall(r'[a-zA-Z]', text))
+        if alpha_chars < min_chars // 2:  # At least half should be alphabetic
+            return True
+        
+        return False
+
+
+class SmartChunkSplitter:
+    """
+    Wrapper around SentenceSplitter that preserves structured content like tables,
+    code blocks, numbered steps, and command syntax.
+    """
+    
+    def __init__(self, chunk_size: int = 350, chunk_overlap: int = 88, preprocessor: TextPreprocessor = None):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.base_splitter = SentenceSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            include_metadata=True
+        )
+        self.preprocessor = preprocessor or TextPreprocessor()
+    
+    def _is_table_content(self, text: str) -> bool:
+        """Detect if text contains table-like content (markdown table or pipe-separated)."""
+        # Check for markdown table pattern (| col1 | col2 |)
+        if re.search(r'\|[^\|]+\|', text) and text.count('|') >= 6:
+            return True
+        # Check for tab-separated or multiple spaces (likely table)
+        lines = text.split('\n')
+        if len(lines) >= 3:
+            tabs_or_spaces = sum(1 for line in lines if '\t' in line or re.search(r' {3,}', line))
+            if tabs_or_spaces >= len(lines) * 0.6:  # 60% of lines have table-like spacing
+                return True
+        return False
+    
+    def _is_code_block(self, text: str) -> bool:
+        """Detect if text contains code blocks."""
+        # Check for code block markers
+        if '```' in text or '`' in text:
+            return True
+        # Check for common code patterns
+        code_keywords = ['def ', 'class ', 'import ', 'function', 'return', 'const ', 'var ', 'let ']
+        if any(keyword in text for keyword in code_keywords):
+            return True
+        return False
+    
+    def _preserve_structured_chunks(self, text: str) -> List[str]:
+        """
+        Split text while preserving structured content as single units.
+        Returns list of text chunks.
+        """
+        chunks = []
+        lines = text.split('\n')
+        current_chunk = []
+        current_chunk_size = 0
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            line_stripped = line.strip()
+            
+            # Check if this line starts a structured block
+            if self.preprocessor.should_preserve_line(line_stripped):
+                # Try to collect the entire structured block
+                structured_block = [line]
+                block_size = len(line)
+                j = i + 1
+                
+                # Collect lines until we hit a non-structured line or exceed chunk size
+                while j < len(lines) and block_size + len(lines[j]) < self.chunk_size:
+                    next_line = lines[j].strip()
+                    # Continue if it's part of the structure (numbered, bullet, or continuation)
+                    if (next_line.startswith((' ', '\t')) or  # Indented continuation
+                        re.match(r'^\d+[\.\)]', next_line) or  # Next numbered item
+                        re.match(r'^[-*•]', next_line) or  # Next bullet
+                        re.match(r'^[A-Z][a-z]+:\s*$', next_line)):  # Next section header
+                        structured_block.append(lines[j])
+                        block_size += len(lines[j])
+                        j += 1
+                    else:
+                        break
+                
+                # If we have accumulated text, save it first
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                    current_chunk = []
+                    current_chunk_size = 0
+                
+                # Add the structured block as a single chunk
+                structured_text = '\n'.join(structured_block)
+                # Check if it exceeds chunk size (rare, but handle it)
+                if len(structured_text) > self.chunk_size:
+                    # Split the structured block using base splitter, but preserve internal structure
+                    sub_chunks = self.base_splitter.split_text(structured_text)
+                    chunks.extend(sub_chunks)
+                else:
+                    chunks.append(structured_text)
+                
+                i = j
+                continue
+            
+            # Regular line - add to current chunk
+            line_size = len(line)
+            if current_chunk_size + line_size <= self.chunk_size:
+                current_chunk.append(line)
+                current_chunk_size += line_size
+                i += 1
+            else:
+                # Current chunk is full, save it
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                    # Start new chunk with overlap
+                    overlap_lines = []
+                    overlap_size = 0
+                    # Get last few lines for overlap (up to chunk_overlap chars)
+                    for line_idx in range(len(current_chunk) - 1, -1, -1):
+                        if overlap_size + len(current_chunk[line_idx]) <= self.chunk_overlap:
+                            overlap_lines.insert(0, current_chunk[line_idx])
+                            overlap_size += len(current_chunk[line_idx])
+                        else:
+                            break
+                    current_chunk = overlap_lines + [line]
+                    current_chunk_size = overlap_size + line_size
+                    i += 1
+        
+        # Add remaining chunk
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        return chunks
+    
+    def split_text(self, text: str) -> List[str]:
+        """Split text with smart chunking that preserves structured content."""
+        # Check if entire text is a table or code block
+        if self._is_table_content(text) or self._is_code_block(text):
+            # Preserve as single chunk (may exceed chunk_size, but that's okay for structured content)
+            return [text]
+        
+        # Use smart chunking
+        return self._preserve_structured_chunks(text)
+    
+    def get_nodes_from_documents(self, documents: List[Document], show_progress: bool = False) -> List[TextNode]:
+        """
+        Split documents into nodes with smart chunking.
+        This is a simplified version that processes documents one by one.
+        """
+        all_nodes = []
+        
+        for doc in tqdm(documents, desc="Splitting documents", disable=not show_progress):
+            text = doc.text or ""
+            
+            # Clean the text first
+            text = self.preprocessor.clean_text(text)
+            
+            # Check if page/document should be skipped (low content)
+            if self.preprocessor.is_low_content_page(text):
+                logger.debug(f"Skipping low-content page: {doc.metadata.get('file_name', 'unknown')}")
+                continue
+            
+            # Split into chunks
+            chunks = self.split_text(text)
+            
+            # Create nodes from chunks
+            for chunk_idx, chunk_text in enumerate(chunks):
+                # Skip if chunk is too short
+                if self.preprocessor.should_skip_node(chunk_text):
+                    continue
+                
+                # Create node with metadata
+                node = TextNode(
+                    text=chunk_text,
+                    metadata={
+                        **doc.metadata,
+                        "chunk_index": chunk_idx,
+                        "total_chunks": len(chunks)
+                    }
+                )
+                all_nodes.append(node)
+        
+        return all_nodes
+
 
 class NonTextExtractor:
     """Extract and process non-text content from documents."""
@@ -133,12 +413,12 @@ class NonTextExtractor:
                         img_rects = page.get_image_rects(xref)
                         img_rect = img_rects[0] if img_rects else None
                         
-                        # Create image info
+                        # Create image info (NO base64 embedding - only metadata)
                         image_info = {
                             "source_path": pdf_path,
                             "page_number": page_num + 1,
                             "image_index": img_idx,
-                            "image_data": base64.b64encode(img_data).decode('utf-8'),
+                            # Removed: image_data base64 encoding (not needed for embeddings)
                             "width": pil_image.width,
                             "height": pil_image.height,
                             "format": "PNG",
@@ -200,6 +480,7 @@ class TechnicalRAGPipeline:
         self.reranker = None
         self.index = None
         self.non_text_extractor = NonTextExtractor()
+        self.text_preprocessor = TextPreprocessor()
         self.config = self._load_config(config_path)
         
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -387,18 +668,21 @@ class TechnicalRAGPipeline:
         
         # Process figure captions
         for caption in captions:
-            node = TextNode(
-                text=caption["caption_text"],
-                metadata={
-                    "content_type": "figure_caption",
-                    "source_path": caption["source_path"],
-                    "page_number": caption["page_number"],
-                    "line_number": caption["line_number"]
-                }
-            )
-            nodes.append(node)
+            # Clean caption text to remove boilerplate
+            caption_text = self.text_preprocessor.clean_text(caption["caption_text"])
+            if not self.text_preprocessor.should_skip_node(caption_text):
+                node = TextNode(
+                    text=caption_text,
+                    metadata={
+                        "content_type": "figure_caption",
+                        "source_path": caption["source_path"],
+                        "page_number": caption["page_number"],
+                        "line_number": caption["line_number"]
+                    }
+                )
+                nodes.append(node)
         
-        # Process images (create text nodes for captions and metadata)
+        # Process images (create text nodes for captions and metadata only - no base64)
         for image in images:
             image_text = f"Image from {Path(image['source_path']).name}, page {image['page_number']}: {image['caption']}"
             
@@ -474,38 +758,85 @@ class TechnicalRAGPipeline:
         print("="*70)
         
         # Step 1: Load Documents
-        print("\n[Step 1/5] 📄 Loading PDF documents...")
+        print("\n[Step 1/6] 📄 Loading PDF documents...")
         documents = SimpleDirectoryReader(data_dir).load_data()
         print(f"   ✅ Loaded {len(documents)} PDF documents")
         logger.info(f"Loaded {len(documents)} text documents")
         
-        # Step 2: Extract Non-Text Content
-        print("\n[Step 2/5] 🖼️  Extracting tables, images, and captions...")
+        # Step 2: Preprocess Documents (Remove boilerplate, normalize whitespace)
+        print("\n[Step 2/6] 🧹 Preprocessing documents (removing boilerplate, normalizing text)...")
+        preprocessed_docs = []
+        skipped_pages = 0
+        for doc in documents:
+            original_text = doc.text or ""
+            cleaned_text = self.text_preprocessor.clean_text(original_text)
+            
+            # Skip low-content pages
+            if self.text_preprocessor.is_low_content_page(cleaned_text):
+                skipped_pages += 1
+                logger.debug(f"Skipping low-content page: {doc.metadata.get('file_name', 'unknown')}")
+                continue
+            
+            # Create new document with cleaned text
+            if cleaned_text:  # Only add if there's content left after cleaning
+                new_doc = Document(
+                    text=cleaned_text,
+                    metadata=doc.metadata
+                )
+                preprocessed_docs.append(new_doc)
+        
+        print(f"   ✅ Preprocessed {len(preprocessed_docs)} documents ({skipped_pages} low-content pages skipped)")
+        logger.info(f"Preprocessed {len(preprocessed_docs)} documents, skipped {skipped_pages} low-content pages")
+        
+        # Step 3: Extract Non-Text Content
+        print("\n[Step 3/6] 🖼️  Extracting tables, images, and captions...")
         print("   This may take a few minutes...")
         tables, images, captions = self.process_non_text_content(data_dir)
         print(f"   ✅ Extracted {len(tables)} tables, {len(images)} images, {len(captions)} captions")
         
-        # Step 3: Create Non-Text Nodes
-        print("\n[Step 3/5] 📊 Creating searchable nodes from extracted content...")
+        # Step 4: Create Non-Text Nodes
+        print("\n[Step 4/6] 📊 Creating searchable nodes from extracted content...")
         non_text_nodes = self.create_non_text_nodes(tables, images, captions)
         print(f"   ✅ Created {len(non_text_nodes)} non-text nodes")
         logger.info(f"Created {len(non_text_nodes)} non-text nodes")
         
-        # Optimized text splitter for technical documents
+        # Step 5: Smart Chunking with Text Nodes
+        print("\n[Step 5/6] 🧠 Smart chunking and filtering...")
         chunk_size = self.config.get("chunking", {}).get("chunk_size", 350)
         chunk_overlap = self.config.get("chunking", {}).get("chunk_overlap", 88)
         
-        text_splitter = SentenceSplitter(
+        smart_splitter = SmartChunkSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            include_metadata=True
+            preprocessor=self.text_preprocessor
         )
         
-        # Step 4: Create Vector Embeddings (LONGEST STEP)
-        print("\n[Step 4/5] 🧠 Generating embeddings and building vector index...")
         print(f"   - Chunk size: {chunk_size} characters")
         print(f"   - Chunk overlap: {chunk_overlap} characters")
-        print(f"   - Processing {len(documents)} documents...")
+        print(f"   - Preserving structured content (tables, code blocks, numbered steps)...")
+        
+        # Get nodes from documents using smart chunking
+        text_nodes = smart_splitter.get_nodes_from_documents(preprocessed_docs, show_progress=True)
+        
+        # Filter out short/low-quality nodes (only for text nodes, not tables/images)
+        filtered_nodes = []
+        skipped_nodes = 0
+        for node in text_nodes:
+            # Skip filtering for non-text content types (tables, images, captions are already handled separately)
+            content_type = node.metadata.get("content_type", "text")
+            if content_type != "text":
+                filtered_nodes.append(node)  # Don't filter non-text content
+            elif not self.text_preprocessor.should_skip_node(node.text):
+                filtered_nodes.append(node)
+            else:
+                skipped_nodes += 1
+        
+        print(f"   ✅ Created {len(filtered_nodes)} text nodes ({skipped_nodes} low-quality nodes filtered)")
+        logger.info(f"Created {len(filtered_nodes)} text nodes, filtered {skipped_nodes} low-quality nodes")
+        
+        # Step 6: Create Vector Embeddings (LONGEST STEP)
+        print("\n[Step 6/6] 🧠 Generating embeddings and building vector index...")
+        print(f"   - Processing {len(filtered_nodes)} text nodes + {len(non_text_nodes)} non-text nodes...")
         print(f"   - This is the LONGEST step (embedding generation)")
         print(f"   - Expected time: 5-15 minutes on GPU, 30-60 minutes on CPU")
         print(f"   - Watch for progress below...")
@@ -515,41 +846,25 @@ class TechnicalRAGPipeline:
         import time
         start_time = time.time()
         
-        # Create index with text documents (with progress bar)
+        # Combine all nodes
+        all_nodes = filtered_nodes + non_text_nodes
+        
+        # Create index from nodes (with progress bar)
         if storage_context:
-            self.index = VectorStoreIndex.from_documents(
-                documents,
-                transformations=[text_splitter],
+            self.index = VectorStoreIndex.from_nodes(
+                all_nodes,
                 storage_context=storage_context,
                 show_progress=True  # Built-in LlamaIndex progress bar!
             )
         else:
-            self.index = VectorStoreIndex.from_documents(
-                documents,
-                transformations=[text_splitter],
+            self.index = VectorStoreIndex.from_nodes(
+                all_nodes,
                 show_progress=True  # Built-in LlamaIndex progress bar!
             )
         
         elapsed = time.time() - start_time
         print(f"\n   ✅ Vector index created in {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
-        print(f"   ⚡ Processing speed: {len(documents) / elapsed:.2f} docs/sec")
-        
-        # Step 5: Add Non-Text Nodes
-        if non_text_nodes:
-            print(f"\n[Step 5/5] 📎 Adding {len(non_text_nodes)} non-text items to index...")
-            logger.info("📊 Adding non-text content to index...")
-            
-            # Progress bar for non-text nodes
-            for node in tqdm(non_text_nodes, 
-                           desc="   Adding items", 
-                           unit="item",
-                           ncols=80,
-                           bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'):
-                self.index.insert_nodes([node])
-            
-            print(f"   ✅ Non-text content added to index")
-        else:
-            print(f"\n[Step 5/5] No non-text content to add")
+        print(f"   ⚡ Processing speed: {len(all_nodes) / elapsed:.2f} nodes/sec")
         
         # Persist the index (only for local storage)
         print(f"\n💾 Saving index to disk...")
@@ -563,13 +878,14 @@ class TechnicalRAGPipeline:
         
         # Final summary
         total_time = time.time() - start_time
-        estimated_chunks = len(documents) * 10  # Rough estimate
         print("\n" + "="*70)
         print("✅ INGESTION COMPLETE!")
         print("="*70)
-        print(f"📊 Documents processed: {len(documents)}")
-        print(f"📊 Non-text items extracted: {len(non_text_nodes)}")
-        print(f"📊 Estimated total chunks: ~{estimated_chunks}")
+        print(f"📊 Documents loaded: {len(documents)}")
+        print(f"📊 Documents after preprocessing: {len(preprocessed_docs)} ({skipped_pages} low-content pages skipped)")
+        print(f"📊 Text nodes created: {len(filtered_nodes)} ({skipped_nodes} filtered)")
+        print(f"📊 Non-text nodes: {len(non_text_nodes)}")
+        print(f"📊 Total nodes indexed: {len(all_nodes)}")
         print(f"⏱️  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
         if not use_qdrant:
             print(f"📁 Storage location: {storage_dir}")
