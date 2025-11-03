@@ -32,13 +32,19 @@ export interface QueryResponse {
   cache_hit?: boolean;
 }
 
-export async function sendQuery(query: string): Promise<string> {
+export interface QueryParams {
+  top_k?: number;
+  alpha?: number;
+  dynamic_windowing?: boolean;
+}
+
+export async function sendQuery(query: string, params?: QueryParams): Promise<string> {
   try {
     const response = await apiClient.post<QueryResponse>('/query', {
       query,
-      top_k: 10,
-      alpha: 0.5,
-      dynamic_windowing: true,
+      top_k: params?.top_k ?? 10,
+      alpha: params?.alpha ?? 0.5,
+      dynamic_windowing: params?.dynamic_windowing ?? true,
     });
     
     return response.data.answer;
@@ -84,6 +90,37 @@ export async function getChatHistory(user: string = 'api_user', limit: number = 
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to get chat history';
+      throw new Error(errorMessage);
+    }
+    throw error;
+  }
+}
+
+export interface SavedResponse {
+  id: string;
+  query: string;
+  answer: string;
+  sources: string[];
+  helpful_count: number;
+  unhelpful_count: number;
+  last_used: string;
+  first_validated: string;
+  created_at: string;
+}
+
+export interface SavedResponsesResponse {
+  status: string;
+  count: number;
+  saved: SavedResponse[];
+}
+
+export async function getSavedResponses(limit: number = 50, minHelpfulCount: number = 1): Promise<SavedResponsesResponse> {
+  try {
+    const response = await apiClient.get<SavedResponsesResponse>(`/saved?limit=${limit}&min_helpful_count=${minHelpfulCount}`);
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to get saved responses';
       throw new Error(errorMessage);
     }
     throw error;

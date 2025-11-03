@@ -10,6 +10,7 @@ import { ChatMessage } from "@/components/chat-message"
 import { Sidebar } from "@/components/sidebar"
 import { Send, Sparkles, Menu } from "lucide-react"
 import { sendQuery, getChatHistory, ChatHistoryItem } from "@/lib/api"
+import { QuerySettings } from "@/components/sidebar"
 
 type Source = {
   id: string
@@ -34,6 +35,11 @@ export function ChatInterface() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const addNewConversationRef = useRef<((conversation: ChatHistoryItem) => void) | null>(null)
+  const querySettingsRef = useRef<QuerySettings>({
+    topK: 10,
+    alpha: 0.5,
+    dynamicWindowing: true,
+  })
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -60,7 +66,11 @@ export function ChatInterface() {
 
     // Call RAG backend API
     try {
-      const answer = await sendQuery(userMessage.content)
+      const answer = await sendQuery(userMessage.content, {
+        top_k: querySettingsRef.current.topK,
+        alpha: querySettingsRef.current.alpha,
+        dynamic_windowing: querySettingsRef.current.dynamicWindowing,
+      })
       
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -113,12 +123,17 @@ export function ChatInterface() {
     addNewConversationRef.current = adder
   }
 
+  const handleSettingsChange = (settings: QuerySettings) => {
+    querySettingsRef.current = settings
+  }
+
   return (
     <div className="flex h-screen">
       <Sidebar 
         isOpen={sidebarOpen} 
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onNewConversationReady={handleNewConversationReady}
+        onSettingsChange={handleSettingsChange}
       />
 
       <div className="flex flex-1 flex-col relative">
