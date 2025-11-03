@@ -499,7 +499,7 @@ class PostgresManager:
             
             # If helpful, update validated Q&A cache
             if is_helpful:
-                self._update_validated_qna(query_id_int, is_helpful=True)
+                self._update_validated_qna(query_id_int, is_helpful=True, session_id=session_id)
             
             return True
             
@@ -855,10 +855,11 @@ class PostgresManager:
             if conn and self.db_type == 'postgres':
                 self.return_connection(conn)
     
-    def _update_validated_qna(self, query_id_int: int, is_helpful: bool):
+    def _update_validated_qna(self, query_id_int: int, is_helpful: bool, session_id: str = None):
         """
         Internal method to update validated Q&A based on feedback.
         Strategy: First validated answer wins (never overwrite).
+        Only counts unique sessions/users per query to prevent duplicate counting.
         """
         if not (self.connection_pool or self.sqlite_conn):
             return
@@ -871,14 +872,14 @@ class PostgresManager:
             if self.db_type == 'sqlite':
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT query_text, response_text, metadata 
+                    SELECT query_text, response_text, metadata, session_id
                     FROM queries 
                     WHERE query_id = ?
                 """, (query_id_int,))
             else:
                 cursor = conn.cursor(cursor_factory=RealDictCursor)
                 cursor.execute("""
-                    SELECT query_text, response_text, metadata 
+                    SELECT query_text, response_text, metadata, session_id
                     FROM queries 
                     WHERE query_id = %s
                 """, (query_id_int,))
@@ -895,47 +896,71 @@ class PostgresManager:
             query_text = query['query_text']
             answer_text = query['response_text'] or ''
             sources = metadata.get('sources', [])
+            query_session_id = session_id or query.get('session_id') or 'unknown'
             
             # Create hash of query for deduplication
             query_hash = hashlib.md5(query_text.lower().encode()).hexdigest()
+            
+            # Check if this session already gave helpful feedback for this query
+            # Count distinct sessions that gave helpful feedback for this query_hash
+            if self.db_type == 'sqlite':
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT f.session_id) as unique_sessions
+                    FROM feedback f
+                    JOIN queries q ON f.query_id = q.query_id
+                    WHERE f.is_helpful = 1
+                    AND LOWER(TRIM(q.query_text)) = LOWER(TRIM(?))
+                """, (query_text,))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT f.session_id) as unique_sessions
+                    FROM feedback f
+                    JOIN queries q ON f.query_id = q.query_id
+                    WHERE f.is_helpful = TRUE
+                    AND LOWER(TRIM(q.query_text)) = LOWER(TRIM(%s))
+                """, (query_text,))
+            
+            count_result = cursor.fetchone()
+            unique_sessions = count_result[0] if count_result else 1
             
             # Store sources as JSON string for SQLite
             sources_json = json.dumps(sources) if isinstance(sources, list) else sources
             
             # Update or create validated QnA entry
+            # Use the count of unique sessions as helpful_count
             if self.db_type == 'sqlite':
                 cursor.execute("""
                     INSERT INTO validated_qna (
                         query_hash, query_text, answer_text, sources, 
                         helpful_count, last_used, is_active, first_validated
                     )
-                    VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, 1, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, CURRENT_TIMESTAMP)
                     ON CONFLICT (query_hash) DO UPDATE SET
-                        helpful_count = validated_qna.helpful_count + 1,
+                        helpful_count = ?,
                         last_used = CURRENT_TIMESTAMP,
                         query_text = COALESCE(validated_qna.query_text, excluded.query_text),
                         answer_text = COALESCE(validated_qna.answer_text, excluded.answer_text),
                         sources = COALESCE(validated_qna.sources, excluded.sources),
                         first_validated = COALESCE(validated_qna.first_validated, excluded.first_validated)
-                """, (query_hash, query_text, answer_text, sources_json))
+                """, (query_hash, query_text, answer_text, sources_json, unique_sessions, unique_sessions))
             else:
                 cursor.execute("""
                     INSERT INTO validated_qna (
                         query_hash, query_text, answer_text, sources, 
                         helpful_count, last_used, is_active, first_validated
                     )
-                    VALUES (%s, %s, %s, %s, 1, CURRENT_TIMESTAMP, TRUE, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, TRUE, CURRENT_TIMESTAMP)
                     ON CONFLICT (query_hash) DO UPDATE SET
-                        helpful_count = validated_qna.helpful_count + 1,
+                        helpful_count = %s,
                         last_used = CURRENT_TIMESTAMP,
                         query_text = COALESCE(validated_qna.query_text, EXCLUDED.query_text),
                         answer_text = COALESCE(validated_qna.answer_text, EXCLUDED.answer_text),
                         sources = COALESCE(validated_qna.sources, EXCLUDED.sources),
                         first_validated = COALESCE(validated_qna.first_validated, EXCLUDED.first_validated)
-                """, (query_hash, query_text, answer_text, sources))
+                """, (query_hash, query_text, answer_text, sources, unique_sessions, unique_sessions))
             
             conn.commit()
-            logger.info(f"✅ Updated ValidatedQnA for query (helpful_count +1, answer preserved)")
+            logger.info(f"✅ Updated ValidatedQnA for query (helpful_count={unique_sessions} unique sessions, answer preserved)")
             
         except Exception as e:
             logger.error(f"Error updating validated QnA: {e}")
@@ -968,7 +993,7 @@ class PostgresManager:
                     SELECT * FROM validated_qna
                     WHERE query_hash = ?
                     AND is_active = 1
-                    AND helpful_count >= 2
+                    AND helpful_count >= 1
                 """, (query_hash,))
             else:
                 cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -976,7 +1001,7 @@ class PostgresManager:
                     SELECT * FROM validated_qna
                     WHERE query_hash = %s
                     AND is_active = TRUE
-                    AND helpful_count >= 2
+                    AND helpful_count >= 1
                 """, (query_hash,))
             
             result = cursor.fetchone()
@@ -995,6 +1020,70 @@ class PostgresManager:
         except Exception as e:
             logger.error(f"Error getting validated answer: {e}")
             return None
+        finally:
+            if cursor:
+                cursor.close()
+            if conn and self.db_type == 'postgres':
+                self.return_connection(conn)
+    
+    def get_all_validated_qna(self, limit: int = 50, min_helpful_count: int = 2) -> List[Dict[str, Any]]:
+        """
+        Get all validated Q&A entries that have been marked as helpful.
+        
+        Args:
+            limit: Maximum number of entries to return
+            min_helpful_count: Minimum helpful_count to include
+        
+        Returns:
+            List of validated Q&A entries
+        """
+        if not (self.connection_pool or self.sqlite_conn):
+            return []
+            
+        conn = None
+        cursor = None
+        try:
+            conn = self.get_connection()
+            
+            if self.db_type == 'sqlite':
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM validated_qna
+                    WHERE is_active = 1
+                    AND helpful_count >= ?
+                    ORDER BY helpful_count DESC, last_used DESC
+                    LIMIT ?
+                """, (min_helpful_count, limit))
+            else:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute("""
+                    SELECT * FROM validated_qna
+                    WHERE is_active = TRUE
+                    AND helpful_count >= %s
+                    ORDER BY helpful_count DESC, last_used DESC
+                    LIMIT %s
+                """, (min_helpful_count, limit))
+            
+            results = cursor.fetchall()
+            validated_entries = []
+            for row in results:
+                item = dict(row)
+                # Convert sources from JSON string to list if needed
+                sources = item.get('sources')
+                if isinstance(sources, str):
+                    try:
+                        item['sources'] = json.loads(sources) if sources.startswith('[') else [sources] if sources else []
+                    except:
+                        item['sources'] = [sources] if sources else []
+                else:
+                    item['sources'] = sources or []
+                validated_entries.append(item)
+            
+            return validated_entries
+            
+        except Exception as e:
+            logger.error(f"Error getting all validated Q&A: {e}")
+            return []
         finally:
             if cursor:
                 cursor.close()

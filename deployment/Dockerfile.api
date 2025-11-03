@@ -11,32 +11,50 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip first
-RUN pip install --upgrade pip
+# Upgrade pip first (with retry logic)
+RUN pip install --upgrade pip || \
+    (echo "pip upgrade failed, retrying..." && pip install --upgrade pip)
 
 # Install PyTorch separately with CPU-only build (much faster for GCP)
 # This is ~300MB vs ~900MB for full CUDA build
+# Retry logic for network resilience
 RUN pip install --no-cache-dir --timeout=300 --default-timeout=300 \
     torch==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cpu
+    --index-url https://download.pytorch.org/whl/cpu || \
+    (echo "PyTorch install failed, retrying..." && \
+     pip install --no-cache-dir --timeout=600 --default-timeout=600 \
+     torch==2.5.1 \
+     --index-url https://download.pytorch.org/whl/cpu)
 
 # Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install remaining Python dependencies
 # Filter out torch from requirements using Python since we installed it above with CPU build
+# Retry logic for network resilience
 RUN python -c "import sys; lines = [l for l in open('requirements.txt') if not l.startswith('torch==')]; open('requirements_no_torch.txt', 'w').writelines(lines)" && \
-    pip install --no-cache-dir --timeout=300 --default-timeout=300 -r requirements_no_torch.txt
+    (pip install --no-cache-dir --timeout=300 --default-timeout=300 -r requirements_no_torch.txt || \
+     (echo "Requirements install failed, retrying..." && \
+      pip install --no-cache-dir --timeout=600 --default-timeout=600 -r requirements_no_torch.txt))
 
 # Copy application code
 COPY . .
 
+# Copy entrypoint script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Create cache directory structure before switching users
+RUN mkdir -p /app/.cache/huggingface/hub
+
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app && \
     chown -R app:app /app
-USER app
+# Don't switch to app user yet - entrypoint will do it after fixing permissions
+# USER app
 
 # Set environment variables
 ENV PYTHONPATH=/app
@@ -49,6 +67,9 @@ EXPOSE 8000
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
+
+# Set entrypoint
+ENTRYPOINT ["/docker-entrypoint.sh"]
 
 # Run the FastAPI server
 CMD ["python", "api.py", "--host", "0.0.0.0", "--port", "8000"]

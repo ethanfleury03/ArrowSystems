@@ -277,6 +277,59 @@ async def query_knowledge_base(request: QueryRequest):
         )
 
 
+@app.get("/saved")
+async def get_saved_responses(limit: int = 50, min_helpful_count: int = 1):
+    """
+    Get saved/validated responses that have been marked as helpful.
+    
+    Args:
+        limit: Maximum number of saved responses to return (default: 50)
+        min_helpful_count: Minimum helpful_count to include (default: 2)
+    
+    Returns:
+        List of saved responses with query, answer, sources, and metadata
+    """
+    global db_manager
+    
+    if not db_manager:
+        return {
+            "status": "no_database",
+            "message": "Database not available",
+            "saved": []
+        }
+    
+    try:
+        validated_entries = db_manager.get_all_validated_qna(limit=limit, min_helpful_count=min_helpful_count)
+        
+        # Format for frontend
+        formatted_responses = []
+        for entry in validated_entries:
+            formatted_responses.append({
+                "id": entry.get('query_hash', ''),
+                "query": entry.get('query_text', ''),
+                "answer": entry.get('answer_text', ''),
+                "sources": entry.get('sources', []),
+                "helpful_count": entry.get('helpful_count', 0),
+                "unhelpful_count": entry.get('unhelpful_count', 0),
+                "last_used": str(entry.get('last_used', '')),
+                "first_validated": str(entry.get('first_validated', '')),
+                "created_at": str(entry.get('created_at', ''))
+            })
+        
+        return {
+            "status": "success",
+            "count": len(formatted_responses),
+            "saved": formatted_responses
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching saved responses: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch saved responses: {str(e)}"
+        )
+
+
 @app.get("/history")
 async def get_chat_history(user: str = "api_user", limit: int = 50):
     """
