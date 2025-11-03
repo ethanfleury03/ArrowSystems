@@ -563,13 +563,36 @@ class TechnicalRAGPipeline:
             logger.info("Disabling HF_HUB_ENABLE_HF_TRANSFER (package not installed)")
             os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
         
-        # Detect GPU
+        # Detect GPU with fallback to CPU if CUDA is incompatible
         import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"🖥️ Using device: {device}")
-        if device == "cuda":
-            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
-            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        device = "cpu"  # Default to CPU
+        try:
+            if torch.cuda.is_available():
+                # Test if CUDA actually works with a real operation
+                try:
+                    test_tensor = torch.zeros(1).cuda()
+                    # Try a simple operation that requires kernel execution
+                    result = test_tensor + 1
+                    result.item()  # Force execution
+                    del test_tensor, result
+                    torch.cuda.empty_cache()
+                    device = "cuda"
+                    logger.info(f"🖥️ Using device: {device}")
+                    logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+                    logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+                except RuntimeError as cuda_error:
+                    if "CUDA" in str(cuda_error) or "kernel" in str(cuda_error).lower():
+                        logger.warning(f"⚠️ CUDA not compatible (kernel error), falling back to CPU: {cuda_error}")
+                        device = "cpu"
+                        logger.info(f"🖥️ Using device: {device}")
+                    else:
+                        raise
+            else:
+                logger.info(f"🖥️ Using device: {device} (CUDA not available)")
+        except Exception as e:
+            logger.warning(f"⚠️ CUDA test failed, falling back to CPU: {e}")
+            device = "cpu"
+            logger.info(f"🖥️ Using device: {device}")
         
         cache_path = os.path.expanduser(self.cache_dir)
         
@@ -587,6 +610,17 @@ class TechnicalRAGPipeline:
                 
                 # Method 1: Direct load without sentence-transformers prefix
                 try:
+                    # Force CPU if CUDA is incompatible
+                    if device == "cuda":
+                        try:
+                            # Test CUDA compatibility
+                            import torch
+                            test = torch.zeros(1).cuda()
+                            del test
+                        except Exception:
+                            logger.warning(f"CUDA incompatible, forcing CPU for {display_name}")
+                            device = "cpu"
+                    
                     self.embed_model = HuggingFaceEmbedding(
                         model_name=model_name,
                         cache_folder=self.cache_dir,
@@ -633,12 +667,26 @@ class TechnicalRAGPipeline:
         try:
             logger.info("🎯 Initializing re-ranker...")
             reranker_model = self.config.get("models", {}).get("reranker", "BAAI/bge-reranker-large")
-            self.reranker = CrossEncoder(
-                reranker_model,
-                cache_folder=self.cache_dir,
-                device=device
-            )
-            logger.info(f"✅ Re-ranker loaded successfully on {device}")
+            # Use CPU if CUDA was incompatible
+            reranker_device = device if device == "cpu" else device
+            try:
+                self.reranker = CrossEncoder(
+                    reranker_model,
+                    cache_folder=self.cache_dir,
+                    device=reranker_device
+                )
+                logger.info(f"✅ Re-ranker loaded successfully on {reranker_device}")
+            except RuntimeError as cuda_error:
+                if "CUDA" in str(cuda_error) or "cuda" in str(cuda_error).lower():
+                    logger.warning(f"⚠️ CUDA incompatible for reranker, using CPU: {cuda_error}")
+                    self.reranker = CrossEncoder(
+                        reranker_model,
+                        cache_folder=self.cache_dir,
+                        device="cpu"
+                    )
+                    logger.info(f"✅ Re-ranker loaded successfully on CPU")
+                else:
+                    raise
         except Exception as e:
             logger.warning(f"Re-ranker not available: {e}")
             self.reranker = None
@@ -911,7 +959,15 @@ class TechnicalRAGPipeline:
         batch_size = 100  # Insert in batches
         for i in tqdm(range(0, len(all_nodes), batch_size), desc="   Inserting nodes", unit="batch"):
             batch = all_nodes[i:i + batch_size]
-            self.index.insert_nodes(batch)
+            try:
+                self.index.insert_nodes(batch)
+            except RuntimeError as e:
+                if "CUDA" in str(e) or "cuda" in str(e).lower():
+                    logger.error(f"CUDA error during embedding - device should have been set to CPU")
+                    logger.error(f"Error: {e}")
+                    raise RuntimeError("CUDA incompatible. The embedding model should use CPU. Check device detection.") from e
+                else:
+                    raise
         
         elapsed = time.time() - start_time
         print(f"\n   ✅ Vector index created in {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
