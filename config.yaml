@@ -18,8 +18,8 @@ models:
 
 # Text Chunking Configuration
 chunking:
-  chunk_size: 350
-  chunk_overlap: 88
+  chunk_size: 512
+  chunk_overlap: 128
 
 # Non-text Content Processing
 non_text:
