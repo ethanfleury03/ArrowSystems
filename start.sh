@@ -396,184 +396,45 @@ fi
 
 echo ""
 
-# Check DynamoDB setup
-echo "🗄️  Checking DynamoDB database..."
+# Check database setup (PostgreSQL or SQLite)
+echo "🗄️  Checking database setup..."
 echo ""
 
-# Check if boto3 is installed
-if ! python -c "import boto3" 2>/dev/null; then
-    echo "  ⚠️  boto3 package not found"
-    echo "     Installing boto3 package..."
-    if pip install boto3 botocore; then
-        echo "  ✅ boto3 installed"
+# Try to initialize database (will auto-detect PostgreSQL or SQLite)
+if python -c "from utils.postgres_manager import PostgresManager; db = PostgresManager(); db_type = getattr(db, 'db_type', None); exit(0 if (db.connection_pool or db.sqlite_conn) else 1)" 2>/dev/null; then
+    # Get database type
+    DB_TYPE=$(python -c "from utils.postgres_manager import PostgresManager; db = PostgresManager(); print(getattr(db, 'db_type', 'unknown'))" 2>/dev/null || echo "unknown")
+    
+    if [ "$DB_TYPE" = "postgres" ]; then
+        echo "  ✅ PostgreSQL connection successful"
+    elif [ "$DB_TYPE" = "sqlite" ]; then
+        echo "  ✅ SQLite database initialized (local development)"
     else
-        echo "  ❌ Failed to install boto3"
-    fi
-fi
-
-# Auto-start DynamoDB Local if not running (on RunPod/cloud)
-if [ "$IS_RUNPOD" = true ] || [ ! -z "$AWS_EXECUTION_ENV" ]; then
-    # Check if AWS credentials are set - if so, use AWS DynamoDB (skip local)
-    if [ ! -z "$AWS_ACCESS_KEY_ID" ] && [ ! -z "$AWS_SECRET_ACCESS_KEY" ]; then
-        echo "  ✅ AWS DynamoDB credentials detected"
-        echo "     Using AWS DynamoDB (no local Docker needed)"
-        
-        # Verify connection to AWS DynamoDB
-        if python -c "from utils.dynamodb_manager import DynamoDBManager; DynamoDBManager(local_mode=False)" 2>/dev/null; then
-            echo "  ✅ Connected to AWS DynamoDB successfully"
-        else
-            echo "  ⚠️  Could not connect to AWS DynamoDB"
-            echo "     Using JSON-based feedback storage (fallback)"
-        fi
-    # Check if DynamoDB Local is running
-    elif curl -s http://localhost:8000/ > /dev/null 2>&1; then
-        echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
-    else
-        # First, ensure Docker is installed
-        if ! command -v docker &> /dev/null || ! command -v docker-compose &> /dev/null; then
-            echo "  🔄 Docker not found - installing..."
-            echo "     This is a one-time setup (~2 minutes)"
-            
-            # Install Docker and Docker Compose
-            apt-get update -qq > /dev/null 2>&1
-            apt-get install -y docker.io docker-compose -qq > /dev/null 2>&1
-            
-            if [ $? -eq 0 ]; then
-                echo "  ✅ Docker installed successfully"
-                
-                # Start Docker daemon (try multiple methods)
-                echo "  🔄 Starting Docker daemon..."
-                if systemctl start docker > /dev/null 2>&1; then
-                    sleep 3
-                    echo "  ✅ Docker daemon started (systemctl)"
-                elif service docker start > /dev/null 2>&1; then
-                    sleep 3
-                    echo "  ✅ Docker daemon started (service)"
-                else
-                    # Start dockerd directly in background
-                    dockerd > /tmp/dockerd.log 2>&1 &
-                    echo "  ⏳ Waiting for Docker daemon to initialize (15 seconds)..."
-                    
-                    # Wait up to 15 seconds for dockerd to be ready
-                    for i in {1..15}; do
-                        if docker ps > /dev/null 2>&1; then
-                            echo "  ✅ Docker daemon ready after ${i} seconds"
-                            break
-                        fi
-                        sleep 1
-                    done
-                fi
-                
-                # Final verification that Docker is working
-                if docker ps > /dev/null 2>&1; then
-                    echo "  ✅ Docker is ready to use"
-                else
-                    echo "  ⚠️  Docker daemon failed to start after 15 seconds"
-                    echo "     Check logs: tail /tmp/dockerd.log"
-                    echo "     Using JSON-based feedback storage (fallback)"
-                fi
-            else
-                echo "  ⚠️  Docker installation failed"
-                echo "     Using JSON-based feedback storage (fallback)"
-            fi
-        fi
-        
-        # Ensure Docker daemon is running (even if Docker was already installed)
-        if command -v docker &> /dev/null; then
-            if ! docker ps > /dev/null 2>&1; then
-                echo "  🔄 Docker installed but daemon not running, starting..."
-                
-                if systemctl start docker > /dev/null 2>&1; then
-                    sleep 3
-                    echo "  ✅ Docker daemon started (systemctl)"
-                elif service docker start > /dev/null 2>&1; then
-                    sleep 3
-                    echo "  ✅ Docker daemon started (service)"
-                else
-                    # Start dockerd directly in background
-                    dockerd > /tmp/dockerd.log 2>&1 &
-                    echo "  ⏳ Waiting for Docker daemon to initialize..."
-                    
-                    # Wait up to 15 seconds for dockerd to be ready
-                    for i in {1..15}; do
-                        if docker ps > /dev/null 2>&1; then
-                            echo "  ✅ Docker daemon ready after ${i} seconds"
-                            break
-                        fi
-                        sleep 1
-                    done
-                fi
-                
-                # Verify it's working now
-                if ! docker ps > /dev/null 2>&1; then
-                    echo "  ⚠️  Docker daemon failed to start"
-                    echo "     Check logs: tail /tmp/dockerd.log"
-                    echo "     Using JSON-based feedback storage (fallback)"
-                fi
-            fi
-        fi
-        
-        # Now try to start DynamoDB if Docker is available and working
-        if docker ps > /dev/null 2>&1 && [ -f "docker-compose.dynamodb.yml" ]; then
-            echo "  🔄 Starting DynamoDB Local..."
-            # Start DynamoDB in background
-            docker-compose -f docker-compose.dynamodb.yml up -d > /dev/null 2>&1
-            
-            # Wait for it to be ready (max 15 seconds)
-            for i in {1..15}; do
-                if curl -s http://localhost:8000/ > /dev/null 2>&1; then
-                    echo "  ✅ DynamoDB Local started successfully"
-                    break
-                fi
-                sleep 1
-            done
-            
-            # Check if it actually started
-            if ! curl -s http://localhost:8000/ > /dev/null 2>&1; then
-                echo "  ⚠️  DynamoDB Local failed to start (timeout)"
-                echo "     App will work without database, using JSON fallback"
-            fi
-        else
-            echo "  ⚠️  docker-compose.dynamodb.yml not found"
-            echo "     App will work without database, using JSON fallback"
-        fi
+        echo "  ✅ Database connection established"
     fi
     
     # Check if tables exist, create if needed
-    if curl -s http://localhost:8000/ > /dev/null 2>&1; then
-        if python -c "from utils.dynamodb_manager import DynamoDBManager; DynamoDBManager()" 2>/dev/null; then
-            echo "  ✅ Database tables ready"
-        else
-            echo "  🔄 Creating database tables..."
-            if [ -f "setup_dynamodb.py" ]; then
-                python setup_dynamodb.py > /dev/null 2>&1
-                if [ $? -eq 0 ]; then
-                    echo "  ✅ Database tables created successfully"
-                else
-                    echo "  ⚠️  Failed to create tables"
-                    echo "     App will work without database, using JSON fallback"
-                fi
-            else
-                echo "  ⚠️  setup_dynamodb.py not found"
-                echo "     App will work without database, using JSON fallback"
-            fi
-        fi
+    echo "  🔄 Checking database tables..."
+    if python -c "from utils.postgres_manager import PostgresManager; db = PostgresManager(); db.create_tables()" 2>/dev/null; then
+        echo "  ✅ Database tables ready"
+    else
+        echo "  ⚠️  Failed to create/verify tables"
+        echo "     Run: python scripts/setup_postgres.py"
     fi
 else
-    # Local machine - just check status, don't auto-start
-    if curl -s http://localhost:8000/ > /dev/null 2>&1; then
-        echo "  ✅ DynamoDB Local detected (http://localhost:8000)"
-        if python -c "from utils.dynamodb_manager import DynamoDBManager; DynamoDBManager()" 2>/dev/null; then
-            echo "  ✅ Database tables ready"
-        else
-            echo "  🔄 Creating database tables..."
-            python setup_dynamodb.py > /dev/null 2>&1 && echo "  ✅ Tables created"
-        fi
-    else
-        echo "  ℹ️  DynamoDB Local not running (optional)"
-        echo "     To start: docker-compose -f docker-compose.dynamodb.yml up -d"
-        echo "     (App will work without database, using JSON fallback)"
-    fi
+    echo "  ⚠️  Database initialization failed"
+    echo ""
+    echo "  Database options:"
+    echo "  1. SQLite (recommended for local development):"
+    echo "     - No setup required - will create rag_app.db automatically"
+    echo "     - Set SQLITE_DB_PATH to customize location (optional)"
+    echo ""
+    echo "  2. PostgreSQL (for production):"
+    echo "     - Set environment variables:"
+    echo "       POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB,"
+    echo "       POSTGRES_USER, POSTGRES_PASSWORD"
+    echo ""
+    echo "  The app will automatically use SQLite if PostgreSQL is not available."
 fi
 
 echo ""

@@ -277,6 +277,73 @@ async def query_knowledge_base(request: QueryRequest):
         )
 
 
+@app.get("/history")
+async def get_chat_history(user: str = "api_user", limit: int = 50):
+    """
+    Get chat history for a user.
+    
+    Args:
+        user: Username (default: "api_user")
+        limit: Maximum number of queries to return (default: 50)
+    
+    Returns:
+        List of query history items with query, answer, timestamp, and metadata
+    """
+    global db_manager
+    
+    if not db_manager:
+        return {
+            "status": "no_database",
+            "message": "Database not available",
+            "history": []
+        }
+    
+    try:
+        history = db_manager.get_user_query_history(user=user, limit=limit)
+        
+        # Format history for frontend
+        formatted_history = []
+        for item in history:
+            metadata = item.get('metadata', {})
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except:
+                    metadata = {}
+            
+            # Get query_id - prefer integer ID, fall back to string ID from metadata
+            query_id = str(item.get('query_id', ''))
+            if not query_id and isinstance(metadata, dict):
+                query_id = str(metadata.get('query_id', ''))
+            if not query_id:
+                query_id = f"query_{item.get('id', 'unknown')}"
+            
+            formatted_history.append({
+                "id": query_id,
+                "query": str(item.get('query_text', '')) or '',
+                "answer": str(item.get('response_text', '')) or '',
+                "timestamp": str(item.get('timestamp', '')) or '',
+                "intent_type": metadata.get('intent_type', 'unknown') if isinstance(metadata, dict) else 'unknown',
+                "confidence": float(metadata.get('confidence', 0.0)) if isinstance(metadata, dict) else 0.0,
+                "sources": metadata.get('sources', []) if isinstance(metadata, dict) else [],
+                "response_time_ms": int(item.get('response_time_ms', 0)) or 0
+            })
+        
+        return {
+            "status": "success",
+            "count": len(formatted_history),
+            "history": formatted_history
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching chat history: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch chat history: {str(e)}"
+        )
+
+
 @app.get("/cache/stats", response_model=CacheStatsResponse)
 async def get_cache_stats():
     """Get cache statistics."""

@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { ChatMessage } from "@/components/chat-message"
 import { Sidebar } from "@/components/sidebar"
 import { Send, Sparkles, Menu } from "lucide-react"
-import { sendQuery } from "@/lib/api"
+import { sendQuery, getChatHistory, ChatHistoryItem } from "@/lib/api"
 
 type Source = {
   id: string
@@ -33,6 +33,7 @@ export function ChatInterface() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const addNewConversationRef = useRef<((conversation: ChatHistoryItem) => void) | null>(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -70,15 +71,34 @@ export function ChatInterface() {
       
       setMessages((prev) => [...prev, assistantMessage])
       setIsLoading(false)
+
+      // Add new conversation to history sidebar (auto-refresh)
+      // Fetch the latest conversation from the database
+      try {
+        const historyResponse = await getChatHistory('api_user', 1)
+        if (historyResponse.status === 'success' && historyResponse.history.length > 0) {
+          const latestConversation = historyResponse.history[0]
+          // Check if this is the conversation we just had (matching query text)
+          if (latestConversation.query === userMessage.content && addNewConversationRef.current) {
+            addNewConversationRef.current(latestConversation)
+          }
+        }
+      } catch (error) {
+        // Silently fail - this is just for auto-refresh, not critical
+        console.debug('Failed to fetch latest conversation for history:', error)
+      }
     } catch (error) {
+      const errorText = error instanceof Error ? error.message : 'Failed to get response'
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`,
+        content: `Error: ${errorText}`,
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, errorMessage])
       setIsLoading(false)
+
+      // Don't save errors to history - only successful responses
     }
   }
 
@@ -89,9 +109,17 @@ export function ChatInterface() {
     }
   }
 
+  const handleNewConversationReady = (adder: (conversation: ChatHistoryItem) => void) => {
+    addNewConversationRef.current = adder
+  }
+
   return (
     <div className="flex h-screen">
-      <Sidebar isOpen={sidebarOpen} onToggle={() => setSidebarOpen(!sidebarOpen)} />
+      <Sidebar 
+        isOpen={sidebarOpen} 
+        onToggle={() => setSidebarOpen(!sidebarOpen)}
+        onNewConversationReady={handleNewConversationReady}
+      />
 
       <div className="flex flex-1 flex-col relative">
         {/* Header */}
@@ -110,7 +138,7 @@ export function ChatInterface() {
                 <Menu className="h-5 w-5" />
               </Button>
               <Sparkles className="h-5 w-5" />
-              <h1 className="text-lg font-semibold">RAG Assistant</h1>
+              <h1 className="text-lg font-semibold">Arrow Systems Support</h1>
             </div>
           </div>
         </header>

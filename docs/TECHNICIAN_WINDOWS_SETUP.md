@@ -29,7 +29,7 @@ The `start.sh` script will:
 - ✅ Create Python virtual environment
 - ✅ Install all dependencies
 - ✅ Download AI models (~2GB)
-- ✅ Setup AWS DynamoDB
+- ✅ Setup PostgreSQL database
 - ✅ Start the application
 
 ⏱️ **First run:** 10-15 minutes (downloads everything)  
@@ -120,7 +120,7 @@ The `start.sh` script is smart and handles everything:
 - ✅ **Creates virtual environment** if needed
 - ✅ **Installs Python packages** (only missing ones)
 - ✅ **Downloads AI models** (~2GB, first time only)
-- ✅ **Sets up AWS DynamoDB** credentials
+- ✅ **Configures PostgreSQL** database connection
 - ✅ **Starts the application** on port 8501
 - ✅ **Shows login credentials** when ready
 
@@ -212,7 +212,7 @@ If issues occur:
 ✅ **No manual setup** - Everything is automated  
 ✅ **Cross-platform** - Works on Windows (Git Bash), Linux, Mac  
 ✅ **Smart detection** - Skips already-installed packages  
-✅ **AWS DynamoDB** - Automatically configured  
+✅ **PostgreSQL** - Database connection configured  
 ✅ **Production-ready** - All features enabled  
 ✅ **Self-healing** - Installs missing dependencies automatically  
 

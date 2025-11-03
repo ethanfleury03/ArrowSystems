@@ -1614,7 +1614,7 @@ class RAGOrchestrator:
         self.enable_llm_answers = enable_llm_answers
         self.config = self._load_config(config_path)
         self.glossary_index = None
-        self.db_manager = db_manager  # 🗄️ DynamoDB manager for validated Q&A fast-path
+        self.db_manager = db_manager  # 🗄️ PostgreSQL manager for validated Q&A fast-path
         
         # Components
         self.query_rewriter = QueryRewriter()
@@ -1850,7 +1850,7 @@ class RAGOrchestrator:
             logger.warning(f"Cache lookup failed (continuing without cache): {e}")
         
         # ------------------------------------------------------------------
-        # 🗄️ DynamoDB Validated Q&A Fast-Path (NEW!)
+        # 🗄️ PostgreSQL Validated Q&A Fast-Path
         #    Check database for user-validated answers before expensive RAG
         # ------------------------------------------------------------------
         if self.db_manager:

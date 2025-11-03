@@ -69,3 +69,9 @@ models/
 # DO NOT IGNORE: latest_model/ should be tracked in git for two-pod workflow
 # latest_model/ contains the pre-built RAG index for immediate use
 
+# SQLite database files (local development)
+*.db
+*.sqlite
+*.sqlite3
+rag_app.db
+
