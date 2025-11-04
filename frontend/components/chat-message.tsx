@@ -5,6 +5,8 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { useState } from "react"
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 type Source = {
   id: string
@@ -63,7 +65,15 @@ export function ChatMessage({ message }: ChatMessageProps) {
             isUser ? "bg-primary text-primary-foreground" : "bg-muted text-foreground",
           )}
         >
-          <p className="whitespace-pre-wrap text-pretty">{message.content}</p>
+          {isUser ? (
+            <p className="whitespace-pre-wrap text-pretty">{message.content}</p>
+          ) : (
+            <div className="prose prose-sm dark:prose-invert max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {message.content}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
         {!isUser && (
           <>

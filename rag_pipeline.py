@@ -47,7 +47,7 @@ class RAGPipeline:
         self.orchestrator = RAGOrchestrator(
             cache_dir=cache_dir, 
             db_manager=db_manager,
-            enable_llm_evaluation=True,  # Enable LLM evaluation by default
+            enable_llm_evaluation=False,  # Disabled: Let LLM filter irrelevant chunks instead of pre-evaluating
             enable_llm_answers=True      # Enable LLM answer generation by default
         )
         self._initialized = False
