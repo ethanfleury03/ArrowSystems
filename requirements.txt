@@ -4,7 +4,8 @@
 # PyTorch nightly with CUDA 12.4 support (required for Blackwell sm_120 GPU)
 # Install with: pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124
 # Note: Nightly build required for Blackwell (sm_120) support. torchvision/torchaudio not needed for embeddings.
-torch>=2.7.0.dev
+# COMMENTED OUT: Uncomment if torch is not pre-installed (e.g., RunPod usually has it)
+# torch>=2.7.0.dev
 transformers==4.57.1
 sentence-transformers==5.1.2
 accelerate==1.11.0
