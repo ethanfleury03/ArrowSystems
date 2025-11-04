@@ -1,11 +1,10 @@
 # -----------------------------
 # Core ML and AI
 # -----------------------------
-# PyTorch 2.6.0 with CUDA 12.4 support (required for Blackwell sm_120 GPU)
-# Install with: pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-torch==2.6.0
-torchvision==0.21.0
-torchaudio==2.6.0
+# PyTorch nightly with CUDA 12.4 support (required for Blackwell sm_120 GPU)
+# Install with: pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124
+# Note: Nightly build required for Blackwell (sm_120) support. torchvision/torchaudio not needed for embeddings.
+torch>=2.7.0.dev
 transformers==4.57.1
 sentence-transformers==5.1.2
 accelerate==1.11.0
@@ -22,6 +21,8 @@ llama-index-core==0.14.5
 llama-index-embeddings-huggingface==0.6.1
 llama-index-llms-huggingface==0.6.1
 llama-index-readers-file==0.5.4
+llama-index-vector-stores-qdrant==0.3.0
+qdrant-client==1.12.2
 
 # -----------------------------
 # API and LLM
@@ -34,15 +35,6 @@ openai>=1.108.1,<2.0
 # -----------------------------
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.25
-
-# -----------------------------
-# UI
-# -----------------------------
-streamlit==1.50.0
-streamlit-authenticator==0.4.2
-plotly==6.3.1
-pydeck==0.9.1
-Pillow==11.3.0
 
 # -----------------------------
 # FastAPI Backend
@@ -60,6 +52,7 @@ reportlab==4.4.4
 openpyxl==3.1.5
 python-docx==1.2.0
 python-dotenv==1.1.1
+Pillow==11.3.0
 
 # -----------------------------
 # Utilities
