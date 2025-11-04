@@ -1483,12 +1483,13 @@ class ClaudeAnswerGenerator:
         """Prepare document context for LLM."""
         context_parts = []
         
-        for i, node in enumerate(documents[:5], 1):  # Limit to top 5 documents
+        # Include all documents - let the LLM filter irrelevant chunks intelligently
+        for i, node in enumerate(documents, 1):  # Use all retrieved documents
             source_name = node.metadata.get('file_name', f'Document {i}')
             page_num = node.metadata.get('page_label', 'N/A')
             
             context_parts.append(f"[{i}] {source_name} (Page {page_num}):")
-            context_parts.append(node.text[:800])  # Limit document length
+            context_parts.append(node.text[:1500])  # Increased from 800 to 1500 for more context
             context_parts.append("")  # Empty line between documents
         
         return "\n".join(context_parts)
