@@ -35,3 +35,21 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Environment variables
+.env
+.env*.local
+.env.local
+.env.production
+.env.development
+
+# Database files
+*.db
+*.db-journal
+prisma/dev.db*
+
+# Backup files (keep backups out of git)
+backups/
+*.db.gz
+*.sql.gz
+*.db.backup
+*.sql.backup
