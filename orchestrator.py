@@ -1367,6 +1367,572 @@ RESPOND WITH JSON ONLY (no other text):
         }
 
 
+class ClaudeQueryRewriter:
+    """
+    Claude-powered query rewriting and expansion for improved retrieval.
+    Generates semantically-rich query variations optimized for vector search.
+    """
+    
+    def __init__(self, model_name: str = "claude-sonnet-4-20250514", enable_caching: bool = True):
+        self.model_name = model_name
+        self.enable_caching = enable_caching
+        self.cache = {}
+        self.claude_client = None
+        
+        # Initialize Claude
+        self._initialize_claude()
+    
+    def _initialize_claude(self):
+        """Initialize Claude client with error handling."""
+        try:
+            import anthropic
+            
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                api_key = api_key.strip().rstrip('\r\n')
+            
+            if not api_key:
+                logger.warning("⚠️ ANTHROPIC_API_KEY not found. Query rewriting will use fallback.")
+                self.claude_client = None
+                return
+            
+            self.claude_client = anthropic.Anthropic(api_key=api_key)
+            
+            # Test connection
+            self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "test"}]
+            )
+            
+            logger.info(f"✅ Claude Query Rewriter initialized with model: {self.model_name}")
+            
+        except ImportError:
+            logger.warning("⚠️ Anthropic package not installed. Query rewriting will use fallback.")
+            self.claude_client = None
+        except Exception as e:
+            logger.warning(f"⚠️ Claude Query Rewriter initialization failed: {e}")
+            self.claude_client = None
+    
+    def expand_query(self, query: str, intent: QueryIntent) -> List[str]:
+        """
+        Generate 3-5 query variations optimized for retrieval.
+        
+        Args:
+            query: Original query
+            intent: Query intent classification
+            
+        Returns:
+            List of query variations (includes original)
+        """
+        if not self.claude_client:
+            return [query]  # Fallback: return original query
+        
+        # Create cache key
+        cache_key = hashlib.md5(f"{query}_{intent.intent_type}".encode()).hexdigest()
+        
+        if self.enable_caching and cache_key in self.cache:
+            logger.debug("Using cached query expansion")
+            return self.cache[cache_key]
+        
+        try:
+            prompt = f"""Generate 3-5 query variations optimized for technical document retrieval.
+
+Original query: "{query}"
+Intent: {intent.intent_type}
+Confidence: {intent.confidence:.2%}
+
+Generate variations that:
+1. Use technical synonyms and related terms
+2. Include domain-specific terminology
+3. Maintain the core information need
+4. Optimize for vector similarity search
+5. Include alternative phrasings that might appear in technical docs
+
+Return ONLY a JSON array of query strings, no explanation.
+Example: ["query variation 1", "query variation 2", "query variation 3"]
+
+Query variations:"""
+            
+            response = self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=500,
+                temperature=0.3,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            response_text = response.content[0].text.strip()
+            
+            # Remove markdown code blocks if present
+            if response_text.startswith('```'):
+                response_text = response_text.split('```')[1]
+                if response_text.startswith('json'):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+            
+            # Parse JSON
+            variations = json.loads(response_text)
+            
+            # Ensure original query is included
+            if query not in variations:
+                variations.insert(0, query)
+            
+            # Limit to 5 variations
+            variations = variations[:5]
+            
+            # Cache the result
+            if self.enable_caching:
+                self.cache[cache_key] = variations
+            
+            logger.info(f"🔍 Generated {len(variations)} query variations")
+            return variations
+            
+        except Exception as e:
+            logger.warning(f"Query expansion failed: {e}, using original query")
+            return [query]
+    
+    def clear_cache(self):
+        """Clear query expansion cache."""
+        self.cache.clear()
+
+
+class ClaudeQueryDecomposer:
+    """
+    Claude-powered query decomposition for complex queries.
+    Breaks multi-part queries into focused sub-queries for better retrieval.
+    """
+    
+    def __init__(self, model_name: str = "claude-sonnet-4-20250514", enable_caching: bool = True):
+        self.model_name = model_name
+        self.enable_caching = enable_caching
+        self.cache = {}
+        self.claude_client = None
+        
+        # Initialize Claude
+        self._initialize_claude()
+    
+    def _initialize_claude(self):
+        """Initialize Claude client with error handling."""
+        try:
+            import anthropic
+            
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                api_key = api_key.strip().rstrip('\r\n')
+            
+            if not api_key:
+                logger.warning("⚠️ ANTHROPIC_API_KEY not found. Query decomposition will be disabled.")
+                self.claude_client = None
+                return
+            
+            self.claude_client = anthropic.Anthropic(api_key=api_key)
+            
+            # Test connection
+            self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "test"}]
+            )
+            
+            logger.info(f"✅ Claude Query Decomposer initialized with model: {self.model_name}")
+            
+        except ImportError:
+            logger.warning("⚠️ Anthropic package not installed. Query decomposition will be disabled.")
+            self.claude_client = None
+        except Exception as e:
+            logger.warning(f"⚠️ Claude Query Decomposer initialization failed: {e}")
+            self.claude_client = None
+    
+    def decompose(self, query: str, intent: QueryIntent) -> List[str]:
+        """
+        Break complex queries into optimized sub-queries.
+        
+        Args:
+            query: Original query
+            intent: Query intent classification
+            
+        Returns:
+            List of sub-queries (or single query if not complex)
+        """
+        # Skip decomposition for simple queries
+        if not intent.requires_subqueries or not self.claude_client:
+            return [query]
+        
+        # Create cache key
+        cache_key = hashlib.md5(f"{query}_{intent.intent_type}".encode()).hexdigest()
+        
+        if self.enable_caching and cache_key in self.cache:
+            logger.debug("Using cached query decomposition")
+            return self.cache[cache_key]
+        
+        try:
+            prompt = f"""Decompose this technical query into 2-4 focused sub-queries for document retrieval.
+
+Query: "{query}"
+Intent: {intent.intent_type}
+Keywords: {', '.join(intent.keywords[:5])}
+
+Each sub-query should:
+- Be independently answerable from documents
+- Focus on a specific aspect of the original query
+- Use clear, technical language
+- Optimize for vector similarity search
+- Avoid redundancy
+
+For comparison queries, create separate queries for each item being compared.
+For procedural queries, break into logical steps or components.
+
+Return ONLY a JSON array of sub-query strings, no explanation.
+Example: ["sub-query 1", "sub-query 2", "sub-query 3"]
+
+Sub-queries:"""
+            
+            response = self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=500,
+                temperature=0.2,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            response_text = response.content[0].text.strip()
+            
+            # Remove markdown code blocks if present
+            if response_text.startswith('```'):
+                response_text = response_text.split('```')[1]
+                if response_text.startswith('json'):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+            
+            # Parse JSON
+            sub_queries = json.loads(response_text)
+            
+            # Ensure we have at least 2 sub-queries (otherwise decomposition wasn't helpful)
+            if len(sub_queries) < 2:
+                logger.debug("Decomposition produced <2 queries, using original")
+                return [query]
+            
+            # Limit to 4 sub-queries
+            sub_queries = sub_queries[:4]
+            
+            # Cache the result
+            if self.enable_caching:
+                self.cache[cache_key] = sub_queries
+            
+            logger.info(f"🔀 Decomposed query into {len(sub_queries)} sub-queries")
+            return sub_queries
+            
+        except Exception as e:
+            logger.warning(f"Query decomposition failed: {e}, using original query")
+            return [query]
+    
+    def clear_cache(self):
+        """Clear query decomposition cache."""
+        self.cache.clear()
+
+
+class ClaudeMetadataFilterGenerator:
+    """
+    Claude-powered metadata filter generation.
+    Extracts metadata filters from queries to improve retrieval precision.
+    """
+    
+    def __init__(self, model_name: str = "claude-sonnet-4-20250514", enable_caching: bool = True):
+        self.model_name = model_name
+        self.enable_caching = enable_caching
+        self.cache = {}
+        self.claude_client = None
+        
+        # Initialize Claude
+        self._initialize_claude()
+    
+    def _initialize_claude(self):
+        """Initialize Claude client with error handling."""
+        try:
+            import anthropic
+            
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                api_key = api_key.strip().rstrip('\r\n')
+            
+            if not api_key:
+                logger.warning("⚠️ ANTHROPIC_API_KEY not found. Metadata filter generation will be disabled.")
+                self.claude_client = None
+                return
+            
+            self.claude_client = anthropic.Anthropic(api_key=api_key)
+            
+            # Test connection
+            self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "test"}]
+            )
+            
+            logger.info(f"✅ Claude Metadata Filter Generator initialized with model: {self.model_name}")
+            
+        except ImportError:
+            logger.warning("⚠️ Anthropic package not installed. Metadata filter generation will be disabled.")
+            self.claude_client = None
+        except Exception as e:
+            logger.warning(f"⚠️ Claude Metadata Filter Generator initialization failed: {e}")
+            self.claude_client = None
+    
+    def generate_filters(self, query: str, available_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Extract metadata filters from query.
+        
+        Args:
+            query: User query
+            available_metadata: Optional dict of available metadata keys/values
+            
+        Returns:
+            Dict of metadata filters (empty if none found)
+        """
+        if not self.claude_client:
+            return {}
+        
+        # Create cache key
+        cache_key = hashlib.md5(query.encode()).hexdigest()
+        
+        if self.enable_caching and cache_key in self.cache:
+            logger.debug("Using cached metadata filters")
+            return self.cache[cache_key]
+        
+        try:
+            # Build available metadata description
+            metadata_desc = ""
+            if available_metadata:
+                metadata_desc = f"\n\nAvailable metadata keys: {', '.join(available_metadata.keys())}"
+            
+            prompt = f"""Extract metadata filters from this technical query.
+
+Query: "{query}"{metadata_desc}
+
+Extract metadata filters such as:
+- file_name patterns or specific document names mentioned
+- content_type preferences (table, image, text, figure_caption)
+- page_number ranges if mentioned
+- Any other metadata filters that would narrow results
+
+Return ONLY a JSON object with filter keys and values, or empty object {{}} if no filters found.
+Example: {{"content_type": "table", "file_name": "manual.pdf"}}
+Example: {{"content_type": ["table", "text"]}}
+Example: {{}}
+
+Metadata filters:"""
+            
+            response = self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=200,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            response_text = response.content[0].text.strip()
+            
+            # Remove markdown code blocks if present
+            if response_text.startswith('```'):
+                response_text = response_text.split('```')[1]
+                if response_text.startswith('json'):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+            
+            # Parse JSON
+            filters = json.loads(response_text)
+            
+            # Validate filters against available metadata
+            if available_metadata and filters:
+                validated_filters = {}
+                for key, value in filters.items():
+                    if key in available_metadata:
+                        validated_filters[key] = value
+                    elif key in ['content_type', 'file_name', 'page_number']:
+                        # Common metadata keys we can use
+                        validated_filters[key] = value
+                filters = validated_filters
+            
+            # Cache the result
+            if self.enable_caching:
+                self.cache[cache_key] = filters
+            
+            if filters:
+                logger.info(f"🎯 Generated metadata filters: {filters}")
+            
+            return filters
+            
+        except Exception as e:
+            logger.warning(f"Metadata filter generation failed: {e}")
+            return {}
+    
+    def clear_cache(self):
+        """Clear metadata filter cache."""
+        self.cache.clear()
+
+
+class ClaudeIterativeRetriever:
+    """
+    Claude-powered iterative retrieval with feedback.
+    Uses initial results to refine queries and retrieve complementary information.
+    """
+    
+    def __init__(self, model_name: str = "claude-sonnet-4-20250514", enable_caching: bool = True):
+        self.model_name = model_name
+        self.enable_caching = enable_caching
+        self.cache = {}
+        self.claude_client = None
+        
+        # Initialize Claude
+        self._initialize_claude()
+    
+    def _initialize_claude(self):
+        """Initialize Claude client with error handling."""
+        try:
+            import anthropic
+            
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                api_key = api_key.strip().rstrip('\r\n')
+            
+            if not api_key:
+                logger.warning("⚠️ ANTHROPIC_API_KEY not found. Iterative retrieval will be disabled.")
+                self.claude_client = None
+                return
+            
+            self.claude_client = anthropic.Anthropic(api_key=api_key)
+            
+            # Test connection
+            self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "test"}]
+            )
+            
+            logger.info(f"✅ Claude Iterative Retriever initialized with model: {self.model_name}")
+            
+        except ImportError:
+            logger.warning("⚠️ Anthropic package not installed. Iterative retrieval will be disabled.")
+            self.claude_client = None
+        except Exception as e:
+            logger.warning(f"⚠️ Claude Iterative Retriever initialization failed: {e}")
+            self.claude_client = None
+    
+    def refine_query(self, query: str, initial_results: List[NodeWithScore], intent: QueryIntent) -> Optional[str]:
+        """
+        Generate refined query based on initial retrieval results.
+        
+        Args:
+            query: Original query
+            initial_results: Initial retrieval results
+            intent: Query intent classification
+            
+        Returns:
+            Refined query string, or None if refinement not needed
+        """
+        if not self.claude_client or len(initial_results) == 0:
+            return None
+        
+        # Only refine if we have enough results to analyze
+        if len(initial_results) < 3:
+            return None
+        
+        # Create cache key
+        result_summary = "".join([n.text[:100] for n in initial_results[:5]])
+        cache_key = hashlib.md5(f"{query}_{result_summary}".encode()).hexdigest()
+        
+        if self.enable_caching and cache_key in self.cache:
+            logger.debug("Using cached query refinement")
+            return self.cache[cache_key]
+        
+        try:
+            # Prepare summaries of initial results
+            result_summaries = []
+            for i, node in enumerate(initial_results[:5], 1):
+                source_name = node.metadata.get('file_name', 'Unknown')
+                content_type = node.metadata.get('content_type', 'text')
+                text_preview = node.text[:200].replace('\n', ' ')
+                result_summaries.append(f"[{i}] {source_name} ({content_type}): {text_preview}...")
+            
+            prompt = f"""Original query: "{query}"
+Intent: {intent.intent_type}
+
+Initial retrieval results:
+{chr(10).join(result_summaries)}
+
+Analyze these results and generate a refined query that:
+1. Targets information gaps in the initial results
+2. Uses different terminology to find complementary documents
+3. Maintains the original intent
+4. Focuses on missing aspects that would complete the answer
+
+Return ONLY the refined query string, or "NONE" if no refinement is needed.
+Do not include explanations or quotes around the query.
+
+Refined query:"""
+            
+            response = self.claude_client.messages.create(
+                model=self.model_name,
+                max_tokens=200,
+                temperature=0.3,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            refined_query = response.content[0].text.strip()
+            
+            # Remove quotes if present
+            if refined_query.startswith('"') and refined_query.endswith('"'):
+                refined_query = refined_query[1:-1]
+            elif refined_query.startswith("'") and refined_query.endswith("'"):
+                refined_query = refined_query[1:-1]
+            
+            # Check if refinement was recommended
+            if refined_query.upper() == "NONE" or refined_query.lower() == query.lower():
+                return None
+            
+            # Cache the result
+            if self.enable_caching:
+                self.cache[cache_key] = refined_query
+            
+            logger.info(f"🔄 Generated refined query: {refined_query}")
+            return refined_query
+            
+        except Exception as e:
+            logger.warning(f"Query refinement failed: {e}")
+            return None
+    
+    def should_iterate(self, query: str, initial_results: List[NodeWithScore], intent: QueryIntent) -> bool:
+        """
+        Determine if iterative retrieval should be performed.
+        
+        Args:
+            query: Original query
+            initial_results: Initial retrieval results
+            intent: Query intent classification
+            
+        Returns:
+            True if iterative retrieval is recommended
+        """
+        # Only iterate for complex queries
+        if not intent.requires_subqueries:
+            return False
+        
+        # Only iterate if we have some results (but might need more)
+        if len(initial_results) < 3:
+            return False
+        
+        # Check average relevance scores
+        if initial_results:
+            avg_score = np.mean([node.score for node in initial_results[:5]])
+            # If scores are low, iteration might help
+            if avg_score < 0.5:
+                return True
+        
+        return False
+    
+    def clear_cache(self):
+        """Clear query refinement cache."""
+        self.cache.clear()
+
+
 class ClaudeAnswerGenerator:
     """
     Claude-based answer generator for ChatGPT-style responses.
@@ -1617,11 +2183,17 @@ class RAGOrchestrator:
         self.db_manager = db_manager  # 🗄️ PostgreSQL manager for validated Q&A fast-path
         
         # Components
-        self.query_rewriter = QueryRewriter()
+        self.query_rewriter = QueryRewriter()  # Rule-based fallback
         self.intent_classifier = ClaudeIntentClassifier()  # 🎯 Claude-powered intent classification
         self.response_generator = ResponseGenerator()
         self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
         self.answer_generator = ClaudeAnswerGenerator() if enable_llm_answers else None
+        
+        # 🚀 NEW: Claude-powered retrieval enhancements
+        self.claude_query_rewriter = ClaudeQueryRewriter()  # Semantic query expansion
+        self.claude_query_decomposer = ClaudeQueryDecomposer()  # Query decomposition
+        self.claude_metadata_filter_generator = ClaudeMetadataFilterGenerator()  # Metadata filtering
+        self.claude_iterative_retriever = ClaudeIterativeRetriever()  # Iterative retrieval
 
         # User-validated cache (only stores answers marked helpful)
         self.cache = QueryCache(max_size=1000)
@@ -1888,6 +2460,18 @@ class RAGOrchestrator:
         intent = self.intent_classifier.classify(query)
         logger.info(f"📋 Intent: {intent.intent_type} (confidence: {intent.confidence:.2%})")
         
+        # 🚀 NEW: Step 1.5 - Query Decomposition (for complex queries)
+        sub_queries = self.claude_query_decomposer.decompose(query, intent)
+        logger.info(f"🔀 Query decomposition: {len(sub_queries)} sub-query(s)")
+        
+        # 🚀 NEW: Step 1.6 - Generate metadata filters
+        claude_metadata_filters = self.claude_metadata_filter_generator.generate_filters(query)
+        # Merge with user-provided metadata filters
+        if metadata_filters:
+            metadata_filters = {**claude_metadata_filters, **metadata_filters}
+        else:
+            metadata_filters = claude_metadata_filters
+        
         # Optional: glossary augmentation
         augmented_query = query
         glossary_defs: List[str] = []
@@ -1912,26 +2496,115 @@ class RAGOrchestrator:
             except Exception as e:
                 logger.debug(f"Glossary augmentation skipped: {e}")
 
-        # Step 2: Simple retrieval - just get the top_k best chunks directly
-        # Use the augmented query (which may include glossary aliases) or original query
-        search_query = augmented_query if augmented_query != query else query
-        logger.info(f"🔍 Retrieving top {top_k} chunks for query: {search_query}")
+        # 🚀 NEW: Step 2 - Query Expansion (for each sub-query)
+        all_search_queries = []
+        for sub_query in sub_queries:
+            # Expand each sub-query with Claude
+            expanded_queries = self.claude_query_rewriter.expand_query(sub_query, intent)
+            all_search_queries.extend(expanded_queries)
         
-        # Run single hybrid search (no variations, no parallel complexity)
-        # This gives us exactly the top_k best chunks based on hybrid search scoring
-        unique_nodes = self.retriever.hybrid_search_with_llm_evaluation(
-            query=search_query,
-            top_k=top_k,
-            alpha=alpha,
-            metadata_filters=metadata_filters,
-            enable_llm_evaluation=self.enable_llm_evaluation
-        )
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_search_queries = []
+        for q in all_search_queries:
+            if q.lower() not in seen:
+                seen.add(q.lower())
+                unique_search_queries.append(q)
+        
+        # Limit to top 5 query variations to avoid excessive API calls
+        search_queries = unique_search_queries[:5]
+        # Ensure we have at least one query
+        if not search_queries:
+            search_queries = [augmented_query if augmented_query != query else query]
+        
+        logger.info(f"🔍 Using {len(search_queries)} query variation(s) for retrieval")
+        
+        # Step 3: Multi-query retrieval (if we have multiple queries)
+        unique_nodes = []
+        if len(search_queries) > 1:
+            # Retrieve results for each query variation and combine
+            logger.info(f"🔄 Running multi-query retrieval across {len(search_queries)} variations...")
+            all_nodes = []
+            node_scores = defaultdict(float)
+            
+            for search_query in search_queries:
+                try:
+                    nodes = self.retriever.hybrid_search_with_llm_evaluation(
+                        query=search_query,
+                        top_k=top_k,  # Get top_k per query
+                        alpha=alpha,
+                        metadata_filters=metadata_filters,
+                        enable_llm_evaluation=self.enable_llm_evaluation
+                    )
+                    
+                    # Combine scores (nodes may appear multiple times)
+                    for node in nodes:
+                        node_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                        node_scores[node_id] = max(node_scores[node_id], node.score)
+                        # Only add if not already in all_nodes
+                        if not any(n.node_id == node_id if hasattr(n, 'node_id') else str(id(n)) == node_id for n in all_nodes):
+                            all_nodes.append(node)
+                except Exception as e:
+                    logger.warning(f"Retrieval failed for query variation '{search_query}': {e}")
+                    continue
+            
+            # Re-score nodes based on maximum score across all queries
+            for node in all_nodes:
+                node_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                node.score = node_scores[node_id]
+            
+            # Sort by score and take top_k
+            all_nodes.sort(key=lambda n: n.score, reverse=True)
+            unique_nodes = all_nodes[:top_k]
+        else:
+            # Single query retrieval (original behavior)
+            search_query = search_queries[0] if search_queries else augmented_query
+            logger.info(f"🔍 Retrieving top {top_k} chunks for query: {search_query}")
+            
+            unique_nodes = self.retriever.hybrid_search_with_llm_evaluation(
+                query=search_query,
+                top_k=top_k,
+                alpha=alpha,
+                metadata_filters=metadata_filters,
+                enable_llm_evaluation=self.enable_llm_evaluation
+            )
+        
+        # 🚀 NEW: Step 4 - Iterative Retrieval (if needed)
+        if self.claude_iterative_retriever.should_iterate(query, unique_nodes, intent):
+            logger.info("🔄 Performing iterative retrieval...")
+            refined_query = self.claude_iterative_retriever.refine_query(query, unique_nodes, intent)
+            
+            if refined_query:
+                # Retrieve additional results with refined query
+                refined_nodes = self.retriever.hybrid_search_with_llm_evaluation(
+                    query=refined_query,
+                    top_k=top_k // 2,  # Get fewer results for refinement
+                    alpha=alpha,
+                    metadata_filters=metadata_filters,
+                    enable_llm_evaluation=self.enable_llm_evaluation
+                )
+                
+                # Combine with original results, avoiding duplicates
+                existing_node_ids = {n.node_id if hasattr(n, 'node_id') else str(id(n)) for n in unique_nodes}
+                for node in refined_nodes:
+                    node_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                    if node_id not in existing_node_ids:
+                        unique_nodes.append(node)
+                        existing_node_ids.add(node_id)
+                
+                # Re-sort and limit to top_k
+                unique_nodes.sort(key=lambda n: n.score, reverse=True)
+                unique_nodes = unique_nodes[:top_k]
+                logger.info(f"✅ Iterative retrieval added {len(refined_nodes)} new results")
         
         # Ensure we have exactly top_k results (in case hybrid search returned fewer)
         unique_nodes = unique_nodes[:top_k]
         
         retrieval_time = time.time() - start_time
-        logger.info(f"⚡ Retrieval completed in {retrieval_time:.2f}s (simple single-query search)")
+        if len(search_queries) > 1:
+            logger.info(f"⚡ Retrieval completed in {retrieval_time:.2f}s (multi-query retrieval with {len(search_queries)} variations)")
+        else:
+            logger.info(f"⚡ Retrieval completed in {retrieval_time:.2f}s")
         
         # Skip dynamic windowing - just use the top_k chunks directly
         # (Simple approach: just get the requested number of best chunks)
