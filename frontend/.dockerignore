@@ -26,6 +26,16 @@ coverage
 # Local development
 .vercel
 
+# Database files (don't include in Docker image)
+*.db
+*.db-journal
+prisma/dev.db*
+
+# Backup files
+backups/
+*.db.gz
+*.sql.gz
+
 # IDE
 .vscode
 .idea
