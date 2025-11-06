@@ -52,7 +52,8 @@ logging.getLogger("pypdf._reader").setLevel(logging.ERROR)
 
 class TextPreprocessor:
     """
-    Preprocesses text to remove boilerplate, normalize whitespace, and filter low-quality content.
+    Enhanced AI-powered text preprocessor for RAG pipeline.
+    Removes boilerplate, normalizes technical content, fixes artifacts, and filters low-quality chunks.
     """
     
     def __init__(self):
@@ -84,6 +85,21 @@ class TextPreprocessor:
             re.compile(r'^[ \t]*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}[ \t]*$', re.MULTILINE),
         ]
         
+        # Enhanced header/footer patterns (more comprehensive)
+        self.header_footer_patterns = [
+            re.compile(r'^[ \t]*(DuraFlex|DuraCore|DuraBolt|anyCUT|EZCut)[ \t]+.*?[ \t]*$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'^[ \t]*[A-Z][a-z]+[ \t]+(Manual|Guide|Databook|Release Notes)[ \t]*$', re.MULTILINE),
+            re.compile(r'^[ \t]*V\d+\.\d+[ \t]*$', re.MULTILINE),  # Version numbers
+            re.compile(r'^[ \t]*Rev[ \t]*\d+[ \t]*$', re.MULTILINE | re.IGNORECASE),
+        ]
+        
+        # Table of Contents detection patterns
+        self.toc_patterns = [
+            re.compile(r'^[ \t]*(Table[ \t]+of[ \t]+Contents|Contents|Index|TOC)[ \t]*$', re.MULTILINE | re.IGNORECASE),
+            re.compile(r'^\s*\d+\.\d+[ \t]+.*?\s+\d+$', re.MULTILINE),  # "1.2 Section Name    5"
+            re.compile(r'^\s*[A-Z][a-z]+[ \t]+\.{3,}[ \t]+\d+$', re.MULTILINE),  # "Section .......... 10"
+        ]
+        
         # Patterns for structured lines that should be preserved (for smart chunking)
         self.preserve_patterns = [
             re.compile(r'^(Usage|Command|Example|Syntax|Parameters?|Options?|Steps?|Procedure|Note|Warning|Important):\s*', re.MULTILINE | re.IGNORECASE),
@@ -91,6 +107,242 @@ class TextPreprocessor:
             re.compile(r'^[-*•]\s+', re.MULTILINE),  # Bullet points
             re.compile(r'^\s*[A-Z][a-z]+:\s*$', re.MULTILINE),  # Section headers ending with colon
         ]
+        
+        # Common redundant phrases in technical docs
+        self.redundant_phrases = [
+            (re.compile(r'\bplease[ \t]+note[ \t]+that\b', re.IGNORECASE), ''),
+            (re.compile(r'\bit[ \t]+is[ \t]+important[ \t]+to[ \t]+note[ \t]+that\b', re.IGNORECASE), ''),
+            (re.compile(r'\bas[ \t]+you[ \t]+can[ \t]+see\b', re.IGNORECASE), ''),
+            (re.compile(r'\bas[ \t]+shown[ \t]+above\b', re.IGNORECASE), ''),
+            (re.compile(r'\bas[ \t]+shown[ \t]+below\b', re.IGNORECASE), ''),
+            (re.compile(r'\bas[ \t]+mentioned[ \t]+previously\b', re.IGNORECASE), ''),
+            (re.compile(r'\bas[ \t]+mentioned[ \t]+earlier\b', re.IGNORECASE), ''),
+            (re.compile(r'\bfor[ \t]+more[ \t]+information[ \t]+please[ \t]+refer[ \t]+to\b', re.IGNORECASE), 'See'),
+            (re.compile(r'\bfor[ \t]+additional[ \t]+details[ \t]+please[ \t]+see\b', re.IGNORECASE), 'See'),
+        ]
+    
+    def is_table_of_contents(self, text: str) -> bool:
+        """
+        Detect if text is a Table of Contents section.
+        Returns True if TOC patterns are found.
+        """
+        if not text:
+            return False
+        
+        lines = text.split('\n')
+        toc_line_count = 0
+        
+        # Check for TOC header
+        for pattern in self.toc_patterns[:1]:  # First pattern is TOC header
+            if pattern.search(text):
+                toc_line_count += 1
+        
+        # Check for TOC entry patterns (section numbers with page numbers)
+        for line in lines[:20]:  # Check first 20 lines
+            for pattern in self.toc_patterns[1:]:
+                if pattern.search(line):
+                    toc_line_count += 1
+                    break
+        
+        # If we find TOC header + multiple TOC entries, it's likely a TOC
+        return toc_line_count >= 3
+    
+    def remove_table_of_contents(self, text: str) -> str:
+        """Remove Table of Contents sections from text."""
+        if not self.is_table_of_contents(text):
+            return text
+        
+        lines = text.split('\n')
+        cleaned_lines = []
+        in_toc = False
+        
+        for line in lines:
+            # Check if line starts TOC
+            if any(pattern.search(line) for pattern in self.toc_patterns[:1]):
+                in_toc = True
+                continue
+            
+            # Check if line is TOC entry
+            if in_toc:
+                if any(pattern.search(line) for pattern in self.toc_patterns[1:]):
+                    continue
+                # Check if we've left TOC (found non-TOC content)
+                if line.strip() and not any(pattern.search(line) for pattern in self.toc_patterns):
+                    # Look ahead: if next few lines aren't TOC entries, we've left TOC
+                    in_toc = False
+            
+            if not in_toc:
+                cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines)
+    
+    def remove_headers_footers(self, text: str) -> str:
+        """Remove header and footer text that appears on multiple pages."""
+        if not text:
+            return text
+        
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Skip header/footer patterns
+            is_header_footer = False
+            
+            # Check enhanced header/footer patterns
+            for pattern in self.header_footer_patterns:
+                if pattern.search(line):
+                    is_header_footer = True
+                    break
+            
+            # Check if line is very short and appears to be header/footer
+            if not is_header_footer and len(line.strip()) < 50:
+                # Check for common header/footer indicators
+                if (line.strip().count(' ') < 5 and 
+                    (line.strip().isupper() or 
+                     re.match(r'^[A-Z][a-z]+[ \t]+(Manual|Guide|V\d+|Rev)', line.strip()))):
+                    is_header_footer = True
+            
+            if not is_header_footer:
+                cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines)
+    
+    def is_first_page_without_content(self, text: str, metadata: dict = None) -> bool:
+        """
+        Detect if this is a first page (cover page) with no meaningful content.
+        Checks for title pages, cover pages, etc.
+        """
+        if not text:
+            return True
+        
+        # Check page number
+        page_label = metadata.get('page_label', '') if metadata else ''
+        if page_label and page_label not in ['1', 'i', 'I']:
+            return False
+        
+        # Check word count
+        words = len(text.split())
+        if words < 15:
+            return True
+        
+        # Check for cover page indicators
+        cover_indicators = [
+            r'^[A-Z][A-Z\s]{10,}$',  # All caps title
+            r'^(User|Installation|Service|Operation)[ \t]+(Manual|Guide|Databook)',  # Title format
+        ]
+        
+        lines = text.split('\n')[:10]  # Check first 10 lines
+        cover_line_count = 0
+        
+        for line in lines:
+            for pattern in cover_indicators:
+                if re.match(pattern, line.strip(), re.IGNORECASE):
+                    cover_line_count += 1
+        
+        # If mostly cover page content and low word count
+        return cover_line_count >= 2 and words < 50
+    
+    def fix_hyphenation(self, text: str) -> str:
+        """
+        Fix hyphenated words split across lines.
+        Example: "print-\nhead" -> "printhead"
+        """
+        if not text:
+            return text
+        
+        # Pattern: word ending with hyphen, followed by newline, followed by word continuation
+        # Match: "word-\nword" -> "wordword"
+        text = re.sub(r'([a-zA-Z])-\s*\n\s*([a-zA-Z])', r'\1\2', text)
+        
+        # Also handle cases with spaces: "word- \n word"
+        text = re.sub(r'([a-zA-Z])-\s+\n\s+([a-zA-Z])', r'\1\2', text)
+        
+        return text
+    
+    def fix_line_breaks(self, text: str) -> str:
+        """
+        Fix inappropriate line breaks in the middle of sentences.
+        Preserves intentional paragraph breaks (double newlines).
+        """
+        if not text:
+            return text
+        
+        lines = text.split('\n')
+        fixed_lines = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            if not line:
+                fixed_lines.append('')
+                i += 1
+                continue
+            
+            # Check if line ends with sentence-ending punctuation
+            ends_with_punctuation = re.search(r'[.!?]\s*$', line)
+            
+            # Check if next line starts with capital letter (new sentence)
+            next_starts_sentence = False
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                next_starts_sentence = bool(re.match(r'^[A-Z]', next_line))
+            
+            # If line doesn't end with punctuation and next doesn't start sentence,
+            # it's likely a broken line - join them
+            if not ends_with_punctuation and not next_starts_sentence and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line and not next_line.startswith(('•', '-', '*', '1.', '2.', '3.')):
+                    # Join with space
+                    line = line + ' ' + next_line
+                    i += 1  # Skip next line since we joined it
+            
+            fixed_lines.append(line)
+            i += 1
+        
+        return '\n'.join(fixed_lines)
+    
+    def remove_repeated_phrases(self, text: str) -> str:
+        """Remove redundant phrases that don't add semantic value."""
+        cleaned = text
+        
+        for pattern, replacement in self.redundant_phrases:
+            try:
+                cleaned = pattern.sub(replacement, cleaned)
+            except Exception as e:
+                logger.debug(f"Failed to remove redundant phrase: {e}")
+                continue
+        
+        return cleaned
+    
+    def normalize_technical_content(self, text: str) -> str:
+        """
+        Normalize technical instructions and explanations.
+        Fixes spacing, punctuation, and formatting issues.
+        """
+        if not text:
+            return text
+        
+        # Fix spacing around punctuation
+        text = re.sub(r'\s+([.,;:!?])', r'\1', text)  # Remove space before punctuation
+        text = re.sub(r'([.,;:!?])([^\s])', r'\1 \2', text)  # Add space after punctuation
+        
+        # Fix spacing around parentheses and brackets
+        text = re.sub(r'\(\s+', '(', text)
+        text = re.sub(r'\s+\)', ')', text)
+        text = re.sub(r'\[\s+', '[', text)
+        text = re.sub(r'\s+\]', ']', text)
+        
+        # Normalize multiple spaces (but preserve intentional spacing in tables/code)
+        # Only normalize if not in a table-like structure
+        if '|' not in text and '\t' not in text:
+            text = re.sub(r' {2,}', ' ', text)
+        
+        # Fix common technical formatting issues
+        text = re.sub(r'(\d+)\s*-\s*(\d+)', r'\1-\2', text)  # Number ranges: "5 - 10" -> "5-10"
+        text = re.sub(r'(\w+)\s*/\s*(\w+)', r'\1/\2', text)  # Slashes: "A / B" -> "A/B"
+        
+        return text
     
     def remove_boilerplate(self, text: str) -> str:
         """Remove common boilerplate text patterns from the input."""
@@ -139,10 +391,38 @@ class TextPreprocessor:
                 return True
         return False
     
-    def clean_text(self, text: str) -> str:
-        """Apply all cleaning steps: remove boilerplate and normalize whitespace."""
-        cleaned = self.remove_boilerplate(text)
+    def clean_text(self, text: str, metadata: dict = None) -> str:
+        """
+        Apply all enhanced cleaning steps in optimal order.
+        Returns cleaned text ready for chunking and embedding.
+        """
+        if not text:
+            return text
+        
+        cleaned = text
+        
+        # Step 1: Remove Table of Contents
+        cleaned = self.remove_table_of_contents(cleaned)
+        
+        # Step 2: Remove headers and footers
+        cleaned = self.remove_headers_footers(cleaned)
+        
+        # Step 3: Remove boilerplate (copyright, page numbers, etc.)
+        cleaned = self.remove_boilerplate(cleaned)
+        
+        # Step 4: Fix text artifacts
+        cleaned = self.fix_hyphenation(cleaned)
+        cleaned = self.fix_line_breaks(cleaned)
+        
+        # Step 5: Remove redundant phrases
+        cleaned = self.remove_repeated_phrases(cleaned)
+        
+        # Step 6: Normalize technical content (spacing, punctuation)
+        cleaned = self.normalize_technical_content(cleaned)
+        
+        # Step 7: Normalize whitespace (final pass)
         cleaned = self.normalize_whitespace(cleaned)
+        
         return cleaned
     
     def is_low_content_page(self, text: str, min_words: int = 15) -> bool:
@@ -150,17 +430,32 @@ class TextPreprocessor:
         words = len(text.split())
         return words < min_words
     
-    def should_skip_node(self, text: str, min_chars: int = 30) -> bool:
-        """Check if a node should be skipped (too short or empty)."""
-        if not text or len(text.strip()) < min_chars:
-            return True
+    def should_skip_node(self, text: str, min_chars: int = 30, metadata: dict = None) -> Tuple[bool, str]:
+        """
+        Check if a node should be skipped (too short or empty).
+        Returns (should_skip: bool, reason: str)
+        """
+        if not text:
+            return True, "empty_text"
+        
+        text_stripped = text.strip()
+        if len(text_stripped) < min_chars:
+            return True, "too_short"
         
         # Check if it's mostly whitespace or special characters
         alpha_chars = len(re.findall(r'[a-zA-Z]', text))
         if alpha_chars < min_chars // 2:  # At least half should be alphabetic
-            return True
+            return True, "low_alphabetic_content"
         
-        return False
+        # Check if it's a Table of Contents
+        if self.is_table_of_contents(text):
+            return True, "table_of_contents"
+        
+        # Check if it's a first page without content
+        if self.is_first_page_without_content(text, metadata):
+            return True, "first_page_no_content"
+        
+        return False, ""
 
 
 class SmartChunkSplitter:
@@ -312,7 +607,7 @@ class SmartChunkSplitter:
                 
                 # Clean the text first (with error handling)
                 try:
-                    text = self.preprocessor.clean_text(text)
+                    text = self.preprocessor.clean_text(text, metadata=doc.metadata)
                 except Exception as e:
                     logger.warning(f"Error cleaning text for {doc_name}: {e}")
                     # Use original text if cleaning fails
@@ -340,22 +635,25 @@ class SmartChunkSplitter:
                 
                 # Create nodes from chunks
                 for chunk_idx, chunk_text in enumerate(chunks):
-                    # Skip if chunk is too short
-                    try:
-                        if self.preprocessor.should_skip_node(chunk_text):
-                            continue
-                    except Exception as e:
-                        logger.debug(f"Error checking skip node: {e}")
-                        # Continue if check fails
+                    # Enhanced skip check with reason tracking
+                    should_skip, skip_reason = self.preprocessor.should_skip_node(
+                        chunk_text, 
+                        metadata={**doc.metadata, "chunk_index": chunk_idx, "total_chunks": len(chunks)}
+                    )
                     
-                    # Create node with metadata
+                    if should_skip:
+                        logger.debug(f"Skipping chunk {chunk_idx} from {doc_name}: {skip_reason}")
+                        continue
+                    
+                    # Create node with metadata (including skip reason if applicable)
                     try:
                         node = TextNode(
                             text=chunk_text,
                             metadata={
                                 **doc.metadata,
                                 "chunk_index": chunk_idx,
-                                "total_chunks": len(chunks)
+                                "total_chunks": len(chunks),
+                                "content_type": "text"
                             }
                         )
                         all_nodes.append(node)
@@ -853,18 +1151,30 @@ class TechnicalRAGPipeline:
         print(f"   ✅ Loaded {len(documents)} PDF documents")
         logger.info(f"Loaded {len(documents)} text documents")
         
-        # Step 2: Preprocess Documents (Remove boilerplate, normalize whitespace)
-        print("\n[Step 2/6] 🧹 Preprocessing documents (removing boilerplate, normalizing text)...")
+        # Step 2: Enhanced AI-Powered Preprocessing
+        print("\n[Step 2/6] 🧹 Enhanced preprocessing (TOC removal, artifact fixing, normalization)...")
         preprocessed_docs = []
         skipped_pages = 0
+        skip_reasons = {}
+        
         for doc in documents:
             original_text = doc.text or ""
-            cleaned_text = self.text_preprocessor.clean_text(original_text)
             
-            # Skip low-content pages
+            # Enhanced cleaning with metadata for context-aware processing
+            cleaned_text = self.text_preprocessor.clean_text(original_text, metadata=doc.metadata)
+            
+            # Check if page should be skipped (with reason tracking)
             if self.text_preprocessor.is_low_content_page(cleaned_text):
+                skip_reasons['low_content'] = skip_reasons.get('low_content', 0) + 1
                 skipped_pages += 1
                 logger.debug(f"Skipping low-content page: {doc.metadata.get('file_name', 'unknown')}")
+                continue
+            
+            # Check for first page without content
+            if self.text_preprocessor.is_first_page_without_content(cleaned_text, metadata=doc.metadata):
+                skip_reasons['first_page_no_content'] = skip_reasons.get('first_page_no_content', 0) + 1
+                skipped_pages += 1
+                logger.debug(f"Skipping first page without content: {doc.metadata.get('file_name', 'unknown')}")
                 continue
             
             # Create new document with cleaned text
@@ -875,8 +1185,9 @@ class TechnicalRAGPipeline:
                 )
                 preprocessed_docs.append(new_doc)
         
-        print(f"   ✅ Preprocessed {len(preprocessed_docs)} documents ({skipped_pages} low-content pages skipped)")
-        logger.info(f"Preprocessed {len(preprocessed_docs)} documents, skipped {skipped_pages} low-content pages")
+        skip_summary = ", ".join([f"{reason}: {count}" for reason, count in skip_reasons.items()]) if skip_reasons else "none"
+        print(f"   ✅ Preprocessed {len(preprocessed_docs)} documents ({skipped_pages} pages skipped: {skip_summary})")
+        logger.info(f"Preprocessed {len(preprocessed_docs)} documents, skipped {skipped_pages} pages ({skip_summary})")
         
         # Step 3: Extract Non-Text Content
         print("\n[Step 3/6] 🖼️  Extracting tables, images, and captions...")
@@ -911,18 +1222,29 @@ class TechnicalRAGPipeline:
         # Filter out short/low-quality nodes (only for text nodes, not tables/images)
         filtered_nodes = []
         skipped_nodes = 0
+        skip_reasons_chunks = {}
+        
         for node in text_nodes:
             # Skip filtering for non-text content types (tables, images, captions are already handled separately)
             content_type = node.metadata.get("content_type", "text")
             if content_type != "text":
                 filtered_nodes.append(node)  # Don't filter non-text content
-            elif not self.text_preprocessor.should_skip_node(node.text):
-                filtered_nodes.append(node)
             else:
-                skipped_nodes += 1
+                # Enhanced skip check with reason tracking
+                should_skip, skip_reason = self.text_preprocessor.should_skip_node(
+                    node.text, 
+                    metadata=node.metadata
+                )
+                if should_skip:
+                    skipped_nodes += 1
+                    skip_reasons_chunks[skip_reason] = skip_reasons_chunks.get(skip_reason, 0) + 1
+                    logger.debug(f"Skipping node from {node.metadata.get('file_name', 'unknown')}: {skip_reason}")
+                else:
+                    filtered_nodes.append(node)
         
-        print(f"   ✅ Created {len(filtered_nodes)} text nodes ({skipped_nodes} low-quality nodes filtered)")
-        logger.info(f"Created {len(filtered_nodes)} text nodes, filtered {skipped_nodes} low-quality nodes")
+        skip_summary_chunks = ", ".join([f"{reason}: {count}" for reason, count in skip_reasons_chunks.items()]) if skip_reasons_chunks else "none"
+        print(f"   ✅ Created {len(filtered_nodes)} text nodes ({skipped_nodes} filtered: {skip_summary_chunks})")
+        logger.info(f"Created {len(filtered_nodes)} text nodes, filtered {skipped_nodes} nodes ({skip_summary_chunks})")
         
         # Step 6: Create Vector Embeddings (LONGEST STEP)
         print("\n[Step 6/6] 🧠 Generating embeddings and building vector index...")
