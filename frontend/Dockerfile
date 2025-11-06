@@ -38,14 +38,25 @@ RUN npm config set fetch-retries 5 && \
     npm config set fetch-retry-mintimeout 20000 && \
     npm config set fetch-retry-maxtimeout 120000
 
+# Copy node_modules from deps stage
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+
+# Copy only files needed for Prisma generation (these change less frequently)
+# This allows Prisma generation to be cached separately from source code
+COPY package.json package-lock.json* ./
+COPY prisma ./prisma
+COPY tsconfig.json ./
+COPY next.config.js* ./
 
 # Generate Prisma Client (required for build)
 # Note: DATABASE_URL is needed for Prisma, but we'll use a dummy for build
 # The actual connection will be set at runtime
 ENV DATABASE_URL="file:./dev.db"
 RUN npx prisma generate
+
+# Now copy the rest of the source code (this is the frequently changing part)
+# By doing this last, code changes won't invalidate the Prisma generation cache
+COPY . .
 
 # Backend URL is set via environment variable at runtime
 # (set in docker-compose.yml or when running the container)
@@ -54,11 +65,9 @@ RUN npx prisma generate
 RUN npm run build || \
     (echo "Build failed, retrying..." && npm run build)
 
-# Install runtime dependencies needed for migrations/seeding in builder stage
-# This way we can copy them to runner stage (already downloaded, no network needed)
-# Using --legacy-peer-deps to avoid conflicts with Next.js dependencies
-RUN npm install --save --legacy-peer-deps --no-audit --no-fund --loglevel=error \
-    ts-node@10.9.2 prisma@5.20.0 typescript@5.5.3 @types/bcrypt@5.0.2 @swc/core @swc/helpers
+# Note: Runtime dependencies (ts-node, prisma, typescript, etc.) are already installed
+# in the deps stage and copied to builder via node_modules. We'll copy them directly
+# to the runner stage - no need to reinstall (which is slow, especially for native modules like sharp)
 
 # Stage 3: Runner
 FROM node:20-alpine AS runner
@@ -82,11 +91,25 @@ COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
 COPY --from=builder /app/node_modules/typescript ./node_modules/typescript
 COPY --from=builder /app/node_modules/@types/bcrypt ./node_modules/@types/bcrypt
 COPY --from=builder /app/node_modules/@swc ./node_modules/@swc
+COPY --from=builder /app/node_modules/sharp ./node_modules/sharp
 
-# Copy bin executables
+# Copy ts-node package entirely (needed for seeding) - copy the whole package to avoid missing dependencies
+COPY --from=builder /app/node_modules/ts-node ./node_modules/ts-node
+
+# Copy ts-node dependencies (needed for seeding)
+# Copy these conditionally - they might not all exist, so we use a RUN command with mount
+RUN --mount=from=builder,source=/app/node_modules,target=/tmp/node_modules \
+    mkdir -p ./node_modules && \
+    for pkg in diff make-error tslib v8-compile-cache-lib yn arg create-require source-map-support; do \
+        if [ -d "/tmp/node_modules/$pkg" ]; then \
+            cp -r "/tmp/node_modules/$pkg" "./node_modules/$pkg"; \
+        fi; \
+    done
+
+# Copy all bin executables and their associated files (including WASM files)
 RUN mkdir -p ./node_modules/.bin
-COPY --from=builder /app/node_modules/.bin/ts-node ./node_modules/.bin/ts-node
-COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
+RUN --mount=from=builder,source=/app/node_modules/.bin,target=/tmp/bin \
+    cp -r /tmp/bin/* ./node_modules/.bin/ 2>/dev/null || true
 
 # Copy Prisma schema and migrations (needed for runtime migrations)
 COPY --from=builder /app/prisma ./prisma
@@ -94,6 +117,15 @@ COPY --from=builder /app/prisma ./prisma
 # Copy the generated Prisma client from builder (already generated during build)
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+
+# Copy Prisma engines (needed for migrations) - copy the entire directory
+COPY --from=builder /app/node_modules/@prisma/engines ./node_modules/@prisma/engines
+
+# Copy Prisma package (contains additional files needed)
+COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+
+# Add node_modules/.bin to PATH so ts-node and prisma are accessible
+ENV PATH="/app/node_modules/.bin:$PATH"
 
 # Copy necessary files (standalone output includes public directory)
 COPY --from=builder /app/.next/standalone ./
@@ -109,31 +141,8 @@ RUN mkdir -p /app/.next/cache && \
     chmod -R 755 /app/node_modules/.prisma 2>/dev/null || true
 
 # Create startup script for database migrations and seeding
-RUN echo '#!/bin/sh' > /app/start.sh && \
-    echo 'set -e' >> /app/start.sh && \
-    echo 'echo "🔄 Running database migrations..."' >> /app/start.sh && \
-    echo 'mkdir -p /app/node_modules/.prisma/client 2>/dev/null || true' >> /app/start.sh && \
-    echo 'mkdir -p /app/node_modules/@prisma/engines 2>/dev/null || true' >> /app/start.sh && \
-    echo 'if [ -f "prisma/migrations/migration_lock.toml" ]; then' >> /app/start.sh && \
-    echo '  LOCK_PROVIDER=$(grep -o '\''provider = "[^"]*'\'' prisma/migrations/migration_lock.toml | cut -d"\\"" -f2)' >> /app/start.sh && \
-    echo '  if [ "$LOCK_PROVIDER" != "postgresql" ]; then' >> /app/start.sh && \
-    echo '    echo "⚠️  Removing old SQLite migrations, will create new PostgreSQL migration..."' >> /app/start.sh && \
-    echo '    rm -rf prisma/migrations' >> /app/start.sh && \
-    echo '  fi' >> /app/start.sh && \
-    echo 'fi' >> /app/start.sh && \
-    echo 'if [ ! -d "prisma/migrations" ] || [ -z "$(ls -A prisma/migrations 2>/dev/null)" ]; then' >> /app/start.sh && \
-    echo '  echo "📝 Creating initial migration..."' >> /app/start.sh && \
-    echo '  npx prisma migrate dev --name init || true' >> /app/start.sh && \
-    echo 'fi' >> /app/start.sh && \
-    echo 'npx prisma migrate deploy || echo "⚠️ Migration failed or no migrations to run"' >> /app/start.sh && \
-    echo 'echo "✅ Migrations complete"' >> /app/start.sh && \
-    echo 'if [ -n "$ADMIN_EMAIL" ] && [ -n "$ADMIN_PASSWORD" ]; then' >> /app/start.sh && \
-    echo '  echo "🌱 Seeding admin account..."' >> /app/start.sh && \
-    echo '  npx ts-node --project prisma/tsconfig.json prisma/seed.ts 2>&1 || echo "⚠️ Seed failed or admin already exists"' >> /app/start.sh && \
-    echo '  echo "✅ Admin account ready"' >> /app/start.sh && \
-    echo 'fi' >> /app/start.sh && \
-    echo 'echo "🚀 Starting Next.js server..."' >> /app/start.sh && \
-    echo 'exec node server.js' >> /app/start.sh && \
+# Using printf to avoid complex quoting issues
+RUN printf '#!/bin/sh\nset -e\necho "🔄 Running database migrations..."\necho "DATABASE_URL: $DATABASE_URL"\nmkdir -p /app/node_modules/.prisma/client 2>/dev/null || true\nmkdir -p /app/node_modules/@prisma/engines 2>/dev/null || true\nif [ -f "prisma/migrations/migration_lock.toml" ]; then\n  LOCK_PROVIDER=$(grep -o "provider = \\"[^\\"]*\\"" prisma/migrations/migration_lock.toml | cut -d"\\"" -f2)\n  if [ "$LOCK_PROVIDER" != "postgresql" ]; then\n    echo "⚠️  Removing old SQLite migrations, will create new PostgreSQL migration..."\n    rm -rf prisma/migrations\n  fi\nfi\nif [ ! -d "prisma/migrations" ] || [ -z "$(ls -A prisma/migrations 2>/dev/null)" ]; then\n  echo "📝 Creating initial migration..."\n  npx prisma migrate dev --name init --create-only || echo "⚠️ Migration creation failed"\nfi\necho "📦 Deploying migrations..."\nnpx prisma migrate deploy && echo "✅ Migrations deployed successfully" || echo "⚠️ Migration deploy failed"\necho "✅ Migrations complete"\nif [ -n "$ADMIN_EMAIL" ] && [ -n "$ADMIN_PASSWORD" ]; then\n  echo "🌱 Seeding admin account with email: $ADMIN_EMAIL"\n  echo "Running seed script (JavaScript version)..."\n  node prisma/seed.js 2>&1\n  SEED_EXIT_CODE=$?\n  if [ $SEED_EXIT_CODE -eq 0 ]; then\n    echo "✅ Admin account created/updated successfully"\n  else\n    echo "⚠️ Seed script exited with code: $SEED_EXIT_CODE"\n  fi\nelse\n  echo "⚠️ ADMIN_EMAIL or ADMIN_PASSWORD not set - skipping seed"\nfi\necho "🚀 Starting Next.js server..."\nexec node server.js\n' > /app/start.sh && \
     chmod +x /app/start.sh && \
     chown nextjs:nodejs /app/start.sh
 

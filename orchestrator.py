@@ -2208,6 +2208,78 @@ class RAGOrchestrator:
         except Exception as e:
             logger.warning(f"Failed to load config: {e}")
         return {}
+    
+    def _preprocess_long_query(self, query: str, max_length: int = 500) -> str:
+        """
+        Preprocess long queries by extracting key information.
+        For error messages, extracts error codes and key error text.
+        For other long queries, intelligently truncates while keeping important parts.
+        """
+        # If query is short enough, return as-is
+        if len(query) <= max_length:
+            return query
+        
+        # Check if this looks like an error message
+        error_indicators = ['error', 'Error', 'ERROR', 'failed', 'Failed', 'FAILED', 
+                          'RESULT_', '0x', 'exception', 'Exception', 'EXCEPTION']
+        is_error_message = any(indicator in query for indicator in error_indicators)
+        
+        if is_error_message:
+            # Extract key parts from error messages
+            key_parts = []
+            
+            # Extract error codes (hex codes, RESULT_ codes, etc.)
+            import re
+            error_codes = re.findall(r'(RESULT_\w+|0x[0-9a-fA-F]+|\w+_ERR)', query)
+            if error_codes:
+                key_parts.extend(error_codes)
+            
+            # Extract error messages (text after "error", "failed", etc.)
+            error_patterns = [
+                r'error[:\s]+([^.\n]+)',
+                r'failed[:\s]+([^.\n]+)',
+                r'Error[:\s]+([^.\n]+)',
+                r'Failed[:\s]+([^.\n]+)',
+            ]
+            for pattern in error_patterns:
+                matches = re.findall(pattern, query, re.IGNORECASE)
+                key_parts.extend(matches)
+            
+            # Extract key technical terms (uppercase words, technical terms)
+            technical_terms = re.findall(r'\b[A-Z][A-Z0-9_]+\b', query)
+            key_parts.extend(technical_terms[:5])  # Limit to 5 most important
+            
+            # Extract first and last sentences (often contain context)
+            sentences = re.split(r'[.!?]\s+', query)
+            if sentences:
+                key_parts.append(sentences[0])  # First sentence
+                if len(sentences) > 1:
+                    key_parts.append(sentences[-1])  # Last sentence
+            
+            # Combine key parts
+            if key_parts:
+                processed = ' '.join(set(key_parts))  # Remove duplicates
+                # If still too long, truncate intelligently
+                if len(processed) > max_length:
+                    # Keep error codes and first part
+                    processed = ' '.join(key_parts[:3])[:max_length]
+                return processed
+        
+        # For non-error long queries, keep first part and key terms
+        # Extract first sentence and important keywords
+        sentences = query.split('.')
+        first_part = sentences[0] if sentences else query[:200]
+        
+        # Extract important keywords (longer words, technical terms)
+        words = query.split()
+        important_words = [w for w in words if len(w) > 6 or w[0].isupper()][:10]
+        
+        # Combine
+        processed = f"{first_part} {' '.join(important_words)}"
+        if len(processed) > max_length:
+            processed = processed[:max_length]
+        
+        return processed.strip()
 
     def _load_glossary_index(self):
         try:
@@ -2399,7 +2471,14 @@ class RAGOrchestrator:
         """
         
         start_time = time.time()
-        logger.info(f"🎯 Orchestrating query: {query}")
+        
+        # Preprocess long queries - extract key information and truncate if needed
+        original_query = query
+        query = self._preprocess_long_query(query)
+        if query != original_query:
+            logger.info(f"📝 Preprocessed long query ({len(original_query)} -> {len(query)} chars)")
+        
+        logger.info(f"🎯 Orchestrating query: {query[:200]}{'...' if len(query) > 200 else ''}")
 
         # ------------------------------------------------------------------
         # ⚡ User-validated cache: serve instantly if previously marked helpful

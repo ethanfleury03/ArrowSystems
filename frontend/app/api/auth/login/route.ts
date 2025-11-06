@@ -21,6 +21,7 @@ export async function POST(request: NextRequest) {
     });
 
     if (!user) {
+      console.error(`Login failed: User not found for email: ${email}`);
       return NextResponse.json(
         { error: 'Invalid email or password' },
         { status: 401 }
@@ -30,6 +31,7 @@ export async function POST(request: NextRequest) {
     // Verify password
     const isValid = await verifyPassword(password, user.passwordHash);
     if (!isValid) {
+      console.error(`Login failed: Invalid password for user: ${email}`);
       return NextResponse.json(
         { error: 'Invalid email or password' },
         { status: 401 }
@@ -42,11 +44,13 @@ export async function POST(request: NextRequest) {
       { status: 200 }
     );
     
-    return await setLoginSession(user.id, request, response);
+    const sessionResponse = await setLoginSession(user.id, request, response);
+    console.log(`Login successful for user: ${email}`);
+    return sessionResponse;
   } catch (error) {
     console.error('Login error:', error);
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { error: 'Internal server error', details: error instanceof Error ? error.message : 'Unknown error' },
       { status: 500 }
     );
   }

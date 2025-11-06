@@ -1,4 +1,3 @@
-import { getIronSession } from 'iron-session';
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcrypt';
@@ -32,40 +31,56 @@ export async function verifyPassword(plainPassword: string, hash: string): Promi
 
 // Session helpers for Next.js App Router
 export async function getSession(req?: NextRequest, res?: NextResponse): Promise<SessionData> {
-  if (req && res) {
-    // For API routes
-    return getIronSession<SessionData>(req, res, sessionOptions);
+  let sessionCookie: string | undefined;
+  
+  if (req) {
+    // For API routes - get cookie from request
+    sessionCookie = req.cookies.get(sessionOptions.cookieName)?.value;
   } else {
-    // For server components - parse cookie directly
+    // For server components - get cookie from cookies()
     const cookieStore = await cookies();
-    const sessionCookie = cookieStore.get(sessionOptions.cookieName);
-    
-    if (!sessionCookie) {
-      return {};
-    }
-    
-    try {
-      const session = await unsealData(sessionCookie.value, {
-        password: sessionOptions.password,
-      });
-      return session as SessionData;
-    } catch (error) {
-      console.error('Error parsing session:', error);
-      return {};
-    }
+    sessionCookie = cookieStore.get(sessionOptions.cookieName)?.value;
+  }
+  
+  if (!sessionCookie) {
+    return {};
+  }
+  
+  try {
+    const session = await unsealData(sessionCookie, {
+      password: sessionOptions.password,
+    });
+    return session as SessionData;
+  } catch (error) {
+    console.error('Error parsing session:', error);
+    return {};
   }
 }
 
 export async function setLoginSession(userId: string, req: NextRequest, res: NextResponse): Promise<NextResponse> {
-  const session = await getIronSession<SessionData>(req, res, sessionOptions);
-  session.userId = userId;
-  await session.save();
+  const session: SessionData = { userId };
+  
+  // Seal the session data with iron-session compatible options
+  const sealed = await sealData(session, {
+    password: sessionOptions.password,
+    ttl: sessionOptions.cookieOptions.maxAge,
+  });
+  
+  // Set the cookie with proper options
+  res.cookies.set(sessionOptions.cookieName, sealed, {
+    httpOnly: sessionOptions.cookieOptions.httpOnly,
+    secure: sessionOptions.cookieOptions.secure,
+    sameSite: sessionOptions.cookieOptions.sameSite,
+    maxAge: sessionOptions.cookieOptions.maxAge,
+    path: '/',
+  });
+  
   return res;
 }
 
 export async function logout(req: NextRequest, res: NextResponse): Promise<NextResponse> {
-  const session = await getIronSession<SessionData>(req, res, sessionOptions);
-  session.destroy();
+  // Delete the session cookie
+  res.cookies.delete(sessionOptions.cookieName);
   return res;
 }
 

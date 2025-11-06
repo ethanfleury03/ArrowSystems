@@ -73,7 +73,8 @@
     "prisma": "^5.20.0",
     "@prisma/client": "^5.20.0",
     "bcrypt": "^5.1.1",
-    "iron-session": "^8.0.1"
+    "iron-session": "^8.0.1",
+    "sharp": "^0.33.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.9",

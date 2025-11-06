@@ -101,14 +101,27 @@ ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
 ENV HF_DATASETS_CACHE=/app/.cache/huggingface
 ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
 
-# Copy application code (without chown yet - we'll preload first)
-COPY . .
-
 # Create necessary directories including cache directory for HuggingFace
+# Do this before copying code so it's cached separately
 RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/huggingface
+
+# Create startup scripts before copying code (they don't depend on code files at build time)
+# This allows these steps to be cached separately from code changes
+# Using RUN heredoc instead of COPY heredoc for better compatibility
+# Note: Single quotes around 'EOF' prevent variable expansion at build time
+# BUILD_ENV will be evaluated at runtime via ENV variable
+RUN printf '#!/bin/bash\nset -e\n\n# Load .env file if it exists\nif [ -f ".env" ]; then\n    echo "📋 Loading environment variables from .env file..."\n    set -a\n    # Use a while loop to load .env and strip carriage returns\n    while IFS= read -r line || [ -n "$line" ]; do\n        # Skip empty lines and comments\n        if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then\n            continue\n        fi\n        # Strip carriage returns and export\n        export "$(echo "$line" | tr -d '\''\r'\'')"\n    done < .env\n    set +a\n    echo "✅ Environment variables loaded"\nfi\n\necho "=========================================="\nif [ "$BUILD_ENV" = "development" ]; then\n    echo "🔧 DuraFlex Technical Assistant (DEV)"\nelse\n    echo "🔧 DuraFlex Technical Assistant"\nfi\necho "=========================================="\necho ""\necho "✅ RAG models preloaded - ready to use instantly!"\necho ""\n\n# Check if index exists\nif [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then\n    echo "✅ RAG index found in latest_model/"\n    echo "   📊 Indexed chunks: $(python -c '\''import json; print(len(json.load(open("latest_model/docstore.json"))["docstore/data"]))'\'' 2>/dev/null || echo '\''unknown'\'')"\n    echo ""\nelse\n    echo "⚠️  RAG Index Not Found! Running ingestion..."\n    python ingest.py\n    echo "✅ Ingestion complete!"\nfi\n\necho "🚀 Starting FastAPI backend server..."\necho ""\necho "API will be available at: http://localhost:8000"\necho "API docs available at: http://localhost:8000/docs"\necho ""\necho "⚠️  Note: This container runs the backend API only."\necho "   Use docker-compose.yml to run both backend and frontend together."\necho ""\n\n# Start FastAPI with environment-specific settings\nif [ "$BUILD_ENV" = "development" ]; then\n    # Development: Enable auto-reload\n    exec python api.py --host 0.0.0.0 --port 8000 --reload\nelse\n    # Production: Optimized settings\n    exec python api.py --host 0.0.0.0 --port 8000\nfi\n' > /app/start.sh && chmod +x /app/start.sh
+
+# Create health check script
+RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && chmod +x /app/healthcheck.sh
+
+# Now copy application code (this is the frequently changing part)
+# By doing this last, code changes won't invalidate the cache for directories and scripts above
+COPY . .
 
 # Preload the RAG index during build (if it exists) to warm up the cache
 # This makes index loading instant on container startup
+# Note: This step needs the application code, so it must come after COPY . .
 RUN echo "🔄 Preloading RAG index..." && \
     if [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then \
         python -c " \
@@ -144,15 +157,6 @@ RUN chown -R appuser:appuser /app && \
 
 # Switch to non-root user
 USER appuser
-
-# Create startup script that adapts to environment
-# Using RUN heredoc instead of COPY heredoc for better compatibility
-# Note: Single quotes around 'EOF' prevent variable expansion at build time
-# BUILD_ENV will be evaluated at runtime via ENV variable
-RUN printf '#!/bin/bash\nset -e\n\n# Load .env file if it exists\nif [ -f ".env" ]; then\n    echo "📋 Loading environment variables from .env file..."\n    set -a\n    # Use a while loop to load .env and strip carriage returns\n    while IFS= read -r line || [ -n "$line" ]; do\n        # Skip empty lines and comments\n        if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then\n            continue\n        fi\n        # Strip carriage returns and export\n        export "$(echo "$line" | tr -d '\''\r'\'')"\n    done < .env\n    set +a\n    echo "✅ Environment variables loaded"\nfi\n\necho "=========================================="\nif [ "$BUILD_ENV" = "development" ]; then\n    echo "🔧 DuraFlex Technical Assistant (DEV)"\nelse\n    echo "🔧 DuraFlex Technical Assistant"\nfi\necho "=========================================="\necho ""\necho "✅ RAG models preloaded - ready to use instantly!"\necho ""\n\n# Check if index exists\nif [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then\n    echo "✅ RAG index found in latest_model/"\n    echo "   📊 Indexed chunks: $(python -c '\''import json; print(len(json.load(open("latest_model/docstore.json"))["docstore/data"]))'\'' 2>/dev/null || echo '\''unknown'\'')"\n    echo ""\nelse\n    echo "⚠️  RAG Index Not Found! Running ingestion..."\n    python ingest.py\n    echo "✅ Ingestion complete!"\nfi\n\necho "🚀 Starting FastAPI backend server..."\necho ""\necho "API will be available at: http://localhost:8000"\necho "API docs available at: http://localhost:8000/docs"\necho ""\necho "⚠️  Note: This container runs the backend API only."\necho "   Use docker-compose.yml to run both backend and frontend together."\necho ""\n\n# Start FastAPI with environment-specific settings\nif [ "$BUILD_ENV" = "development" ]; then\n    # Development: Enable auto-reload\n    exec python api.py --host 0.0.0.0 --port 8000 --reload\nelse\n    # Production: Optimized settings\n    exec python api.py --host 0.0.0.0 --port 8000\nfi\n' > /app/start.sh && chmod +x /app/start.sh
-
-# Create health check script
-RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && chmod +x /app/healthcheck.sh
 
 EXPOSE 8000
 
