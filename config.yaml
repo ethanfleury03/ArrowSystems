@@ -61,3 +61,14 @@ cache:
     enabled: true
     threshold: 0.90   # Lower threshold to favor paraphrase hits
     max_size: 500
+
+# Claude Semantic Rewriting Configuration (Optional)
+# Uses Claude API to improve text clarity before embedding
+claude_rewriting:
+  enabled: false              # Set to true to enable Claude rewriting
+  model: "claude-3-5-sonnet-20241022"  # Claude model to use
+  api_key: null              # Leave null to use ANTHROPIC_API_KEY env var
+  max_retries: 2             # Retry attempts per chunk
+  timeout: 30                # Request timeout in seconds
+  # Note: Structured content (tables, code, lists) is automatically preserved
+  # Only regular text chunks are rewritten for improved semantic clarity
