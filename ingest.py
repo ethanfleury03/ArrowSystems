@@ -41,6 +41,14 @@ import qdrant_client
 import shutil
 import tarfile
 
+# Try to import Anthropic (optional dependency)
+try:
+    from anthropic import Anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    logger.warning("Anthropic package not available. Claude rewriting will be disabled.")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -458,6 +466,216 @@ class TextPreprocessor:
         return False, ""
 
 
+class ClaudeSemanticRewriter:
+    """
+    Uses Claude API to semantically rewrite text chunks for improved clarity
+    while preserving technical meaning and structured content.
+    """
+    
+    def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-5-sonnet-20241022", 
+                 enabled: bool = False, max_retries: int = 2, timeout: int = 30):
+        """
+        Initialize Claude semantic rewriter.
+        
+        Args:
+            api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+            model: Claude model to use (default: claude-3-5-sonnet-20241022)
+            enabled: Whether rewriting is enabled (default: False)
+            max_retries: Maximum retry attempts per chunk
+            timeout: Request timeout in seconds
+        """
+        self.enabled = enabled and ANTHROPIC_AVAILABLE
+        self.model = model
+        self.max_retries = max_retries
+        self.timeout = timeout
+        self.client = None
+        
+        if self.enabled:
+            api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
+            if not api_key:
+                logger.warning("⚠️ Claude rewriting enabled but ANTHROPIC_API_KEY not found. Disabling rewriting.")
+                self.enabled = False
+            else:
+                try:
+                    self.client = Anthropic(api_key=api_key, timeout=timeout)
+                    logger.info(f"✅ Claude semantic rewriter initialized (model: {model})")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to initialize Claude client: {e}. Disabling rewriting.")
+                    self.enabled = False
+    
+    def _is_structured_content(self, text: str, metadata: dict) -> bool:
+        """
+        Check if content is structured (table, code, list) that should be preserved as-is.
+        """
+        content_type = metadata.get("content_type", "text")
+        
+        # Don't rewrite tables, images, or captions
+        if content_type in ["table", "image", "figure_caption"]:
+            return True
+        
+        # Check for code blocks
+        if '```' in text or '`' in text:
+            return True
+        
+        # Check for markdown tables
+        if text.count('|') >= 6 and re.search(r'\|[^\|]+\|', text):
+            return True
+        
+        # Check for dense lists (many bullets/numbers)
+        lines = text.split('\n')
+        list_lines = sum(1 for line in lines if re.match(r'^\s*[-*•\d]', line))
+        if list_lines >= len(lines) * 0.5:  # 50% or more are list items
+            return True
+        
+        return False
+    
+    def _create_rewrite_prompt(self, text: str, metadata: dict) -> str:
+        """Create prompt for Claude to rewrite the text."""
+        content_type = metadata.get("content_type", "text")
+        file_name = metadata.get("file_name", "document")
+        
+        prompt = f"""Rewrite the following technical documentation text to improve semantic clarity while preserving all technical meaning and accuracy.
+
+**Requirements:**
+1. Keep all technical terms, specifications, and measurements exactly as written
+2. Remove minor redundancies, filler phrases, and ambiguous wording
+3. Improve sentence flow and clarity
+4. Preserve all structured content (tables, lists, code blocks) exactly as-is
+5. Maintain the same level of technical detail
+6. Do not add new information or remove important details
+7. Output ONLY the rewritten text, no explanations or markdown formatting
+
+**Source:** {file_name}
+**Content Type:** {content_type}
+
+**Original Text:**
+{text}
+
+**Rewritten Text:**"""
+        
+        return prompt
+    
+    def rewrite_chunk(self, node: TextNode) -> Tuple[TextNode, bool]:
+        """
+        Rewrite a single chunk using Claude API.
+        
+        Args:
+            node: TextNode to rewrite
+            
+        Returns:
+            Tuple of (rewritten_node, was_rewritten: bool)
+        """
+        if not self.enabled or not self.client:
+            return node, False
+        
+        # Skip structured content
+        if self._is_structured_content(node.text, node.metadata):
+            logger.debug(f"Skipping structured content rewrite: {node.metadata.get('file_name', 'unknown')}")
+            return node, False
+        
+        # Skip very short chunks (not worth API call)
+        if len(node.text.strip()) < 100:
+            return node, False
+        
+        # Create prompt
+        prompt = self._create_rewrite_prompt(node.text, node.metadata)
+        
+        # Call Claude API with retries
+        for attempt in range(self.max_retries):
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    temperature=0.1,  # Low temperature for consistency
+                    messages=[{
+                        "role": "user",
+                        "content": prompt
+                    }]
+                )
+                
+                # Extract rewritten text
+                rewritten_text = response.content[0].text.strip()
+                
+                # Validate: rewritten text should not be empty and should be reasonable length
+                if not rewritten_text or len(rewritten_text) < len(node.text) * 0.5:
+                    logger.warning(f"Claude rewrite too short or empty, using original. Chunk: {node.metadata.get('file_name', 'unknown')}")
+                    return node, False
+                
+                # Create new node with rewritten text but same metadata
+                rewritten_node = TextNode(
+                    text=rewritten_text,
+                    metadata=node.metadata.copy()  # Preserve all metadata
+                )
+                
+                logger.debug(f"Successfully rewritten chunk from {node.metadata.get('file_name', 'unknown')}")
+                return rewritten_node, True
+                
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    logger.warning(f"Claude rewrite attempt {attempt + 1} failed, retrying: {e}")
+                    time.sleep(1)  # Brief delay before retry
+                else:
+                    logger.warning(f"Claude rewrite failed after {self.max_retries} attempts, using original: {e}")
+                    return node, False
+        
+        return node, False
+    
+    def rewrite_nodes(self, nodes: List[TextNode], show_progress: bool = True) -> Tuple[List[TextNode], Dict[str, int]]:
+        """
+        Rewrite a list of TextNodes using Claude API.
+        
+        Args:
+            nodes: List of TextNode objects to rewrite
+            show_progress: Whether to show progress bar
+            
+        Returns:
+            Tuple of (rewritten_nodes, stats_dict)
+        """
+        if not self.enabled:
+            logger.info("Claude rewriting is disabled, skipping rewrite step")
+            return nodes, {"rewritten": 0, "skipped": len(nodes), "failed": 0, "structured": 0}
+        
+        logger.info(f"🔄 Starting Claude semantic rewriting for {len(nodes)} chunks...")
+        
+        rewritten_nodes = []
+        stats = {
+            "rewritten": 0,
+            "skipped": 0,
+            "failed": 0,
+            "structured": 0
+        }
+        
+        # Process nodes with progress bar
+        iterator = tqdm(nodes, desc="   Rewriting chunks", disable=not show_progress) if show_progress else nodes
+        
+        for node in iterator:
+            # Check if structured content
+            if self._is_structured_content(node.text, node.metadata):
+                rewritten_nodes.append(node)
+                stats["structured"] += 1
+                continue
+            
+            # Rewrite the chunk
+            rewritten_node, was_rewritten = self.rewrite_chunk(node)
+            rewritten_nodes.append(rewritten_node)
+            
+            if was_rewritten:
+                stats["rewritten"] += 1
+            else:
+                # Determine why it wasn't rewritten
+                if not self.enabled:
+                    stats["skipped"] += 1
+                elif len(node.text.strip()) < 100:
+                    stats["skipped"] += 1
+                else:
+                    stats["failed"] += 1
+        
+        logger.info(f"✅ Claude rewriting complete: {stats['rewritten']} rewritten, {stats['structured']} structured (preserved), "
+                   f"{stats['skipped']} skipped, {stats['failed']} failed")
+        
+        return rewritten_nodes, stats
+
+
 class SmartChunkSplitter:
     """
     Wrapper around SentenceSplitter that preserves structured content like tables,
@@ -823,6 +1041,16 @@ class TechnicalRAGPipeline:
         self.text_preprocessor = TextPreprocessor()
         self.config = self._load_config(config_path)
         
+        # Initialize Claude semantic rewriter (optional)
+        claude_config = self.config.get("claude_rewriting", {})
+        self.claude_rewriter = ClaudeSemanticRewriter(
+            api_key=claude_config.get("api_key"),
+            model=claude_config.get("model", "claude-3-5-sonnet-20241022"),
+            enabled=claude_config.get("enabled", False),
+            max_retries=claude_config.get("max_retries", 2),
+            timeout=claude_config.get("timeout", 30)
+        )
+        
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from YAML file or use defaults."""
         default_config = {
@@ -1146,13 +1374,13 @@ class TechnicalRAGPipeline:
         print("="*70)
         
         # Step 1: Load Documents
-        print("\n[Step 1/6] 📄 Loading PDF documents...")
+        print("\n[Step 1/7] 📄 Loading PDF documents...")
         documents = SimpleDirectoryReader(data_dir).load_data()
         print(f"   ✅ Loaded {len(documents)} PDF documents")
         logger.info(f"Loaded {len(documents)} text documents")
         
         # Step 2: Enhanced AI-Powered Preprocessing
-        print("\n[Step 2/6] 🧹 Enhanced preprocessing (TOC removal, artifact fixing, normalization)...")
+        print("\n[Step 2/7] 🧹 Enhanced preprocessing (TOC removal, artifact fixing, normalization)...")
         preprocessed_docs = []
         skipped_pages = 0
         skip_reasons = {}
@@ -1190,19 +1418,19 @@ class TechnicalRAGPipeline:
         logger.info(f"Preprocessed {len(preprocessed_docs)} documents, skipped {skipped_pages} pages ({skip_summary})")
         
         # Step 3: Extract Non-Text Content
-        print("\n[Step 3/6] 🖼️  Extracting tables, images, and captions...")
+        print("\n[Step 3/7] 🖼️  Extracting tables, images, and captions...")
         print("   This may take a few minutes...")
         tables, images, captions = self.process_non_text_content(data_dir)
         print(f"   ✅ Extracted {len(tables)} tables, {len(images)} images, {len(captions)} captions")
         
         # Step 4: Create Non-Text Nodes
-        print("\n[Step 4/6] 📊 Creating searchable nodes from extracted content...")
+        print("\n[Step 4/7] 📊 Creating searchable nodes from extracted content...")
         non_text_nodes = self.create_non_text_nodes(tables, images, captions)
         print(f"   ✅ Created {len(non_text_nodes)} non-text nodes")
         logger.info(f"Created {len(non_text_nodes)} non-text nodes")
         
         # Step 5: Smart Chunking with Text Nodes
-        print("\n[Step 5/6] 🧠 Smart chunking and filtering...")
+        print("\n[Step 5/7] 🧠 Smart chunking and filtering...")
         chunk_size = self.config.get("chunking", {}).get("chunk_size", 350)
         chunk_overlap = self.config.get("chunking", {}).get("chunk_overlap", 88)
         
@@ -1246,8 +1474,28 @@ class TechnicalRAGPipeline:
         print(f"   ✅ Created {len(filtered_nodes)} text nodes ({skipped_nodes} filtered: {skip_summary_chunks})")
         logger.info(f"Created {len(filtered_nodes)} text nodes, filtered {skipped_nodes} nodes ({skip_summary_chunks})")
         
+        # Step 5.5: Optional Claude Semantic Rewriting
+        if self.claude_rewriter.enabled:
+            print("\n[Step 5.5/7] 🤖 Claude semantic rewriting (improving clarity while preserving meaning)...")
+            print("   - This step uses Claude API to enhance text clarity")
+            print("   - Structured content (tables, code, lists) will be preserved as-is")
+            print("   - Estimated time: 1-3 minutes per 100 chunks")
+            
+            rewritten_nodes, rewrite_stats = self.claude_rewriter.rewrite_nodes(filtered_nodes, show_progress=True)
+            
+            print(f"   ✅ Rewriting complete:")
+            print(f"      - Rewritten: {rewrite_stats['rewritten']} chunks")
+            print(f"      - Preserved (structured): {rewrite_stats['structured']} chunks")
+            print(f"      - Skipped: {rewrite_stats['skipped']} chunks")
+            print(f"      - Failed (using original): {rewrite_stats['failed']} chunks")
+            
+            # Use rewritten nodes for embedding
+            filtered_nodes = rewritten_nodes
+        else:
+            logger.debug("Claude rewriting disabled, skipping rewrite step")
+        
         # Step 6: Create Vector Embeddings (LONGEST STEP)
-        print("\n[Step 6/6] 🧠 Generating embeddings and building vector index...")
+        print("\n[Step 6/7] 🧠 Generating embeddings and building vector index...")
         print(f"   - Processing {len(filtered_nodes)} text nodes + {len(non_text_nodes)} non-text nodes...")
         print(f"   - This is the LONGEST step (embedding generation)")
         print(f"   - Expected time: 5-15 minutes on GPU, 30-60 minutes on CPU")
@@ -1315,6 +1563,8 @@ class TechnicalRAGPipeline:
         print(f"📊 Text nodes created: {len(filtered_nodes)} ({skipped_nodes} filtered)")
         print(f"📊 Non-text nodes: {len(non_text_nodes)}")
         print(f"📊 Total nodes indexed: {len(all_nodes)}")
+        if self.claude_rewriter.enabled:
+            print(f"🤖 Claude rewriting: Enabled (check logs for rewrite statistics)")
         print(f"⏱️  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
         if not use_qdrant:
             print(f"📁 Storage location: {storage_dir}")
