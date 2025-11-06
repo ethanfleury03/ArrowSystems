@@ -36,8 +36,9 @@ export default function LoginPage() {
         return;
       }
 
-      // Redirect to account page on success
-      router.push('/account');
+      // Redirect to main chat interface on success
+      // Use window.location for full page reload to ensure middleware sees the cookie
+      window.location.href = '/';
     } catch (err) {
       setError('An error occurred. Please try again.');
       setLoading(false);

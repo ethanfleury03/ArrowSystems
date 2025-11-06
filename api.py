@@ -130,7 +130,7 @@ app.add_middleware(
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
     """Request model for query endpoint."""
-    query: str = Field(..., description="User query", min_length=1, max_length=1000)
+    query: str = Field(..., description="User query", min_length=1, max_length=5000)
     top_k: int = Field(10, description="Number of chunks to retrieve", ge=1, le=50)
     alpha: float = Field(0.5, description="Hybrid search weight (0=BM25 only, 1=dense only)", ge=0.0, le=1.0)
     metadata_filters: Optional[Dict[str, Any]] = Field(None, description="Optional metadata filters")

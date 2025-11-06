@@ -40,19 +40,24 @@ RUN python -c "import sys; lines = [l for l in open('requirements.txt') if not l
      (echo "Requirements install failed, retrying..." && \
       pip install --no-cache-dir --timeout=600 --default-timeout=600 -r requirements_no_torch.txt))
 
-# Copy application code
-COPY . .
-
-# Copy entrypoint script
-COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
-
-# Create cache directory structure before switching users
+# Create cache directory structure and user setup before copying code
+# This allows these steps to be cached separately from code changes
 RUN mkdir -p /app/.cache/huggingface/hub
 
 # Create non-root user for security
-RUN useradd --create-home --shell /bin/bash app && \
-    chown -R app:app /app
+RUN useradd --create-home --shell /bin/bash app
+
+# Copy entrypoint script (if it exists separately, otherwise it will be in COPY . .)
+# Copy it before the full code copy so it can be cached separately if it changes less frequently
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Now copy application code (this is the frequently changing part)
+# By doing this last, code changes won't invalidate the cache for dependencies, directories, and user setup above
+COPY . .
+
+# Set ownership after copying code
+RUN chown -R app:app /app
 # Don't switch to app user yet - entrypoint will do it after fixing permissions
 # USER app
 
