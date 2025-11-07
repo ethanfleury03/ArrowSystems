@@ -9,11 +9,15 @@ export interface SessionData {
 }
 
 // Session configuration
+// Secure flag: only true if explicitly set via env var AND we're on HTTPS
+// For local network access (IP addresses), allow HTTP cookies
 export const sessionOptions = {
   password: process.env.SESSION_SECRET || 'change-this-to-a-random-string-at-least-32-characters-long',
   cookieName: 'app_session',
   cookieOptions: {
-    secure: process.env.NODE_ENV === 'production',
+    // Only use secure cookies if explicitly enabled AND on HTTPS
+    // This allows local network access via IP address (HTTP)
+    secure: process.env.FORCE_SECURE_COOKIES === 'true',
     httpOnly: true,
     sameSite: 'lax' as const,
     maxAge: 60 * 60 * 24 * 7, // 7 days
@@ -66,10 +70,19 @@ export async function setLoginSession(userId: string, req: NextRequest, res: Nex
     ttl: sessionOptions.cookieOptions.maxAge,
   });
   
+  // Detect if request is HTTPS (for secure cookie flag)
+  const isHttps = req.url.startsWith('https://') || 
+                  req.headers.get('x-forwarded-proto') === 'https' ||
+                  req.headers.get('x-forwarded-ssl') === 'on';
+  
+  // Use secure flag only if explicitly enabled AND on HTTPS
+  // This allows local network access via IP address (HTTP)
+  const useSecure = process.env.FORCE_SECURE_COOKIES === 'true' && isHttps;
+  
   // Set the cookie with proper options
   res.cookies.set(sessionOptions.cookieName, sealed, {
     httpOnly: sessionOptions.cookieOptions.httpOnly,
-    secure: sessionOptions.cookieOptions.secure,
+    secure: useSecure,
     sameSite: sessionOptions.cookieOptions.sameSite,
     maxAge: sessionOptions.cookieOptions.maxAge,
     path: '/',

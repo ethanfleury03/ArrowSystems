@@ -24,6 +24,7 @@ services:
       - HF_HOME=/app/.cache/huggingface
     volumes:
       - ./latest_model:/app/latest_model:ro
+      - ./data:/app/data:ro
       - ./logs:/app/logs
       - ./storage:/app/storage
       - hf_cache:/app/.cache/huggingface

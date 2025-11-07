@@ -80,7 +80,8 @@ class RAGPipeline:
         top_k: int = 10,
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
-        dynamic_windowing: bool = True
+        dynamic_windowing: bool = True,
+        chat_history: Optional[List[Dict[str, str]]] = None
     ) -> StructuredResponse:
         """
         Execute RAG query with full orchestration.
@@ -103,7 +104,8 @@ class RAGPipeline:
             top_k=top_k,
             alpha=alpha,
             metadata_filters=metadata_filters,
-            dynamic_windowing=dynamic_windowing
+            dynamic_windowing=dynamic_windowing,
+            chat_history=chat_history
         )
     
     def format_response(self, response: StructuredResponse) -> str:

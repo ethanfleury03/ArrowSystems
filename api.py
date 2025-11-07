@@ -9,13 +9,17 @@ Version: 1.0.0
 Author: Arrow Systems Inc
 """
 
+from __future__ import annotations
+
 import os
 import logging
 import time
+import asyncio
+from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -38,6 +42,243 @@ logger = logging.getLogger(__name__)
 # Global variables for RAG pipeline and database
 rag_pipeline = None
 db_manager = None
+
+
+# =============================================================================
+# Session Manager for Chat History (Concurrency-Safe & Modular)
+# =============================================================================
+class ChatMessage:
+    """Represents a single chat message."""
+    def __init__(self, role: str, content: str, timestamp: float = None):
+        self.role = role  # "user" or "assistant"
+        self.content = content
+        self.timestamp = timestamp or time.time()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp
+        }
+
+
+class Trimmer(ABC):
+    """Abstract base class for message trimming strategies."""
+    
+    @abstractmethod
+    def trim(self, messages: List[ChatMessage]) -> List[ChatMessage]:
+        """
+        Trim messages according to the strategy.
+        
+        Args:
+            messages: List of messages to trim
+            
+        Returns:
+            Trimmed list of messages
+        """
+        pass
+
+
+class MessageCountTrimmer(Trimmer):
+    """Trims messages based on maximum count."""
+    
+    def __init__(self, max_messages: int):
+        self.max_messages = max_messages
+    
+    def trim(self, messages: List[ChatMessage]) -> List[ChatMessage]:
+        """Keep only the last max_messages."""
+        return messages[-self.max_messages:] if len(messages) > self.max_messages else messages
+
+
+class SessionStore(ABC):
+    """Abstract base class for session storage backends."""
+    
+    @abstractmethod
+    async def get_messages(self, session_id: str) -> List[ChatMessage]:
+        """Get all messages for a session."""
+        pass
+    
+    @abstractmethod
+    async def add_message(self, session_id: str, message: ChatMessage) -> None:
+        """Add a message to a session."""
+        pass
+    
+    @abstractmethod
+    async def clear_session(self, session_id: str) -> None:
+        """Clear all messages for a session."""
+        pass
+    
+    @abstractmethod
+    async def trim_session(self, session_id: str, trimmer: Trimmer) -> None:
+        """Trim messages in a session using the provided trimmer."""
+        pass
+
+
+class InMemorySessionStore(SessionStore):
+    """In-memory implementation of SessionStore."""
+    
+    def __init__(self, trimmer: Trimmer):
+        self._sessions: Dict[str, List[ChatMessage]] = {}
+        self._trimmer = trimmer
+    
+    async def get_messages(self, session_id: str) -> List[ChatMessage]:
+        """Get all messages for a session."""
+        return self._sessions.get(session_id, []).copy()
+    
+    async def add_message(self, session_id: str, message: ChatMessage) -> None:
+        """Add a message to a session."""
+        if session_id not in self._sessions:
+            self._sessions[session_id] = []
+        
+        self._sessions[session_id].append(message)
+        await self.trim_session(session_id, self._trimmer)
+    
+    async def clear_session(self, session_id: str) -> None:
+        """Clear all messages for a session."""
+        self._sessions.pop(session_id, None)
+    
+    async def trim_session(self, session_id: str, trimmer: Trimmer) -> None:
+        """Trim messages in a session using the provided trimmer."""
+        if session_id in self._sessions:
+            self._sessions[session_id] = trimmer.trim(self._sessions[session_id])
+
+
+class SessionManager:
+    """
+    Thread-safe session manager with per-session async locks.
+    Uses a pluggable SessionStore backend for modularity.
+    """
+    
+    def __init__(self, store: SessionStore, max_messages: int = 10):
+        self._store = store
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._locks_lock = asyncio.Lock()
+        self.max_messages = max_messages
+        logger.info(f"SessionManager initialized (max {max_messages} messages per session)")
+    
+    async def _get_lock(self, session_id: str) -> asyncio.Lock:
+        """Get or create a lock for a session."""
+        async with self._locks_lock:
+            if session_id not in self._locks:
+                self._locks[session_id] = asyncio.Lock()
+            return self._locks[session_id]
+    
+    async def add_message(self, session_id: str, role: str, content: str) -> None:
+        """Add a message to the session history (thread-safe)."""
+        if not session_id:
+            return
+        
+        lock = await self._get_lock(session_id)
+        async with lock:
+            message = ChatMessage(role=role, content=content)
+            await self._store.add_message(session_id, message)
+            messages = await self._store.get_messages(session_id)
+            logger.debug(f"Added {role} message to session {session_id} (total: {len(messages)})")
+    
+    async def get_history(self, session_id: str) -> List[Dict[str, Any]]:
+        """Get chat history for a session (thread-safe)."""
+        if not session_id:
+            return []
+        
+        lock = await self._get_lock(session_id)
+        async with lock:
+            messages = await self._store.get_messages(session_id)
+            return [msg.to_dict() for msg in messages]
+    
+    async def clear_session(self, session_id: str) -> None:
+        """Clear chat history for a session (thread-safe)."""
+        if not session_id:
+            return
+        
+        lock = await self._get_lock(session_id)
+        async with lock:
+            await self._store.clear_session(session_id)
+            # Clean up lock if session is cleared
+            async with self._locks_lock:
+                self._locks.pop(session_id, None)
+            logger.info(f"Cleared session {session_id}")
+    
+    async def get_conversation_messages(self, session_id: str) -> List[Dict[str, str]]:
+        """
+        Get conversation history in format suitable for Claude API (thread-safe).
+        Returns list of {"role": "user"|"assistant", "content": "..."}
+        """
+        history = await self.get_history(session_id)
+        return [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in history
+        ]
+
+
+# Global session manager instance
+_trimmer = MessageCountTrimmer(max_messages=10)
+_store = InMemorySessionStore(trimmer=_trimmer)
+session_manager = SessionManager(store=_store, max_messages=10)
+
+
+def _extract_document_sources(sources: List[Dict[str, Any]]) -> List[DocumentSource]:
+    """
+    Extract unique document sources with page numbers and snippets from retrieved sources.
+    
+    Args:
+        sources: List of source dictionaries from RAG response (includes snippets)
+        
+    Returns:
+        List of DocumentSource objects with doc_id, pages_used, and snippet
+    """
+    doc_map: Dict[str, Dict[str, Any]] = {}
+    
+    for source in sources:
+        doc_name = source.get('name', 'Unknown')
+        pages_str = source.get('pages', 'N/A')
+        snippet = source.get('snippet', '')
+        
+        # Parse page numbers from string like "3, 7, 12" or "N/A"
+        pages = []
+        if pages_str and pages_str != 'N/A':
+            # Split by comma and convert to integers
+            for page_str in pages_str.split(','):
+                page_str = page_str.strip()
+                try:
+                    page_num = int(page_str)
+                    pages.append(page_num)
+                except ValueError:
+                    # Skip non-numeric page labels
+                    continue
+        
+        # Use filename as doc_id (remove path if present)
+        doc_id = doc_name.split('/')[-1] if '/' in doc_name else doc_name
+        
+        # Initialize or update document entry
+        if doc_id not in doc_map:
+            doc_map[doc_id] = {
+                'pages': set(),
+                'snippets': []
+            }
+        
+        # Add pages to the document's set
+        doc_map[doc_id]['pages'].update(pages)
+        
+        # Collect snippets (keep first non-empty snippet, or best one)
+        if snippet and snippet not in doc_map[doc_id]['snippets']:
+            doc_map[doc_id]['snippets'].append(snippet)
+    
+    # Convert to DocumentSource objects with sorted page numbers and best snippet
+    document_sources = []
+    for doc_id, doc_data in doc_map.items():
+        pages_set = doc_data['pages']
+        snippets = doc_data['snippets']
+        
+        # Use first snippet (most relevant) or empty string
+        best_snippet = snippets[0] if snippets else ""
+        
+        document_sources.append(DocumentSource(
+            doc_id=doc_id,
+            pages_used=sorted(list(pages_set)) if pages_set else [],
+            snippet=best_snippet[:200]  # Ensure max 200 chars
+        ))
+    
+    return document_sources
 
 
 @asynccontextmanager
@@ -103,6 +344,9 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Failed to initialize RAG pipeline: {e}")
         raise
     
+    # Set startup time for uptime calculation
+    app.state.start_time = time.time()
+    
     yield
     
     # Shutdown
@@ -131,6 +375,7 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     """Request model for query endpoint."""
     query: str = Field(..., description="User query", min_length=1, max_length=5000)
+    session_id: Optional[str] = Field(None, description="Session ID for chat history (auto-generated if not provided)")
     top_k: int = Field(10, description="Number of chunks to retrieve", ge=1, le=50)
     alpha: float = Field(0.5, description="Hybrid search weight (0=BM25 only, 1=dense only)", ge=0.0, le=1.0)
     metadata_filters: Optional[Dict[str, Any]] = Field(None, description="Optional metadata filters")
@@ -145,16 +390,25 @@ class SourceInfo(BaseModel):
     content_type: str
 
 
+class DocumentSource(BaseModel):
+    """Document source with page numbers and snippet."""
+    doc_id: str  # File path or filename
+    pages_used: List[int]  # List of page numbers
+    snippet: str = ""  # Short extract/snippet (~200 chars) for quick relevance check
+
+
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
     query: str
     answer: str
     reasoning: str
     sources: List[SourceInfo]
+    document_sources: List[DocumentSource]  # Document provenance with page numbers
     confidence: float
     intent_type: str
     intent_confidence: float
     response_time_ms: int
+    session_id: Optional[str] = None
     cache_hit: bool = False
 
 
@@ -202,10 +456,11 @@ async def health_check():
 @app.post("/query", response_model=QueryResponse)
 async def query_knowledge_base(request: QueryRequest):
     """
-    Query the knowledge base using RAG pipeline.
+    Query the knowledge base using RAG pipeline with session-based chat memory.
     
     This endpoint accepts a query and returns a structured response with
-    answer, reasoning, sources, and metadata.
+    answer, reasoning, sources, and metadata. If session_id is provided,
+    chat history is maintained and included in the LLM context.
     """
     global rag_pipeline
     
@@ -218,16 +473,32 @@ async def query_knowledge_base(request: QueryRequest):
     try:
         start_time = time.time()
         
-        # Execute RAG query
+        # Generate or use provided session_id
+        session_id = request.session_id
+        if not session_id:
+            # Generate a simple session ID (in production, use proper UUID)
+            session_id = f"session_{int(time.time() * 1000)}"
+        
+        # Get chat history for this session (last 10 messages)
+        chat_history = await session_manager.get_conversation_messages(session_id)
+        logger.info(f"Session {session_id}: {len(chat_history)} previous messages")
+        
+        # Execute RAG query with chat history
+        # Note: Retrieval uses only current query, but LLM gets chat history
         response = rag_pipeline.query(
             query=request.query,
             top_k=request.top_k,
             alpha=request.alpha,
             metadata_filters=request.metadata_filters,
-            dynamic_windowing=request.dynamic_windowing
+            dynamic_windowing=request.dynamic_windowing,
+            chat_history=chat_history  # Pass chat history to pipeline
         )
         
         response_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Store messages in session history
+        await session_manager.add_message(session_id, "user", request.query)
+        await session_manager.add_message(session_id, "assistant", response.answer)
         
         # Convert sources to response format
         sources = [
@@ -239,6 +510,9 @@ async def query_knowledge_base(request: QueryRequest):
             )
             for source in response.sources
         ]
+        
+        # Extract document sources with page numbers for provenance
+        document_sources = _extract_document_sources(response.sources)
         
         # Save to database if available
         if db_manager:
@@ -252,7 +526,7 @@ async def query_knowledge_base(request: QueryRequest):
                     sources=[s['name'] for s in response.sources],
                     confidence=response.confidence,
                     response_time_ms=response_time_ms,
-                    session_id="api_session"  # Could be extracted from request
+                    session_id=session_id
                 )
                 logger.info(f"Query saved to database: {query_id}")
             except Exception as e:
@@ -263,10 +537,12 @@ async def query_knowledge_base(request: QueryRequest):
             answer=response.answer,
             reasoning=response.reasoning,
             sources=sources,
+            document_sources=document_sources,
             confidence=response.confidence,
             intent_type=response.intent.intent_type,
             intent_confidence=response.intent.confidence,
-            response_time_ms=response_time_ms
+            response_time_ms=response_time_ms,
+            session_id=session_id
         )
         
     except Exception as e:
@@ -397,6 +673,39 @@ async def get_chat_history(user: str = "api_user", limit: int = 50):
         )
 
 
+@app.post("/session/{session_id}/clear")
+async def clear_session(session_id: str):
+    """
+    Clear chat history for a specific session.
+    
+    Args:
+        session_id: Session ID to clear
+    """
+    await session_manager.clear_session(session_id)
+    return {
+        "status": "success",
+        "message": f"Session {session_id} cleared",
+        "session_id": session_id
+    }
+
+
+@app.get("/session/{session_id}/history")
+async def get_session_history(session_id: str):
+    """
+    Get chat history for a specific session.
+    
+    Args:
+        session_id: Session ID
+    """
+    history = await session_manager.get_history(session_id)
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "message_count": len(history),
+        "history": history
+    }
+
+
 @app.get("/cache/stats", response_model=CacheStatsResponse)
 async def get_cache_stats():
     """Get cache statistics."""
@@ -439,6 +748,65 @@ async def clear_caches():
             status_code=500,
             detail=f"Error clearing caches: {str(e)}"
         )
+
+
+@app.get("/documents/{filename:path}")
+async def serve_document(filename: str):
+    """
+    Serve PDF documents from the data directory.
+    
+    Args:
+        filename: PDF filename (e.g., "DuraFlex Installation Guide.pdf")
+    
+    Returns:
+        PDF file content
+    """
+    import os
+    from fastapi.responses import FileResponse
+    
+    # URL decode the filename (handles %20 for spaces, etc.)
+    import urllib.parse
+    filename = urllib.parse.unquote(filename)
+    
+    # Security: prevent directory traversal
+    filename = os.path.basename(filename)
+    
+    # Find the file in data directory
+    possible_paths = [
+        os.path.join("data", filename),
+        os.path.join("/app/data", filename),
+        os.path.join("../data", filename),
+        os.path.join("/workspace/data", filename),
+        os.path.join("/workspace/ArrowSystems/data", filename),
+        os.path.join("./data", filename)
+    ]
+    
+    file_path = None
+    for path in possible_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            file_path = path
+            logger.info(f"📄 Found document at: {file_path}")
+            break
+    
+    if not file_path:
+        logger.warning(f"⚠️ Document not found: '{filename}'. Searched paths: {possible_paths}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Document '{filename}' not found. Available files in data directory."
+        )
+    
+    # Verify it's a PDF
+    if not filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are supported"
+        )
+    
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=filename
+    )
 
 
 @app.get("/models/info")
@@ -501,11 +869,7 @@ async def internal_error_handler(request, exc):
     )
 
 
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    """Set startup time for uptime calculation."""
-    app.state.start_time = time.time()
+# Startup time is now set in lifespan handler above
 
 
 def main():

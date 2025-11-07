@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { ChatMessage } from "@/components/chat-message"
 import { Sidebar } from "@/components/sidebar"
-import { Send, Sparkles, Menu } from "lucide-react"
-import { sendQuery, getChatHistory, ChatHistoryItem } from "@/lib/api"
+import { DocumentsPanel } from "@/components/documents-panel"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Send, Sparkles, Menu, MessageSquare, FileText } from "lucide-react"
+import { sendQuery, getChatHistory, ChatHistoryItem, DocumentSource } from "@/lib/api"
 import { QuerySettings } from "@/components/sidebar"
 
 type Source = {
@@ -25,6 +27,7 @@ type Message = {
   content: string
   timestamp: Date
   sources?: Source[]
+  documentSources?: DocumentSource[]
 }
 
 export function ChatInterface() {
@@ -66,7 +69,7 @@ export function ChatInterface() {
 
     // Call RAG backend API
     try {
-      const answer = await sendQuery(userMessage.content, {
+      const response = await sendQuery(userMessage.content, {
         top_k: querySettingsRef.current.topK,
         alpha: querySettingsRef.current.alpha,
         dynamic_windowing: querySettingsRef.current.dynamicWindowing,
@@ -75,8 +78,9 @@ export function ChatInterface() {
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: answer,
+        content: response.answer,
         timestamp: new Date(),
+        documentSources: response.document_sources || [],
       }
       
       setMessages((prev) => [...prev, assistantMessage])
@@ -158,42 +162,76 @@ export function ChatInterface() {
           </div>
         </header>
 
-        {/* Messages Container */}
-        <div className="flex-1 overflow-y-auto relative z-10">
-          <div className="mx-auto max-w-4xl px-4 py-8">
-            {messages.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-6 text-center pt-12">
-                <div className="w-64 h-auto">
-                  <Image src="/asi-logo.png" alt="Arrow Systems Inc." width={256} height={256} className="w-full h-auto" />
-                </div>
-                <div className="space-y-2 mt-8">
-                  <h2 className="text-2xl font-semibold">How can I help you today?</h2>
-                  <p className="text-muted-foreground">Ask me anything about your knowledge base</p>
-                </div>
+        {/* Messages Container with Tabs */}
+        <div className="flex-1 overflow-hidden relative z-10">
+          {messages.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center gap-6 text-center pt-12">
+              <div className="w-64 h-auto">
+                <Image src="/asi-logo.png" alt="Arrow Systems Inc." width={256} height={256} className="w-full h-auto" />
               </div>
-            ) : (
-              <div className="space-y-6">
-                {messages.map((message) => (
-                  <ChatMessage key={message.id} message={message} />
-                ))}
-                {isLoading && (
-                  <div className="flex items-start gap-4">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent">
-                      <Sparkles className="h-4 w-4 text-accent-foreground" />
-                    </div>
-                    <div className="flex-1 space-y-2 pt-1">
-                      <div className="flex gap-1">
-                        <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.3s]"></div>
-                        <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.15s]"></div>
-                        <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground"></div>
+              <div className="space-y-2 mt-8">
+                <h2 className="text-2xl font-semibold">How can I help you today?</h2>
+                <p className="text-muted-foreground">Ask me anything about your knowledge base</p>
+              </div>
+            </div>
+          ) : (
+            <Tabs defaultValue="chat" className="flex h-full flex-col">
+              <div className="border-b border-border px-4">
+                <TabsList className="grid w-full max-w-4xl mx-auto grid-cols-2">
+                  <TabsTrigger value="chat" className="flex items-center gap-2">
+                    <MessageSquare className="h-4 w-4" />
+                    Chat
+                  </TabsTrigger>
+                  <TabsTrigger value="documents" className="flex items-center gap-2">
+                    <FileText className="h-4 w-4" />
+                    Documents
+                    {(() => {
+                      const lastMessage = messages[messages.length - 1]
+                      const docCount = lastMessage?.documentSources?.length || 0
+                      return docCount > 0 ? (
+                        <span className="ml-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                          {docCount}
+                        </span>
+                      ) : null
+                    })()}
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+              
+              <TabsContent value="chat" className="flex-1 overflow-y-auto m-0 mt-0">
+                <div className="mx-auto max-w-4xl px-4 py-8">
+                  <div className="space-y-6">
+                    {messages.map((message) => (
+                      <ChatMessage key={message.id} message={message} />
+                    ))}
+                    {isLoading && (
+                      <div className="flex items-start gap-4">
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent">
+                          <Sparkles className="h-4 w-4 text-accent-foreground" />
+                        </div>
+                        <div className="flex-1 space-y-2 pt-1">
+                          <div className="flex gap-1">
+                            <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.3s]"></div>
+                            <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.15s]"></div>
+                            <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground"></div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    )}
+                    <div ref={messagesEndRef} />
                   </div>
-                )}
-                <div ref={messagesEndRef} />
-              </div>
-            )}
-          </div>
+                </div>
+              </TabsContent>
+              
+              <TabsContent value="documents" className="flex-1 overflow-hidden m-0 mt-0">
+                {(() => {
+                  const lastMessage = messages[messages.length - 1]
+                  const documentSources = lastMessage?.documentSources || []
+                  return <DocumentsPanel documentSources={documentSources} />
+                })()}
+              </TabsContent>
+            </Tabs>
+          )}
         </div>
 
         {/* Input Area */}
