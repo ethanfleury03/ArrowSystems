@@ -40,12 +40,16 @@ export async function POST(request: NextRequest) {
 
     // Create response and set session
     const response = NextResponse.json(
-      { message: 'Login successful', userId: user.id },
+      { 
+        message: 'Login successful', 
+        userId: user.id,
+        role: user.role  // Include role for frontend redirect logic
+      },
       { status: 200 }
     );
     
     const sessionResponse = await setLoginSession(user.id, request, response);
-    console.log(`Login successful for user: ${email}`);
+    console.log(`Login successful for user: ${email} (role: ${user.role})`);
     return sessionResponse;
   } catch (error) {
     console.error('Login error:', error);

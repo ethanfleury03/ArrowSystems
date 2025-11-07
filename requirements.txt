@@ -41,6 +41,7 @@ sqlalchemy==2.0.25
 # FastAPI Backend
 # -----------------------------
 fastapi==0.120.0
+python-multipart
 uvicorn[standard]==0.38.0
 pydantic==2.12.3
 

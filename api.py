@@ -854,44 +854,100 @@ async def get_all_documents():
     try:
         from utils.document_metadata import get_document_metadata
         
-        index = rag_pipeline.orchestrator.index
-        if not index or not hasattr(index, 'docstore') or not index.docstore:
-            return {"documents": [], "total": 0}
-        
         documents = []
-        docstore = index.docstore
-        
-        # Get all documents from docstore
-        doc_ids = list(docstore.docs.keys())
         
         # Group chunks by document filename and count pages
+        # Primary source: corpus_nodes (most reliable)
         doc_chunks = {}
         doc_pages = {}
+        seen_filenames = set()
+        
         if hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
             retriever = rag_pipeline.orchestrator.retriever
             if hasattr(retriever, 'corpus_nodes') and retriever.corpus_nodes:
+                logger.info(f"Found {len(retriever.corpus_nodes)} nodes in corpus_nodes")
                 for node_wrapper in retriever.corpus_nodes:
-                    node = node_wrapper.node if isinstance(node_wrapper, type('', (), {'node': None})()) and hasattr(node_wrapper, 'node') else node_wrapper
+                    node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
                     if hasattr(node, 'metadata') and node.metadata:
                         filename = node.metadata.get('file_name', 'Unknown')
-                        if filename not in doc_chunks:
-                            doc_chunks[filename] = []
-                            doc_pages[filename] = set()
-                        doc_chunks[filename].append(node)
-                        # Track unique pages
-                        page_label = node.metadata.get('page_label')
-                        if page_label:
-                            try:
-                                page_num = int(str(page_label).split('.')[0])  # Get page number
-                                doc_pages[filename].add(page_num)
-                            except:
-                                pass
+                        if filename and filename != 'Unknown':
+                            seen_filenames.add(filename)
+                            if filename not in doc_chunks:
+                                doc_chunks[filename] = []
+                                doc_pages[filename] = set()
+                            doc_chunks[filename].append(node)
+                            # Track unique pages
+                            page_label = node.metadata.get('page_label')
+                            if page_label:
+                                try:
+                                    page_num = int(str(page_label).split('.')[0])  # Get page number
+                                    doc_pages[filename].add(page_num)
+                                except:
+                                    pass
+        
+        # Get document IDs from ALL sources (corpus_nodes, docstore, AND filesystem)
+        # Combine all sources to ensure we get all documents
+        doc_ids = []
+        docstore = None
+        all_filenames = set(seen_filenames)  # Start with corpus_nodes filenames
+        
+        # Source 1: Get from docstore
+        if rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'docstore') and rag_pipeline.orchestrator.index.docstore:
+            docstore = rag_pipeline.orchestrator.index.docstore
+            docstore_ids = list(docstore.docs.keys())
+            logger.info(f"Found {len(docstore_ids)} documents in docstore")
+            
+            # Extract filenames from docstore documents
+            for doc_id in docstore_ids[:1000]:  # Limit to prevent memory issues
+                try:
+                    doc = docstore.get_document(doc_id)
+                    if hasattr(doc, 'metadata') and doc.metadata:
+                        filename = doc.metadata.get('file_name', doc_id)
+                        if filename and filename != doc_id:
+                            all_filenames.add(filename)
+                except:
+                    pass
+        
+        # Source 2: Get from filesystem (most comprehensive)
+        logger.info("Scanning filesystem for documents...")
+        data_dir = "data"
+        if os.path.exists(data_dir):
+            for filename in os.listdir(data_dir):
+                if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+                    file_path = os.path.join(data_dir, filename)
+                    if os.path.isfile(file_path):
+                        all_filenames.add(filename)
+            logger.info(f"Found {len(all_filenames)} total unique documents across all sources")
+        
+        # Convert to list for processing
+        doc_ids = list(all_filenames)
+        
+        if seen_filenames:
+            logger.info(f"Found {len(seen_filenames)} documents via corpus_nodes")
+        if docstore:
+            logger.info(f"Found documents in docstore")
+        logger.info(f"Total unique documents: {len(doc_ids)}")
+        
+        if not doc_ids:
+            logger.warning("No documents found in corpus_nodes, docstore, or filesystem")
+            return {"documents": [], "total": 0}
         
         # Build document list
-        for doc_id in doc_ids[:1000]:  # Limit to first 1000
+        for filename in doc_ids[:1000]:  # Limit to first 1000
             try:
-                doc = docstore.get_document(doc_id)
-                filename = doc.metadata.get('file_name', doc_id) if hasattr(doc, 'metadata') else doc_id
+                # Try to get document from docstore if available
+                doc = None
+                if docstore:
+                    # Try to find doc_id that matches this filename
+                    for doc_id in docstore.docs.keys():
+                        try:
+                            temp_doc = docstore.get_document(doc_id)
+                            if hasattr(temp_doc, 'metadata') and temp_doc.metadata:
+                                if temp_doc.metadata.get('file_name') == filename:
+                                    doc = temp_doc
+                                    break
+                        except:
+                            continue
                 
                 # Get file path and size
                 file_path = os.path.join("data", filename)

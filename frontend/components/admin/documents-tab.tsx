@@ -1,15 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -28,7 +20,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Input } from '@/components/ui/input';
-import { Upload, Trash2, FileText, Edit, Power, PowerOff } from 'lucide-react';
+import { Upload, Trash2, FileText, Edit, Power, PowerOff, Eye } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import {
   Dialog,
@@ -40,6 +32,7 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 
 interface Document {
   filename: string;
@@ -74,11 +67,7 @@ export function DocumentsTab() {
   const [editingDoc, setEditingDoc] = useState<Document | null>(null);
   const { toast } = useToast();
 
-  useEffect(() => {
-    fetchDocuments();
-  }, []);
-
-  const fetchDocuments = async () => {
+  const fetchDocuments = useCallback(async () => {
     try {
       setLoading(true);
       const response = await fetch('/api/admin/documents');
@@ -94,7 +83,11 @@ export function DocumentsTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    fetchDocuments();
+  }, [fetchDocuments]);
 
   const handleDelete = async () => {
     if (!selectedDoc) return;
@@ -183,6 +176,62 @@ export function DocumentsTab() {
     }
   };
 
+  const handleToggleStatus = async (doc: Document) => {
+    try {
+      const response = await fetch(`/api/admin/documents/${encodeURIComponent(doc.filename)}/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: !doc.is_active }),
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to toggle document status');
+      }
+      
+      toast({
+        title: 'Success',
+        description: `Document ${doc.filename} ${!doc.is_active ? 'enabled' : 'disabled'}`,
+      });
+      
+      await fetchDocuments();
+    } catch (error: any) {
+      toast({
+        title: 'Error',
+        description: error.message || 'Failed to toggle document status',
+      });
+    }
+  };
+
+  const handleEditMetadata = async (updates: { machine_model?: string; category?: string; product_family?: string }) => {
+    if (!editingDoc) return;
+    
+    try {
+      const response = await fetch(`/api/admin/documents/${encodeURIComponent(editingDoc.filename)}/metadata`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to update metadata');
+      }
+      
+      toast({
+        title: 'Success',
+        description: `Metadata updated for ${editingDoc.filename}`,
+      });
+      
+      await fetchDocuments();
+    } catch (error: any) {
+      toast({
+        title: 'Error',
+        description: error.message || 'Failed to update metadata',
+      });
+    }
+  };
+
   const handleRowClick = async (doc: Document) => {
     setSelectedDoc(doc);
     try {
@@ -234,99 +283,83 @@ export function DocumentsTab() {
         <div className="text-center py-8">Loading documents...</div>
       ) : documents.length === 0 ? (
         <div className="text-center py-8 text-muted-foreground">
-          No documents found
+          No documents found. Upload a document to get started.
         </div>
       ) : (
-        <div className="border rounded-lg">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Filename</TableHead>
-                <TableHead>Machine Model</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Pages</TableHead>
-                <TableHead>Chunks</TableHead>
-                <TableHead>Last Ingestion</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {documents.map((doc) => (
-                <TableRow
-                  key={doc.filename}
-                  className="cursor-pointer hover:bg-muted/50"
-                  onClick={() => handleRowClick(doc)}
-                >
-                  <TableCell className="font-medium">
-                    <div className="flex items-center gap-2">
-                      <FileText className="h-4 w-4" />
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {documents.map((doc) => (
+            <Card key={doc.filename} className="flex flex-col">
+              <CardHeader>
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                    <CardTitle className="text-lg truncate" title={doc.filename}>
                       {doc.filename}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {doc.machine_model || '-'}
-                  </TableCell>
-                  <TableCell>
+                    </CardTitle>
+                  </div>
+                  <Badge variant={doc.is_active ? 'default' : 'secondary'} className="ml-2 flex-shrink-0">
+                    {doc.is_active ? 'Enabled' : 'Disabled'}
+                  </Badge>
+                </div>
+                {doc.machine_model && (
+                  <CardDescription className="mt-1">
+                    Machine: {doc.machine_model}
+                  </CardDescription>
+                )}
+              </CardHeader>
+              <CardContent className="flex-1">
+                <div className="space-y-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Type:</span>
                     <Badge variant="outline">{doc.file_type.toUpperCase()}</Badge>
-                  </TableCell>
-                  <TableCell>{doc.page_count}</TableCell>
-                  <TableCell>{doc.chunk_count}</TableCell>
-                  <TableCell>
-                    {doc.uploaded_date ? new Date(doc.uploaded_date).toLocaleDateString() : 'N/A'}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={doc.is_active ? 'default' : 'secondary'}>
-                      {doc.is_active ? 'Enabled' : 'Disabled'}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-2">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleToggleStatus(doc);
-                        }}
-                        title={doc.is_active ? 'Disable' : 'Enable'}
-                      >
-                        {doc.is_active ? (
-                          <PowerOff className="h-4 w-4" />
-                        ) : (
-                          <Power className="h-4 w-4" />
-                        )}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingDoc(doc);
-                          setEditDialogOpen(true);
-                        }}
-                        title="Edit Metadata"
-                      >
-                        <Edit className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedDoc(doc);
-                          setDeleteDialogOpen(true);
-                        }}
-                        title="Delete"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Pages:</span>
+                    <span className="font-medium">{doc.page_count}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Chunks:</span>
+                    <span className="font-medium">{doc.chunk_count}</span>
+                  </div>
+                  {doc.uploaded_date && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Last Ingestion:</span>
+                      <span className="font-medium text-xs">
+                        {new Date(doc.uploaded_date).toLocaleDateString()}
+                      </span>
                     </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                  )}
+                </div>
+              </CardContent>
+              <CardFooter className="flex gap-2 pt-4">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => {
+                    // Open PDF in new tab
+                    const encodedFilename = encodeURIComponent(doc.filename);
+                    window.open(`/api/documents/${encodedFilename}`, '_blank');
+                  }}
+                >
+                  <Eye className="h-4 w-4 mr-2" />
+                  View
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => {
+                    setSelectedDoc(doc);
+                    setDeleteDialogOpen(true);
+                  }}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
         </div>
       )}
 
@@ -335,7 +368,7 @@ export function DocumentsTab() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Document</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete "{selectedDoc?.filename}"? This action cannot be undone.
+              Are you sure you want to delete &quot;{selectedDoc?.filename}&quot;? This action cannot be undone.
               You will need to re-index after deletion.
             </AlertDialogDescription>
           </AlertDialogHeader>
