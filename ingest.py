@@ -33,6 +33,13 @@ from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageCon
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.schema import NodeWithScore, TextNode, ImageNode, Document
+
+# DOCX and Markdown support
+try:
+    from docx import Document as DocxDocument
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.storage.index_store import SimpleIndexStore
@@ -56,6 +63,10 @@ logger = logging.getLogger(__name__)
 # Suppress pypdf warnings for malformed PDFs
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pypdf._reader").setLevel(logging.ERROR)
+
+# Log DOCX availability after logger is initialized
+if not DOCX_AVAILABLE:
+    logger.warning("python-docx not available. DOCX support will be disabled.")
 
 
 class TextPreprocessor:
@@ -1029,6 +1040,231 @@ class NonTextExtractor:
         return captions
 
 
+class DocumentLoader:
+    """
+    Custom document loader that supports PDF, DOCX, and Markdown files.
+    Preserves document provenance with file_name and page_label/section metadata.
+    """
+    
+    def __init__(self, data_dir: str):
+        self.data_dir = Path(data_dir)
+        self.supported_extensions = {'.pdf', '.docx', '.md', '.markdown'}
+    
+    def load_documents(self) -> List[Document]:
+        """
+        Load all supported documents from data directory.
+        Returns list of Document objects with proper metadata.
+        """
+        documents = []
+        
+        # Get all supported files
+        all_files = []
+        for ext in self.supported_extensions:
+            all_files.extend(list(self.data_dir.glob(f"**/*{ext}")))
+        
+        logger.info(f"Found {len(all_files)} files to process")
+        
+        for file_path in tqdm(all_files, desc="Loading documents"):
+            try:
+                file_ext = file_path.suffix.lower()
+                file_name = file_path.name
+                
+                if file_ext == '.pdf':
+                    # Use SimpleDirectoryReader for PDFs (existing logic)
+                    pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
+                    documents.extend(pdf_docs)
+                    
+                elif file_ext == '.docx' and DOCX_AVAILABLE:
+                    docx_docs = self._load_docx(file_path)
+                    documents.extend(docx_docs)
+                    
+                elif file_ext in {'.md', '.markdown'}:
+                    md_docs = self._load_markdown(file_path)
+                    documents.extend(md_docs)
+                    
+            except Exception as e:
+                logger.error(f"Error loading {file_path}: {e}")
+                continue
+        
+        return documents
+    
+    def _load_docx(self, file_path: Path) -> List[Document]:
+        """
+        Load DOCX file and convert to Document objects with section/page metadata.
+        """
+        documents = []
+        
+        try:
+            doc = DocxDocument(str(file_path))
+            file_name = file_path.name
+            
+            # Extract text by paragraphs (for section tracking)
+            paragraphs = []
+            current_section = 1
+            section_text = []
+            
+            for para in doc.paragraphs:
+                text = para.text.strip()
+                if not text:
+                    continue
+                
+                # Detect section headers (bold, larger font, or specific patterns)
+                is_header = (
+                    para.style.name.startswith('Heading') or
+                    para.style.name.startswith('Title') or
+                    para.runs and any(run.bold for run in para.runs) or
+                    len(text) < 100 and text.isupper()
+                )
+                
+                if is_header and section_text:
+                    # Save previous section
+                    section_text_combined = '\n'.join(section_text)
+                    if section_text_combined.strip():
+                        doc_obj = Document(
+                            text=section_text_combined,
+                            metadata={
+                                'file_name': file_name,
+                                'page_label': str(current_section),  # Use section number as page_label
+                                'content_type': 'text',
+                                'file_type': 'docx',
+                                'section_number': current_section
+                            }
+                        )
+                        documents.append(doc_obj)
+                        current_section += 1
+                        section_text = []
+                
+                section_text.append(text)
+            
+            # Add final section
+            if section_text:
+                section_text_combined = '\n'.join(section_text)
+                if section_text_combined.strip():
+                    doc_obj = Document(
+                        text=section_text_combined,
+                        metadata={
+                            'file_name': file_name,
+                            'page_label': str(current_section),
+                            'content_type': 'text',
+                            'file_type': 'docx',
+                            'section_number': current_section
+                        }
+                    )
+                    documents.append(doc_obj)
+            
+            # If no sections detected, create single document
+            if not documents:
+                full_text = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
+                if full_text.strip():
+                    doc_obj = Document(
+                        text=full_text,
+                        metadata={
+                            'file_name': file_name,
+                            'page_label': '1',
+                            'content_type': 'text',
+                            'file_type': 'docx',
+                            'section_number': 1
+                        }
+                    )
+                    documents.append(doc_obj)
+            
+            logger.info(f"Loaded DOCX {file_name}: {len(documents)} sections")
+            
+        except Exception as e:
+            logger.error(f"Error loading DOCX {file_path}: {e}")
+        
+        return documents
+    
+    def _load_markdown(self, file_path: Path) -> List[Document]:
+        """
+        Load Markdown file and convert to Document objects with section metadata.
+        """
+        documents = []
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            file_name = file_path.name
+            
+            # Split by markdown headers (# Header, ## Header, etc.)
+            lines = content.split('\n')
+            sections = []
+            current_section = []
+            current_section_num = 1
+            
+            for line in lines:
+                # Check if line is a markdown header
+                is_header = False
+                header_level = 0
+                
+                if line.strip().startswith('#'):
+                    # Count # symbols
+                    header_level = len(line) - len(line.lstrip('#'))
+                    if header_level <= 3:  # Only treat h1-h3 as section breaks
+                        is_header = True
+                
+                if is_header and current_section:
+                    # Save previous section
+                    section_text = '\n'.join(current_section).strip()
+                    if section_text:
+                        sections.append({
+                            'text': section_text,
+                            'section_num': current_section_num,
+                            'header': line.strip()
+                        })
+                        current_section_num += 1
+                    current_section = []
+                
+                current_section.append(line)
+            
+            # Add final section
+            if current_section:
+                section_text = '\n'.join(current_section).strip()
+                if section_text:
+                    sections.append({
+                        'text': section_text,
+                        'section_num': current_section_num,
+                        'header': ''
+                    })
+            
+            # Create Document objects
+            for section in sections:
+                doc_obj = Document(
+                    text=section['text'],
+                    metadata={
+                        'file_name': file_name,
+                        'page_label': str(section['section_num']),  # Use section number as page_label
+                        'content_type': 'text',
+                        'file_type': 'markdown',
+                        'section_number': section['section_num'],
+                        'section_header': section['header']
+                    }
+                )
+                documents.append(doc_obj)
+            
+            # If no sections detected, create single document
+            if not documents and content.strip():
+                doc_obj = Document(
+                    text=content,
+                    metadata={
+                        'file_name': file_name,
+                        'page_label': '1',
+                        'content_type': 'text',
+                        'file_type': 'markdown',
+                        'section_number': 1
+                    }
+                )
+                documents.append(doc_obj)
+            
+            logger.info(f"Loaded Markdown {file_name}: {len(documents)} sections")
+            
+        except Exception as e:
+            logger.error(f"Error loading Markdown {file_path}: {e}")
+        
+        return documents
+
+
 class TechnicalRAGPipeline:
     """High-performance RAG pipeline optimized for technical documentation with non-text content support."""
     
@@ -1373,11 +1609,20 @@ class TechnicalRAGPipeline:
         print("📥 BUILDING NEW RAG INDEX")
         print("="*70)
         
-        # Step 1: Load Documents
-        print("\n[Step 1/7] 📄 Loading PDF documents...")
-        documents = SimpleDirectoryReader(data_dir).load_data()
-        print(f"   ✅ Loaded {len(documents)} PDF documents")
-        logger.info(f"Loaded {len(documents)} text documents")
+        # Step 1: Load Documents (PDF, DOCX, Markdown)
+        print("\n[Step 1/7] 📄 Loading documents (PDF, DOCX, Markdown)...")
+        loader = DocumentLoader(data_dir)
+        documents = loader.load_documents()
+        
+        # Count by file type
+        file_types = {}
+        for doc in documents:
+            file_type = doc.metadata.get('file_type', 'pdf')
+            file_types[file_type] = file_types.get(file_type, 0) + 1
+        
+        type_summary = ", ".join([f"{count} {ftype.upper()}" for ftype, count in file_types.items()])
+        print(f"   ✅ Loaded {len(documents)} document sections ({type_summary})")
+        logger.info(f"Loaded {len(documents)} documents: {type_summary}")
         
         # Step 2: Enhanced AI-Powered Preprocessing
         print("\n[Step 2/7] 🧹 Enhanced preprocessing (TOC removal, artifact fixing, normalization)...")

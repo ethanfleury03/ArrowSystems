@@ -15,6 +15,12 @@ const apiClient = axios.create({
   },
 });
 
+export interface DocumentSource {
+  doc_id: string;
+  pages_used: number[];
+  snippet?: string;  // Short extract/snippet (~200 chars) for quick relevance check
+}
+
 export interface QueryResponse {
   query: string;
   answer: string;
@@ -25,10 +31,12 @@ export interface QueryResponse {
     pages: string;
     content_type: string;
   }>;
+  document_sources?: DocumentSource[];
   confidence?: number;
   intent_type?: string;
   intent_confidence?: number;
   response_time_ms?: number;
+  session_id?: string;
   cache_hit?: boolean;
 }
 
@@ -38,7 +46,7 @@ export interface QueryParams {
   dynamic_windowing?: boolean;
 }
 
-export async function sendQuery(query: string, params?: QueryParams): Promise<string> {
+export async function sendQuery(query: string, params?: QueryParams): Promise<QueryResponse> {
   try {
     const response = await apiClient.post<QueryResponse>('/query', {
       query,
@@ -47,7 +55,7 @@ export async function sendQuery(query: string, params?: QueryParams): Promise<st
       dynamic_windowing: params?.dynamic_windowing ?? true,
     });
     
-    return response.data.answer;
+    return response.data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to get response';

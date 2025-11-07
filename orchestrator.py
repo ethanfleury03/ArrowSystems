@@ -401,6 +401,11 @@ class ClaudeIntentClassifier:
                     timeout=30.0  # 30 second timeout
                 )
             except Exception as test_error:
+                error_msg = str(test_error)
+                # Don't raise on overload errors - they're temporary
+                if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in type(test_error).__name__:
+                    logger.warning(f"Claude API temporarily overloaded (529) during test. Will use fallback.")
+                    raise  # Still raise to trigger fallback, but with cleaner message
                 logger.warning(f"Claude test request failed: {type(test_error).__name__}: {test_error}")
                 raise
             
@@ -412,9 +417,17 @@ class ClaudeIntentClassifier:
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
+            
+            # Handle overload errors more gracefully (less verbose)
+            if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in error_type:
+                logger.warning(f"⚠️ Claude API temporarily overloaded (529). Using fallback pattern-matching.")
+                self.claude_client = None
+                return
+            
+            # For other errors, log more details
             import traceback
-            logger.error(f"⚠️ Claude connection failed: {error_type}: {error_msg}")
-            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            logger.warning(f"⚠️ Claude connection failed: {error_type}: {error_msg[:200]}")
+            logger.debug(f"Full traceback:\n{traceback.format_exc()}")
             logger.warning("Using fallback pattern-matching.")
             self.claude_client = None
     
@@ -608,15 +621,44 @@ class HybridRetriever:
             self.bm25 = None
     
     def bm25_search(self, query: str, top_k: int = 20) -> List[Tuple[NodeWithScore, float]]:
-        """Perform BM25 keyword search."""
+        """
+        Perform BM25 keyword search with filename boosting.
+        Documents with matching filenames get significant score boost.
+        """
         if not self.bm25 or not self.corpus_nodes:
             return []
         
         # Tokenize query
         tokenized_query = query.lower().split()
+        query_lower = query.lower()
         
-        # Get BM25 scores
+        # Get BM25 scores from text content
         scores = self.bm25.get_scores(tokenized_query)
+        
+        # Boost scores for documents with matching filenames
+        # This is critical for queries like "system requirements" matching "System Requirements.pdf"
+        filename_boost_multiplier = 3.0  # Strong boost for filename matches
+        for idx, node_wrapper in enumerate(self.corpus_nodes):
+            # Get the actual node (handle both NodeWithScore and plain nodes)
+            node = node_wrapper.node if isinstance(node_wrapper, NodeWithScore) and hasattr(node_wrapper, 'node') else node_wrapper
+            
+            # Check filename match
+            filename = ""
+            if hasattr(node, 'metadata') and node.metadata:
+                filename = node.metadata.get('file_name', '')
+            elif hasattr(node_wrapper, 'metadata') and node_wrapper.metadata:
+                filename = node_wrapper.metadata.get('file_name', '')
+            
+            if filename:
+                filename_lower = filename.lower()
+                # Check if query terms appear in filename
+                query_words_in_filename = sum(1 for word in tokenized_query if word in filename_lower)
+                if query_words_in_filename > 0:
+                    # Boost score based on how many query words match
+                    match_ratio = query_words_in_filename / len(tokenized_query) if tokenized_query else 0
+                    # Strong boost: if filename contains most/all query words, multiply score significantly
+                    boost = 1.0 + (filename_boost_multiplier * match_ratio)
+                    scores[idx] *= boost
         
         # Get top-k indices
         top_indices = np.argsort(scores)[-top_k:][::-1]
@@ -681,6 +723,81 @@ class HybridRetriever:
             logger.error(f"Dense search failed: {e}", exc_info=True)
             return []
     
+    def _search_by_filename(self, query: str, top_k: int = 10) -> List[NodeWithScore]:
+        """
+        Direct filename-based search that queries the index for documents with matching filenames.
+        This is critical for queries like "system requirements" matching "System Requirements.pdf".
+        """
+        query_terms = [t.lower() for t in query.split() if len(t) > 2]  # Filter short words
+        if len(query_terms) < 2:
+            return []
+        
+        filename_matches = []
+        seen_filenames = set()
+        
+        try:
+            # Use retriever with very broad queries to get diverse documents
+            retriever = self.index.as_retriever(similarity_top_k=500)  # Get many results
+            
+            # Try multiple broad queries to get diverse documents
+            # Include the actual query terms to ensure we get relevant documents
+            broad_queries = query_terms[:3] + ["document", "manual", "guide", "system", "installation", "configuration", "requirements", "specification"]
+            all_nodes = []
+            seen_node_ids = set()
+            
+            for broad_query in broad_queries:
+                try:
+                    nodes = retriever.retrieve(broad_query)
+                    for node in nodes:
+                        # Avoid duplicates by node_id
+                        node_id = node.node_id if hasattr(node, 'node_id') else (node.node.node_id if isinstance(node, NodeWithScore) and hasattr(node, 'node') and hasattr(node.node, 'node_id') else str(id(node)))
+                        if node_id not in seen_node_ids:
+                            seen_node_ids.add(node_id)
+                            all_nodes.append(node)
+                except Exception as e:
+                    logger.debug(f"Broad query '{broad_query}' failed: {e}")
+                    continue
+            
+            # Group nodes by filename first
+            nodes_by_filename = {}
+            for node in all_nodes:
+                # Get filename from metadata
+                filename = ""
+                if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
+                    if hasattr(node.node, 'metadata') and node.node.metadata:
+                        filename = node.node.metadata.get('file_name', '') or node.node.metadata.get('filename', '')
+                elif hasattr(node, 'metadata') and node.metadata:
+                    filename = node.metadata.get('file_name', '') or node.metadata.get('filename', '')
+                
+                if filename:
+                    if filename not in nodes_by_filename:
+                        nodes_by_filename[filename] = []
+                    nodes_by_filename[filename].append(node)
+            
+            # Now check which filenames match the query
+            for filename, nodes in nodes_by_filename.items():
+                filename_lower = filename.lower()
+                matching_terms = sum(1 for term in query_terms if term in filename_lower)
+                
+                if matching_terms >= 2:  # At least 2 terms match
+                    logger.info(f"📄 Filename match: {filename} (matched {matching_terms}/{len(query_terms)} terms) - found {len(nodes)} chunks")
+                    # Add ALL nodes from this matching document (not just one)
+                    for node in nodes:
+                        actual_node = node.node if isinstance(node, NodeWithScore) and hasattr(node, 'node') else node
+                        scored_node = NodeWithScore(
+                            node=actual_node,
+                            score=0.95 + (matching_terms * 0.05)  # Very high score for filename match
+                        )
+                        filename_matches.append(scored_node)
+            
+            # Sort by score and return top_k
+            filename_matches.sort(key=lambda x: x.score, reverse=True)
+            return filename_matches[:top_k]
+            
+        except Exception as e:
+            logger.warning(f"Filename search failed: {e}")
+            return []
+    
     def hybrid_search(
         self,
         query: str,
@@ -690,6 +807,7 @@ class HybridRetriever:
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search combining BM25 and dense embeddings (in parallel).
+        Includes aggressive filename matching for queries that match document names.
         
         Args:
             query: Search query
@@ -700,6 +818,18 @@ class HybridRetriever:
         Returns:
             Ranked list of nodes
         """
+        # 🚀 FIRST: Try direct filename search for queries that look like they're asking for a specific document
+        query_lower = query.lower()
+        query_terms = [t for t in query_lower.split() if len(t) > 2]
+        
+        # Check if query contains terms that might match a filename (at least 2 meaningful words)
+        if len(query_terms) >= 2:
+            filename_results = self._search_by_filename(query, top_k=top_k)
+            if filename_results:
+                logger.info(f"✅ Found {len(filename_results)} documents via direct filename search - prioritizing these")
+                # Return filename matches immediately - they're highly relevant
+                return filename_results
+        
         # ⚡ PARALLEL EXECUTION: Run BM25 and dense search simultaneously
         with ThreadPoolExecutor(max_workers=2) as executor:
             dense_future = executor.submit(self.dense_search, query, top_k * 2)
@@ -715,6 +845,12 @@ class HybridRetriever:
             if not dense_results and not bm25_results:
                 logger.warning(f"⚠️ Both dense and BM25 searches returned 0 results for query: {query[:100]}")
                 logger.debug(f"Index type: {type(self.index)}, BM25 initialized: {self.bm25 is not None}, corpus_nodes: {len(self.corpus_nodes)}")
+                
+                # Last resort: try filename search again
+                filename_results = self._search_by_filename(query, top_k=top_k)
+                if filename_results:
+                    logger.info(f"✅ Fallback filename search found {len(filename_results)} documents")
+                    return filename_results
         
         # Fallback: If both searches returned 0 results, try direct index access
         if not dense_results and not bm25_results:
@@ -764,15 +900,37 @@ class HybridRetriever:
                 if combined_scores[node_id]['node'] is None:
                     combined_scores[node_id]['node'] = node
         
-        # Calculate hybrid scores
+        # Calculate hybrid scores with filename boosting
         hybrid_results = []
+        query_lower = query.lower()
+        tokenized_query = query_lower.split()
+        
         for node_id, scores in combined_scores.items():
             if scores['node'] is not None:
                 hybrid_score = alpha * scores['dense'] + (1 - alpha) * scores['bm25']
                 
+                # Additional filename boost in hybrid scoring (redundant but ensures we catch it)
+                node = scores['node']
+                underlying_node = node.node if isinstance(node, NodeWithScore) and hasattr(node, 'node') else node
+                
+                # Check filename match for additional boost
+                filename = ""
+                if hasattr(underlying_node, 'metadata') and underlying_node.metadata:
+                    filename = underlying_node.metadata.get('file_name', '')
+                elif hasattr(node, 'metadata') and node.metadata:
+                    filename = node.metadata.get('file_name', '')
+                
+                if filename:
+                    filename_lower = filename.lower()
+                    # Strong boost if filename contains query terms
+                    query_words_in_filename = sum(1 for word in tokenized_query if word in filename_lower)
+                    if query_words_in_filename >= 2:  # At least 2 words match
+                        # Boost hybrid score by 50% for strong filename matches
+                        hybrid_score *= 1.5
+                        logger.debug(f"📄 Filename boost applied: {filename} (matched {query_words_in_filename} query words)")
+                
                 # Apply metadata filtering and boosting
                 if metadata_filters:
-                    node = scores['node']
                     if not self._matches_filters(node, metadata_filters):
                         continue
                 
@@ -904,15 +1062,16 @@ class ResponseGenerator:
         query: str,
         context: RetrievalContext,
         intent: QueryIntent,
-        answer_generator=None
+        answer_generator=None,
+        chat_history: Optional[List[Dict[str, str]]] = None
     ) -> StructuredResponse:
         """Generate structured response with answer, reasoning, and sources."""
         
         # Reset source counter
         self.source_counter = 1
         
-        # Build answer from context (with LLM if available)
-        answer = self._build_answer(query, context, intent, answer_generator)
+        # Build answer from context (with LLM if available, including chat history)
+        answer = self._build_answer(query, context, intent, answer_generator, chat_history or [])
         
         # Generate reasoning
         reasoning = self._generate_reasoning(context, intent)
@@ -937,7 +1096,8 @@ class ResponseGenerator:
         query: str,
         context: RetrievalContext,
         intent: QueryIntent,
-        answer_generator=None
+        answer_generator=None,
+        chat_history: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """Build answer from retrieved context using LLM or fallback to chunk-based."""
         
@@ -948,10 +1108,13 @@ class ResponseGenerator:
         if answer_generator and answer_generator.claude_client:
             try:
                 logger.info("🤖 Generating LLM answer...")
+                if chat_history:
+                    logger.info(f"📝 Including {len(chat_history)} previous messages in context")
                 llm_answer = answer_generator.generate_answer(
                     query=query,
                     documents=context.nodes,
-                    intent=intent
+                    intent=intent,
+                    chat_history=chat_history or []
                 )
                 return llm_answer
             except Exception as e:
@@ -1032,7 +1195,7 @@ class ResponseGenerator:
         return ' '.join(reasoning_parts)
     
     def _compile_sources(self, context: RetrievalContext) -> List[Dict[str, Any]]:
-        """Compile source summary."""
+        """Compile source summary with snippets."""
         
         sources = []
         source_docs = {}
@@ -1047,20 +1210,34 @@ class ResponseGenerator:
                     'id': source_id,
                     'name': source_name,
                     'pages': set(),
-                    'content_type': node.metadata.get('content_type', 'text')
+                    'content_type': node.metadata.get('content_type', 'text'),
+                    'snippets': []  # Store snippets from chunks
                 }
             
             if page_num != 'N/A':
                 source_docs[source_name]['pages'].add(str(page_num))
+            
+            # Collect snippet from this chunk (first 200 chars)
+            snippet = node.text[:200].strip() if hasattr(node, 'text') and node.text else ""
+            if snippet and snippet not in source_docs[source_name]['snippets']:
+                source_docs[source_name]['snippets'].append(snippet)
         
         # Convert to list
         for source_info in source_docs.values():
             pages = sorted(list(source_info['pages']), key=lambda x: int(x) if x.isdigit() else 0)
+            # Use first snippet (most relevant) or combine first two if available
+            snippets = source_info['snippets']
+            snippet = snippets[0] if snippets else ""
+            if len(snippets) > 1:
+                # Combine first two snippets for better context
+                snippet = f"{snippets[0]}... {snippets[1][:100]}"
+            
             sources.append({
                 'id': source_info['id'],
                 'name': source_info['name'],
                 'pages': ', '.join(pages) if pages else 'N/A',
-                'content_type': source_info['content_type']
+                'content_type': source_info['content_type'],
+                'snippet': snippet[:200] if snippet else ""  # Ensure max 200 chars
             })
         
         return sources
@@ -1136,6 +1313,13 @@ class DocumentEvaluator:
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
+            
+            # Handle overload errors more gracefully (less verbose)
+            if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in error_type:
+                logger.warning(f"⚠️ Claude API temporarily overloaded (529). Document evaluation will be disabled.")
+                self.claude_client = None
+                return
+            
             logger.warning(f"⚠️ Claude connection failed: {error_type}: {error_msg[:200]}. Document evaluation will be disabled.")
             logger.debug(f"Full Claude error: {e}", exc_info=True)
             self.claude_client = None
@@ -1411,7 +1595,11 @@ class ClaudeQueryRewriter:
             logger.warning("⚠️ Anthropic package not installed. Query rewriting will use fallback.")
             self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Claude Query Rewriter initialization failed: {e}")
+            error_msg = str(e)
+            if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in type(e).__name__:
+                logger.warning(f"⚠️ Claude API temporarily overloaded (529). Query rewriting will use fallback.")
+            else:
+                logger.warning(f"⚠️ Claude Query Rewriter initialization failed: {error_msg[:200]}")
             self.claude_client = None
     
     def expand_query(self, query: str, intent: QueryIntent) -> List[str]:
@@ -1540,7 +1728,11 @@ class ClaudeQueryDecomposer:
             logger.warning("⚠️ Anthropic package not installed. Query decomposition will be disabled.")
             self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Claude Query Decomposer initialization failed: {e}")
+            error_msg = str(e)
+            if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in type(e).__name__:
+                logger.warning(f"⚠️ Claude API temporarily overloaded (529). Query decomposition will be disabled.")
+            else:
+                logger.warning(f"⚠️ Claude Query Decomposer initialization failed: {error_msg[:200]}")
             self.claude_client = None
     
     def decompose(self, query: str, intent: QueryIntent) -> List[str]:
@@ -1674,7 +1866,11 @@ class ClaudeMetadataFilterGenerator:
             logger.warning("⚠️ Anthropic package not installed. Metadata filter generation will be disabled.")
             self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Claude Metadata Filter Generator initialization failed: {e}")
+            error_msg = str(e)
+            if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in type(e).__name__:
+                logger.warning(f"⚠️ Claude API temporarily overloaded (529). Metadata filter generation will be disabled.")
+            else:
+                logger.warning(f"⚠️ Claude Metadata Filter Generator initialization failed: {error_msg[:200]}")
             self.claude_client = None
     
     def generate_filters(self, query: str, available_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1813,7 +2009,11 @@ class ClaudeIterativeRetriever:
             logger.warning("⚠️ Anthropic package not installed. Iterative retrieval will be disabled.")
             self.claude_client = None
         except Exception as e:
-            logger.warning(f"⚠️ Claude Iterative Retriever initialization failed: {e}")
+            error_msg = str(e)
+            if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in type(e).__name__:
+                logger.warning(f"⚠️ Claude API temporarily overloaded (529). Iterative retrieval will be disabled.")
+            else:
+                logger.warning(f"⚠️ Claude Iterative Retriever initialization failed: {error_msg[:200]}")
             self.claude_client = None
     
     def refine_query(self, query: str, initial_results: List[NodeWithScore], intent: QueryIntent) -> Optional[str]:
@@ -1939,6 +2139,9 @@ class ClaudeAnswerGenerator:
     Generates clean, technical answers from retrieved documents.
     """
     
+    # Token budget: conservative limit for input context (leaves room for response)
+    MAX_INPUT_TOKENS = 100000  # ~100k tokens for Claude Sonnet 4
+    
     def __init__(self, api_key: str = None, model_name: str = "claude-sonnet-4-20250514", enable_caching: bool = True):
         self.model_name = model_name
         self.enable_caching = enable_caching
@@ -1983,6 +2186,13 @@ class ClaudeAnswerGenerator:
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
+            
+            # Handle overload errors more gracefully (less verbose)
+            if "529" in error_msg or "overload" in error_msg.lower() or "OverloadedError" in error_type:
+                logger.warning(f"⚠️ Claude API temporarily overloaded (529). Claude answer generation will be disabled.")
+                self.claude_client = None
+                return
+            
             logger.warning(f"⚠️ Claude connection failed: {error_type}: {error_msg[:200]}. Claude answer generation will be disabled.")
             logger.debug(f"Full Claude error: {e}", exc_info=True)
             self.claude_client = None
@@ -1991,7 +2201,8 @@ class ClaudeAnswerGenerator:
         self, 
         query: str, 
         documents: List[NodeWithScore],
-        intent: QueryIntent
+        intent: QueryIntent,
+        chat_history: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """
         Generate a clean, ChatGPT-style answer from retrieved documents.
@@ -2019,15 +2230,44 @@ class ClaudeAnswerGenerator:
             # Prepare context from documents
             context = self._prepare_document_context(documents)
             
-            # Build prompt for answer generation
-            prompt = self._build_answer_prompt(query, context, intent)
+            # Build base prompt template (without history) to estimate fixed token usage
+            base_prompt = self._build_answer_prompt(query, context, intent, chat_history=None)
+            
+            # Trim chat history to fit within token budget (removes oldest first)
+            trimmed_history = self._trim_chat_history(chat_history or [], query, context, base_prompt)
+            
+            # Build final prompt with trimmed history
+            prompt = self._build_answer_prompt(query, context, intent, trimmed_history)
+            
+            # Final safety check: verify prompt doesn't exceed budget
+            total_tokens = self._estimate_tokens(prompt)
+            if total_tokens > self.MAX_INPUT_TOKENS:
+                logger.warning(f"Prompt exceeds budget after trimming ({total_tokens} tokens), using minimal context")
+                # Fallback: use only current query with documents, no history
+                prompt = base_prompt
+                trimmed_history = []
+            
+            # Build messages list with trimmed chat history + current query
+            messages = []
+            
+            # Add trimmed chat history (excluding current query)
+            if trimmed_history:
+                for msg in trimmed_history:
+                    if msg.get("content") != query:  # Don't duplicate current query
+                        messages.append({
+                            "role": msg.get("role", "user"),
+                            "content": msg.get("content", "")
+                        })
+            
+            # Add current query with RAG context
+            messages.append({"role": "user", "content": prompt})
             
             # Generate answer with Claude
             response = self.claude_client.messages.create(
                 model=self.model_name,
                 max_tokens=2000,  # Increased for more detailed technical answers
                 temperature=0.1,
-                messages=[{"role": "user", "content": prompt}]
+                messages=messages
             )
             
             answer = response.content[0].text
@@ -2045,6 +2285,47 @@ class ClaudeAnswerGenerator:
             logger.error(f"Claude answer generation failed: {e}")
             return self._fallback_answer(query, documents)
     
+    def _estimate_tokens(self, text: str) -> int:
+        """Simple token estimation: ~4 chars per token (conservative)."""
+        return len(text) // 4
+    
+    def _trim_chat_history(self, chat_history: List[Dict[str, str]], query: str, context: str, base_prompt: str) -> List[Dict[str, str]]:
+        """
+        Trim chat history to fit within token budget.
+        Removes oldest messages first until budget is satisfied.
+        """
+        if not chat_history:
+            return []
+        
+        # Estimate tokens for fixed parts (base prompt already includes query + context)
+        fixed_tokens = self._estimate_tokens(base_prompt)
+        # Reserve 20% buffer for prompt overhead (summary formatting, etc.)
+        available_tokens = int((self.MAX_INPUT_TOKENS - fixed_tokens) * 0.8)
+        
+        if available_tokens <= 0:
+            logger.warning(f"Fixed context exceeds token budget, using no chat history")
+            return []
+        
+        # Calculate tokens for each message in history
+        # Process in reverse (newest first) to keep most recent context
+        trimmed_history = []
+        total_tokens = 0
+        
+        for msg in reversed(chat_history):
+            msg_text = msg.get("content", "")
+            msg_tokens = self._estimate_tokens(msg_text)
+            
+            if total_tokens + msg_tokens <= available_tokens:
+                trimmed_history.insert(0, msg)  # Insert at beginning to maintain order
+                total_tokens += msg_tokens
+            else:
+                break  # Stop when we'd exceed budget
+        
+        if len(trimmed_history) < len(chat_history):
+            logger.info(f"Trimmed chat history: {len(chat_history)} -> {len(trimmed_history)} messages ({total_tokens}/{available_tokens} tokens)")
+        
+        return trimmed_history
+    
     def _prepare_document_context(self, documents: List[NodeWithScore]) -> str:
         """Prepare document context for LLM."""
         context_parts = []
@@ -2060,7 +2341,7 @@ class ClaudeAnswerGenerator:
         
         return "\n".join(context_parts)
     
-    def _build_answer_prompt(self, query: str, context: str, intent: QueryIntent) -> str:
+    def _build_answer_prompt(self, query: str, context: str, intent: QueryIntent, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
         """Build prompt for technical answer generation."""
         
         intent_guidance = {
@@ -2073,7 +2354,20 @@ class ClaudeAnswerGenerator:
         
         guidance = intent_guidance.get(intent.intent_type, "Provide a comprehensive technical answer.")
         
-        return f"""TASK: Generate a clean, technical answer to the user's query using ONLY the provided documents.
+        # Add chat history context if available
+        history_context = ""
+        if chat_history and len(chat_history) > 0:
+            history_context = "\n\nPREVIOUS CONVERSATION:\n"
+            for msg in chat_history[-5:]:  # Include last 5 messages for context
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "user":
+                    history_context += f"User: {content}\n"
+                elif role == "assistant":
+                    history_context += f"Assistant: {content}\n"
+            history_context += "\nUse the conversation history to understand context, corrections, or follow-up questions.\n"
+        
+        return f"""TASK: Generate a clean, technical answer to the user's query using ONLY the provided documents.{history_context}
 
 CONSTRAINTS:
 - Use ONLY information from the provided documents
@@ -2082,6 +2376,7 @@ CONSTRAINTS:
 - Include proper citations [1], [2], etc.
 - Write in a professional, technical style
 - Be comprehensive but concise
+- If this is a follow-up question, reference previous conversation context appropriately
 
 QUERY: {query}
 
@@ -2097,6 +2392,7 @@ RESPONSE REQUIREMENTS:
 4. Use citations [1], [2], etc. for all claims
 5. End with a summary or conclusion
 6. Keep the tone professional and technical
+7. If this is a follow-up or correction, acknowledge the previous conversation
 
 Generate a comprehensive technical answer:"""
     
@@ -2454,7 +2750,8 @@ class RAGOrchestrator:
         top_k: int = 10,
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
-        dynamic_windowing: bool = True
+        dynamic_windowing: bool = True,
+        chat_history: Optional[List[Dict[str, str]]] = None
     ) -> StructuredResponse:
         """
         Main orchestration method - handles complete RAG pipeline.
@@ -2579,8 +2876,12 @@ class RAGOrchestrator:
         all_search_queries = []
         for sub_query in sub_queries:
             # Expand each sub-query with Claude
-            expanded_queries = self.claude_query_rewriter.expand_query(sub_query, intent)
-            all_search_queries.extend(expanded_queries)
+            try:
+                expanded_queries = self.claude_query_rewriter.expand_query(sub_query, intent)
+                all_search_queries.extend(expanded_queries)
+            except Exception as e:
+                logger.warning(f"Query expansion failed for '{sub_query}': {e}. Using original sub-query.")
+                all_search_queries.append(sub_query)  # Fallback to original sub-query
         
         # Remove duplicates while preserving order
         seen = set()
@@ -2592,8 +2893,9 @@ class RAGOrchestrator:
         
         # Limit to top 5 query variations to avoid excessive API calls
         search_queries = unique_search_queries[:5]
-        # Ensure we have at least one query
+        # Ensure we have at least one query - always fallback to original if all else fails
         if not search_queries:
+            logger.warning("⚠️ No search queries generated - using original query as fallback")
             search_queries = [augmented_query if augmented_query != query else query]
         
         logger.info(f"🔍 Using {len(search_queries)} query variation(s) for retrieval")
@@ -2679,6 +2981,56 @@ class RAGOrchestrator:
         # Ensure we have exactly top_k results (in case hybrid search returned fewer)
         unique_nodes = unique_nodes[:top_k]
         
+        # 🚀 CRITICAL FIX: Filename-based fallback if retrieval returns few/no results
+        # This ensures documents with matching filenames are found even if text doesn't match
+        if len(unique_nodes) < 3:  # If we got very few results, try filename matching
+            logger.info(f"⚠️ Low retrieval results ({len(unique_nodes)}), attempting filename-based fallback...")
+            try:
+                # Extract key terms from query for filename matching
+                query_terms = query.lower().split()
+                query_terms = [t for t in query_terms if len(t) > 2]  # Filter out short words
+                
+                # Search all nodes in corpus for filename matches
+                filename_matches = []
+                if hasattr(self.retriever, 'corpus_nodes') and self.retriever.corpus_nodes:
+                    for node_wrapper in self.retriever.corpus_nodes:
+                        # Get the actual node
+                        node = node_wrapper.node if isinstance(node_wrapper, NodeWithScore) and hasattr(node_wrapper, 'node') else node_wrapper
+                        
+                        # Check filename
+                        filename = ""
+                        if hasattr(node, 'metadata') and node.metadata:
+                            filename = node.metadata.get('file_name', '')
+                        
+                        if filename:
+                            filename_lower = filename.lower()
+                            # Count how many query terms match the filename
+                            matching_terms = sum(1 for term in query_terms if term in filename_lower)
+                            if matching_terms >= 2:  # At least 2 terms match
+                                # Create NodeWithScore with high score for filename match
+                                scored_node = NodeWithScore(
+                                    node=node,
+                                    score=0.8 + (matching_terms * 0.1)  # High score: 0.8-1.0
+                                )
+                                filename_matches.append(scored_node)
+                                logger.info(f"📄 Filename match found: {filename} (matched {matching_terms} terms)")
+                
+                # Add filename matches to results (avoid duplicates)
+                if filename_matches:
+                    existing_node_ids = {n.node_id if hasattr(n, 'node_id') else str(id(n)) for n in unique_nodes}
+                    for match_node in filename_matches:
+                        node_id = match_node.node_id if hasattr(match_node, 'node_id') else str(id(match_node))
+                        if node_id not in existing_node_ids:
+                            unique_nodes.append(match_node)
+                            existing_node_ids.add(node_id)
+                    
+                    # Re-sort by score
+                    unique_nodes.sort(key=lambda n: n.score, reverse=True)
+                    unique_nodes = unique_nodes[:top_k]
+                    logger.info(f"✅ Filename fallback added {len(filename_matches)} matching documents")
+            except Exception as e:
+                logger.warning(f"Filename fallback failed: {e}")
+        
         retrieval_time = time.time() - start_time
         if len(search_queries) > 1:
             logger.info(f"⚡ Retrieval completed in {retrieval_time:.2f}s (multi-query retrieval with {len(search_queries)} variations)")
@@ -2690,15 +3042,99 @@ class RAGOrchestrator:
         
         logger.info(f"📚 Retrieved {len(unique_nodes)} unique chunks")
         
+        # 🚨 CRITICAL: If retrieval returned 0 results, try fallback strategies
+        if not unique_nodes:
+            logger.warning("⚠️ Initial retrieval returned 0 results - attempting fallback strategies...")
+            
+            # Fallback 1: Try original query without Claude rewriting
+            logger.info("🔄 Fallback 1: Trying original query without query expansion...")
+            try:
+                fallback_nodes = self.retriever.hybrid_search(
+                    query=original_query,  # Use the original query before preprocessing
+                    top_k=top_k * 2,  # Get more results
+                    alpha=alpha
+                )
+                if fallback_nodes:
+                    logger.info(f"✅ Fallback 1 succeeded: found {len(fallback_nodes)} results")
+                    unique_nodes = fallback_nodes[:top_k]
+                else:
+                    logger.warning("⚠️ Fallback 1 failed: 0 results")
+            except Exception as e:
+                logger.warning(f"⚠️ Fallback 1 error: {e}")
+            
+            # Fallback 2: Try simplified query (remove "DuraFlex" prefix, just search for core terms)
+            if not unique_nodes:
+                logger.info("🔄 Fallback 2: Trying simplified query...")
+                simplified_query = query.lower()
+                # Remove common prefixes
+                for prefix in ['duraflex', 'duracore', 'durabolt', 'what are', 'what is', 'tell me about']:
+                    if simplified_query.startswith(prefix):
+                        simplified_query = simplified_query[len(prefix):].strip()
+                        break
+                
+                if simplified_query and simplified_query != query.lower():
+                    try:
+                        fallback_nodes = self.retriever.hybrid_search(
+                            query=simplified_query,
+                            top_k=top_k * 2,
+                            alpha=alpha
+                        )
+                        if fallback_nodes:
+                            logger.info(f"✅ Fallback 2 succeeded: found {len(fallback_nodes)} results")
+                            unique_nodes = fallback_nodes[:top_k]
+                    except Exception as e:
+                        logger.warning(f"⚠️ Fallback 2 error: {e}")
+            
+            # Fallback 3: Try keyword-only search (extract key terms)
+            if not unique_nodes:
+                logger.info("🔄 Fallback 3: Trying keyword-only search...")
+                # Extract key terms (words longer than 3 chars, excluding common words)
+                common_words = {'the', 'are', 'for', 'and', 'with', 'from', 'that', 'this', 'what', 'how', 'when', 'where', 'which'}
+                keywords = [w.lower() for w in query.split() if len(w) > 3 and w.lower() not in common_words]
+                if keywords:
+                    keyword_query = ' '.join(keywords[:5])  # Use top 5 keywords
+                    try:
+                        fallback_nodes = self.retriever.hybrid_search(
+                            query=keyword_query,
+                            top_k=top_k * 2,
+                            alpha=alpha
+                        )
+                        if fallback_nodes:
+                            logger.info(f"✅ Fallback 3 succeeded: found {len(fallback_nodes)} results")
+                            unique_nodes = fallback_nodes[:top_k]
+                    except Exception as e:
+                        logger.warning(f"⚠️ Fallback 3 error: {e}")
+            
+            # Fallback 4: Last resort - try very generic terms from the query
+            if not unique_nodes:
+                logger.info("🔄 Fallback 4: Trying generic term search...")
+                # Extract any technical terms (capitalized words or common technical words)
+                technical_terms = ['network', 'requirements', 'configuration', 'setup', 'installation', 'system']
+                found_terms = [term for term in technical_terms if term in query.lower()]
+                if found_terms:
+                    generic_query = ' '.join(found_terms[:3])
+                    try:
+                        fallback_nodes = self.retriever.hybrid_search(
+                            query=generic_query,
+                            top_k=top_k * 2,
+                            alpha=alpha
+                        )
+                        if fallback_nodes:
+                            logger.info(f"✅ Fallback 4 succeeded: found {len(fallback_nodes)} results")
+                            unique_nodes = fallback_nodes[:top_k]
+                    except Exception as e:
+                        logger.warning(f"⚠️ Fallback 4 error: {e}")
+        
         # Step 3: Build retrieval context
         context = self._build_retrieval_context(unique_nodes)
         
-        # Step 4: Generate structured response
+        # Step 4: Generate structured response (with chat history if provided)
         response = self.response_generator.generate_structured_response(
             query=query,
             context=context,
             intent=intent,
-            answer_generator=self.answer_generator
+            answer_generator=self.answer_generator,
+            chat_history=chat_history or []
         )
 
         # Optionally preface with a short glossary definition if we found one
