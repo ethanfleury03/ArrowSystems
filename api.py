@@ -410,6 +410,7 @@ class QueryResponse(BaseModel):
     response_time_ms: int
     session_id: Optional[str] = None
     cache_hit: bool = False
+    matched_machine_name: Optional[str] = None  # Machine name matched in query (if >=95% similarity)
 
 
 class HealthResponse(BaseModel):
@@ -483,6 +484,9 @@ async def query_knowledge_base(request: QueryRequest):
         chat_history = await session_manager.get_conversation_messages(session_id)
         logger.info(f"Session {session_id}: {len(chat_history)} previous messages")
         
+        # Log incoming query
+        logger.info(f"📥 Received query: {request.query[:200]}{'...' if len(request.query) > 200 else ''}")
+        
         # Execute RAG query with chat history
         # Note: Retrieval uses only current query, but LLM gets chat history
         response = rag_pipeline.query(
@@ -542,7 +546,8 @@ async def query_knowledge_base(request: QueryRequest):
             intent_type=response.intent.intent_type,
             intent_confidence=response.intent.confidence,
             response_time_ms=response_time_ms,
-            session_id=session_id
+            session_id=session_id,
+            matched_machine_name=response.matched_machine_name
         )
         
     except Exception as e:

@@ -212,6 +212,142 @@ class StructuredResponse:
     sources: List[Dict[str, Any]]
     confidence: float
     intent: QueryIntent
+    matched_machine_name: Optional[str] = None  # Machine name matched in query (if >=95% similarity)
+
+
+class MachineNameMatcher:
+    """
+    Matches queries against canonical machine names and boosts retrieval from matched machine documents.
+    Uses fuzzy string matching with >=95% similarity threshold.
+    """
+    
+    def __init__(self, machine_names: Optional[List[str]] = None, similarity_threshold: float = 0.95):
+        """
+        Initialize machine name matcher.
+        
+        Args:
+            machine_names: List of canonical machine names. If None, will auto-detect from filenames.
+            similarity_threshold: Minimum similarity (0.0-1.0) to consider a match. Default: 0.95 (95%)
+        """
+        self.similarity_threshold = similarity_threshold
+        self.machine_names = machine_names or []
+        self.machine_name_patterns = {}  # Maps machine name to filename patterns
+        
+        # If no machine names provided, use common ones from the documentation
+        if not self.machine_names:
+            self.machine_names = [
+                "2800 Series Mini Laser Pro",
+                "2800 Series",
+                "Mini Laser Pro",
+                "anyCUTII",
+                "anyCUTIII",
+                "anyCUT",
+                "ANYJET",
+                "Arrow Any-002",
+                "DuraFlex",
+                "Dura-Printer",
+                "DuraBolt",
+                "DuraCore",
+                "VR350",
+                "Digital die cutter VR350",
+                "EZCut",
+                "EZCut 330"
+            ]
+        
+        logger.info(f"🤖 MachineNameMatcher initialized with {len(self.machine_names)} machine names")
+    
+    def _fuzzy_match(self, query: str, machine_name: str) -> float:
+        """
+        Calculate fuzzy string similarity between query and machine name.
+        Uses simple character-based similarity (can be enhanced with Levenshtein distance).
+        
+        Returns:
+            Similarity score between 0.0 and 1.0
+        """
+        query_lower = query.lower()
+        machine_lower = machine_name.lower()
+        
+        # Exact match
+        if machine_lower in query_lower or query_lower in machine_lower:
+            return 1.0
+        
+        # Check if all significant words from machine name appear in query
+        machine_words = [w for w in machine_lower.split() if len(w) > 2]
+        query_words = query_lower.split()
+        
+        if not machine_words:
+            return 0.0
+        
+        # Count how many machine name words appear in query
+        matching_words = sum(1 for word in machine_words if any(qw.startswith(word) or word in qw for qw in query_words))
+        word_similarity = matching_words / len(machine_words)
+        
+        # Also check character-level similarity for partial matches
+        # Simple approach: count common characters
+        common_chars = set(machine_lower.replace(' ', '')) & set(query_lower.replace(' ', ''))
+        char_similarity = len(common_chars) / max(len(set(machine_lower.replace(' ', ''))), 1)
+        
+        # Combine word and character similarity
+        combined_similarity = (word_similarity * 0.7) + (char_similarity * 0.3)
+        
+        return min(combined_similarity, 1.0)
+    
+    def match_machine(self, query: str) -> Optional[Tuple[str, float]]:
+        """
+        Check if query matches any machine name with >= threshold similarity.
+        
+        Args:
+            query: User query string
+            
+        Returns:
+            Tuple of (matched_machine_name, similarity_score) if match found, else None
+        """
+        best_match = None
+        best_score = 0.0
+        
+        for machine_name in self.machine_names:
+            similarity = self._fuzzy_match(query, machine_name)
+            
+            if similarity >= self.similarity_threshold and similarity > best_score:
+                best_match = machine_name
+                best_score = similarity
+        
+        if best_match:
+            logger.info(f"🤖 Machine name matched: '{best_match}' (similarity: {best_score:.2%})")
+            return (best_match, best_score)
+        
+        return None
+    
+    def get_filename_patterns(self, machine_name: str) -> List[str]:
+        """
+        Generate filename patterns that might contain this machine's documentation.
+        Used for boosting chunks from matching filenames.
+        
+        Args:
+            machine_name: Machine name to generate patterns for
+            
+        Returns:
+            List of filename patterns (substrings to match)
+        """
+        patterns = []
+        
+        # Add the machine name itself
+        patterns.append(machine_name.lower())
+        
+        # Add variations
+        machine_lower = machine_name.lower()
+        # Remove common words
+        for word in ['series', 'user', 'manual', 'guide', 'pro']:
+            machine_lower = machine_lower.replace(word, '').strip()
+        
+        if machine_lower:
+            patterns.append(machine_lower)
+        
+        # Add individual significant words
+        words = [w for w in machine_name.lower().split() if len(w) > 2]
+        patterns.extend(words)
+        
+        return patterns
 
 
 class QueryRewriter:
@@ -622,7 +758,7 @@ class HybridRetriever:
     
     def bm25_search(self, query: str, top_k: int = 20) -> List[Tuple[NodeWithScore, float]]:
         """
-        Perform BM25 keyword search with filename boosting.
+        Perform BM25 keyword search with filename boosting and pluralization handling.
         Documents with matching filenames get significant score boost.
         """
         if not self.bm25 or not self.corpus_nodes:
@@ -632,8 +768,25 @@ class HybridRetriever:
         tokenized_query = query.lower().split()
         query_lower = query.lower()
         
-        # Get BM25 scores from text content
-        scores = self.bm25.get_scores(tokenized_query)
+        # Expand query with plural/singular forms for better matching
+        # This helps with "winders" vs "winder", "operations" vs "operation", etc.
+        expanded_terms = []
+        for term in tokenized_query:
+            expanded_terms.append(term)
+            # Add plural/singular variants (simple heuristic)
+            if term.endswith('s') and len(term) > 3:
+                expanded_terms.append(term[:-1])  # Remove 's' for singular
+            elif not term.endswith('s') and len(term) > 3:
+                expanded_terms.append(term + 's')  # Add 's' for plural
+            # Also handle common plural forms
+            if term.endswith('ies') and len(term) > 4:
+                expanded_terms.append(term[:-3] + 'y')  # "winders" -> "winder" (if it was "windies")
+        
+        # Use expanded terms for BM25 (but keep original for filename matching)
+        tokenized_query_expanded = expanded_terms
+        
+        # Get BM25 scores from text content using expanded terms
+        scores = self.bm25.get_scores(tokenized_query_expanded)
         
         # Boost scores for documents with matching filenames
         # This is critical for queries like "system requirements" matching "System Requirements.pdf"
@@ -651,7 +804,7 @@ class HybridRetriever:
             
             if filename:
                 filename_lower = filename.lower()
-                # Check if query terms appear in filename
+                # Check if query terms appear in filename (use original terms, not expanded)
                 query_words_in_filename = sum(1 for word in tokenized_query if word in filename_lower)
                 if query_words_in_filename > 0:
                     # Boost score based on how many query words match
@@ -803,7 +956,8 @@ class HybridRetriever:
         query: str,
         top_k: int = 10,
         alpha: float = 0.5,
-        metadata_filters: Optional[Dict[str, Any]] = None
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        machine_filename_patterns: Optional[List[str]] = None
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search combining BM25 and dense embeddings (in parallel).
@@ -961,7 +1115,120 @@ class HybridRetriever:
             else:
                 logger.debug("Skipping re-ranker on CPU for performance (would take ~90s)")
         
+        # NEW: Boost section number matches before returning
+        hybrid_results = self._boost_section_matches(query, hybrid_results)
+        
+        # NEW: Boost machine-matched documents if patterns provided
+        if machine_filename_patterns:
+            hybrid_results = self._boost_machine_documents(hybrid_results, machine_filename_patterns)
+        
+        # Re-sort after boosting
+        hybrid_results.sort(key=lambda x: x.score, reverse=True)
+        
         return hybrid_results[:top_k]
+    
+    def _boost_machine_documents(self, nodes: List[NodeWithScore], filename_patterns: List[str]) -> List[NodeWithScore]:
+        """
+        Boost nodes from documents matching machine name filename patterns.
+        This prioritizes chunks from the matched machine's documentation.
+        
+        Args:
+            nodes: List of nodes to boost
+            filename_patterns: List of filename patterns to match (e.g., ["2800", "mini laser"])
+            
+        Returns:
+            List of nodes with boosted scores
+        """
+        boosted_count = 0
+        for node in nodes:
+            # Get filename from node metadata
+            filename = ""
+            if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
+                underlying_node = node.node
+                if hasattr(underlying_node, 'metadata') and underlying_node.metadata:
+                    filename = underlying_node.metadata.get('file_name', '')
+            elif hasattr(node, 'metadata') and node.metadata:
+                filename = node.metadata.get('file_name', '')
+            
+            if not filename:
+                continue
+            
+            filename_lower = filename.lower()
+            
+            # Check if filename matches any pattern
+            for pattern in filename_patterns:
+                pattern_lower = pattern.lower()
+                if pattern_lower in filename_lower:
+                    # Strong boost for machine-matched documents (3x score)
+                    node.score *= 3.0
+                    boosted_count += 1
+                    logger.debug(f"🤖 Machine boost: '{pattern}' matched filename '{filename}' (new score: {node.score:.3f})")
+                    break  # Only boost once per node
+        
+        if boosted_count > 0:
+            logger.info(f"🤖 Boosted {boosted_count} nodes from machine-matched documents")
+        
+        return nodes
+    
+    def _boost_section_matches(self, query: str, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
+        """
+        Boost nodes that match section numbers mentioned in query.
+        E.g., "5.2" or "section 5.2" should boost chunks from page_label "5.2"
+        This helps with queries like "section 5.2 how to operate winders"
+        """
+        import re
+        
+        # Extract section numbers from query (e.g., "5.2", "section 5.2", "chapter 3")
+        section_patterns = [
+            r'\b(\d+\.\d+)\b',  # "5.2", "3.1.2"
+            r'\b(\d+\.\d+\.\d+)\b',  # "5.2.1"
+            r'section\s+(\d+\.?\d*)',  # "section 5.2" or "section 5"
+            r'chapter\s+(\d+)',  # "chapter 5"
+            r'page\s+(\d+)',  # "page 5"
+            r'sec\s+(\d+\.?\d*)',  # "sec 5.2"
+        ]
+        
+        section_numbers = []
+        for pattern in section_patterns:
+            matches = re.findall(pattern, query.lower())
+            section_numbers.extend(matches)
+        
+        if not section_numbers:
+            return nodes
+        
+        logger.debug(f"📑 Detected section numbers in query: {section_numbers}")
+        
+        # Boost nodes with matching page_label
+        boosted_count = 0
+        for node in nodes:
+            # Get page_label from node metadata
+            page_label = ""
+            if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
+                underlying_node = node.node
+                if hasattr(underlying_node, 'metadata') and underlying_node.metadata:
+                    page_label = underlying_node.metadata.get('page_label', '')
+            elif hasattr(node, 'metadata') and node.metadata:
+                page_label = node.metadata.get('page_label', '')
+            
+            if not page_label:
+                continue
+            
+            # Check if page_label matches any section number
+            page_label_str = str(page_label).lower()
+            for section_num in section_numbers:
+                section_num_str = str(section_num).lower()
+                # Match if section number appears in page_label or vice versa
+                if section_num_str in page_label_str or page_label_str in section_num_str:
+                    # Significant boost for section number match (2x score)
+                    node.score *= 2.0
+                    boosted_count += 1
+                    logger.debug(f"📑 Section number boost: '{section_num}' matched page_label '{page_label}' (new score: {node.score:.3f})")
+                    break
+        
+        if boosted_count > 0:
+            logger.info(f"📑 Boosted {boosted_count} nodes for section number matches")
+        
+        return nodes
     
     def hybrid_search_with_llm_evaluation(
         self,
@@ -989,7 +1256,8 @@ class HybridRetriever:
             query=query,
             top_k=top_k * 2,  # Get more results for LLM evaluation
             alpha=alpha,
-            metadata_filters=metadata_filters
+            metadata_filters=metadata_filters,
+            machine_filename_patterns=machine_filename_patterns
         )
         
         # Apply LLM evaluation if enabled and evaluator is available
@@ -1063,7 +1331,8 @@ class ResponseGenerator:
         context: RetrievalContext,
         intent: QueryIntent,
         answer_generator=None,
-        chat_history: Optional[List[Dict[str, str]]] = None
+        chat_history: Optional[List[Dict[str, str]]] = None,
+        matched_machine_name: Optional[str] = None
     ) -> StructuredResponse:
         """Generate structured response with answer, reasoning, and sources."""
         
@@ -1088,7 +1357,8 @@ class ResponseGenerator:
             reasoning=reasoning,
             sources=sources,
             confidence=confidence,
-            intent=intent
+            intent=intent,
+            matched_machine_name=matched_machine_name
         )
     
     def _build_answer(
@@ -1936,13 +2206,20 @@ Metadata filters:"""
             # Parse JSON
             filters = json.loads(response_text)
             
+            # CRITICAL FIX: Remove strict file_name filters - they're too restrictive
+            # Instead, rely on filename boosting in hybrid_search which is more flexible
+            if filters and 'file_name' in filters:
+                file_name_filter = filters['file_name']
+                logger.info(f"⚠️ Removing strict file_name filter '{file_name_filter}' - using filename boosting instead (more flexible)")
+                filters.pop('file_name')
+            
             # Validate filters against available metadata
             if available_metadata and filters:
                 validated_filters = {}
                 for key, value in filters.items():
                     if key in available_metadata:
                         validated_filters[key] = value
-                    elif key in ['content_type', 'file_name', 'page_number']:
+                    elif key in ['content_type', 'page_number']:  # Removed 'file_name' from allowed keys
                         # Common metadata keys we can use
                         validated_filters[key] = value
                 filters = validated_filters
@@ -2490,6 +2767,9 @@ class RAGOrchestrator:
         self.claude_query_decomposer = ClaudeQueryDecomposer()  # Query decomposition
         self.claude_metadata_filter_generator = ClaudeMetadataFilterGenerator()  # Metadata filtering
         self.claude_iterative_retriever = ClaudeIterativeRetriever()  # Iterative retrieval
+        
+        # 🤖 Machine name matcher for query boosting
+        self.machine_matcher = MachineNameMatcher()
 
         # User-validated cache (only stores answers marked helpful)
         self.cache = QueryCache(max_size=1000)
@@ -2778,6 +3058,19 @@ class RAGOrchestrator:
         logger.info(f"🎯 Orchestrating query: {query[:200]}{'...' if len(query) > 200 else ''}")
 
         # ------------------------------------------------------------------
+        # 🤖 Machine Name Matching: Check if query matches a machine name
+        # ------------------------------------------------------------------
+        matched_machine_name = None
+        machine_filename_patterns = []
+        
+        machine_match_result = self.machine_matcher.match_machine(query)
+        if machine_match_result:
+            matched_machine_name, similarity = machine_match_result
+            machine_filename_patterns = self.machine_matcher.get_filename_patterns(matched_machine_name)
+            logger.info(f"🤖 Query matched machine: '{matched_machine_name}' (similarity: {similarity:.2%})")
+            logger.info(f"🤖 Will boost chunks from files matching: {machine_filename_patterns}")
+
+        # ------------------------------------------------------------------
         # ⚡ User-validated cache: serve instantly if previously marked helpful
         #    1) Exact-match cache (query + params)
         #    2) Semantic cache (embedding similarity >= threshold)
@@ -2827,7 +3120,8 @@ class RAGOrchestrator:
                         reasoning="✅ Served from validated Q&A database (user-approved answer)",
                         sources=sources,
                         confidence=0.95,  # High confidence - users validated this
-                        intent=intent
+                        intent=intent,
+                        matched_machine_name=matched_machine_name
                     )
             except Exception as e:
                 logger.debug(f"Validated Q&A lookup skipped: {e}")
@@ -2915,7 +3209,8 @@ class RAGOrchestrator:
                         top_k=top_k,  # Get top_k per query
                         alpha=alpha,
                         metadata_filters=metadata_filters,
-                        enable_llm_evaluation=self.enable_llm_evaluation
+                        enable_llm_evaluation=self.enable_llm_evaluation,
+                        machine_filename_patterns=machine_filename_patterns
                     )
                     
                     # Combine scores (nodes may appear multiple times)
@@ -2947,7 +3242,8 @@ class RAGOrchestrator:
                 top_k=top_k,
                 alpha=alpha,
                 metadata_filters=metadata_filters,
-                enable_llm_evaluation=self.enable_llm_evaluation
+                enable_llm_evaluation=self.enable_llm_evaluation,
+                machine_filename_patterns=machine_filename_patterns
             )
         
         # 🚀 NEW: Step 4 - Iterative Retrieval (if needed)
@@ -2962,7 +3258,8 @@ class RAGOrchestrator:
                     top_k=top_k // 2,  # Get fewer results for refinement
                     alpha=alpha,
                     metadata_filters=metadata_filters,
-                    enable_llm_evaluation=self.enable_llm_evaluation
+                    enable_llm_evaluation=self.enable_llm_evaluation,
+                    machine_filename_patterns=machine_filename_patterns
                 )
                 
                 # Combine with original results, avoiding duplicates
@@ -3052,7 +3349,8 @@ class RAGOrchestrator:
                 fallback_nodes = self.retriever.hybrid_search(
                     query=original_query,  # Use the original query before preprocessing
                     top_k=top_k * 2,  # Get more results
-                    alpha=alpha
+                    alpha=alpha,
+                    machine_filename_patterns=machine_filename_patterns
                 )
                 if fallback_nodes:
                     logger.info(f"✅ Fallback 1 succeeded: found {len(fallback_nodes)} results")
@@ -3077,7 +3375,8 @@ class RAGOrchestrator:
                         fallback_nodes = self.retriever.hybrid_search(
                             query=simplified_query,
                             top_k=top_k * 2,
-                            alpha=alpha
+                            alpha=alpha,
+                            machine_filename_patterns=machine_filename_patterns
                         )
                         if fallback_nodes:
                             logger.info(f"✅ Fallback 2 succeeded: found {len(fallback_nodes)} results")
@@ -3097,7 +3396,8 @@ class RAGOrchestrator:
                         fallback_nodes = self.retriever.hybrid_search(
                             query=keyword_query,
                             top_k=top_k * 2,
-                            alpha=alpha
+                            alpha=alpha,
+                            machine_filename_patterns=machine_filename_patterns
                         )
                         if fallback_nodes:
                             logger.info(f"✅ Fallback 3 succeeded: found {len(fallback_nodes)} results")
@@ -3117,7 +3417,8 @@ class RAGOrchestrator:
                         fallback_nodes = self.retriever.hybrid_search(
                             query=generic_query,
                             top_k=top_k * 2,
-                            alpha=alpha
+                            alpha=alpha,
+                            machine_filename_patterns=machine_filename_patterns
                         )
                         if fallback_nodes:
                             logger.info(f"✅ Fallback 4 succeeded: found {len(fallback_nodes)} results")
@@ -3134,7 +3435,8 @@ class RAGOrchestrator:
             context=context,
             intent=intent,
             answer_generator=self.answer_generator,
-            chat_history=chat_history or []
+            chat_history=chat_history or [],
+            matched_machine_name=matched_machine_name
         )
 
         # Optionally preface with a short glossary definition if we found one
