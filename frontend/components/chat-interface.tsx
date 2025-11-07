@@ -83,6 +83,23 @@ export function ChatInterface() {
         documentSources: response.document_sources || [],
       }
       
+      // Show summarization notice if query was summarized
+      if (response.summarization_info?.was_summarized) {
+        const info = response.summarization_info;
+        const reduction = ((1 - info.summarized_length / info.original_length) * 100).toFixed(0);
+        const contentType = info.content_type === 'email' ? 'email' : 
+                           info.content_type === 'error' ? 'error log' : 'long question';
+        
+        // Add a system message showing summarization
+        const summaryNotice: Message = {
+          id: `summary-${Date.now()}`,
+          role: "assistant",
+          content: `📝 Note: Your ${contentType} was automatically summarized (${reduction}% shorter) to extract the key question.`,
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, summaryNotice])
+      }
+      
       setMessages((prev) => [...prev, assistantMessage])
       setIsLoading(false)
 

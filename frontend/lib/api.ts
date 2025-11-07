@@ -21,6 +21,13 @@ export interface DocumentSource {
   snippet?: string;  // Short extract/snippet (~200 chars) for quick relevance check
 }
 
+export interface SummarizationInfo {
+  was_summarized: boolean;
+  content_type?: string;
+  original_length: number;
+  summarized_length: number;
+}
+
 export interface QueryResponse {
   query: string;
   answer: string;
@@ -38,6 +45,8 @@ export interface QueryResponse {
   response_time_ms?: number;
   session_id?: string;
   cache_hit?: boolean;
+  matched_machine_name?: string;
+  summarization_info?: SummarizationInfo;
 }
 
 export interface QueryParams {

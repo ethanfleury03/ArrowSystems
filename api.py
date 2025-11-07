@@ -27,6 +27,7 @@ import uvicorn
 
 from rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from utils.postgres_manager import PostgresManager
+from utils.query_summarizer import QuerySummarizer
 
 # Configure logging
 logging.basicConfig(
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 # Global variables for RAG pipeline and database
 rag_pipeline = None
 db_manager = None
+query_summarizer = None  # Query summarization utility
 
 
 # =============================================================================
@@ -287,7 +289,7 @@ async def lifespan(app: FastAPI):
     Application lifespan manager.
     Handles startup and shutdown events.
     """
-    global rag_pipeline, db_manager
+    global rag_pipeline, db_manager, query_summarizer
     
     # Startup
     logger.info("🚀 Starting FastAPI backend...")
@@ -343,6 +345,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to initialize RAG pipeline: {e}")
         raise
+    
+    # Initialize query summarizer
+    try:
+        query_summarizer = QuerySummarizer(
+            enabled=True,  # Enable by default
+            min_length=500  # Summarize queries >500 chars
+        )
+        logger.info("✅ Query summarizer initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to initialize query summarizer: {e}")
+        query_summarizer = None
     
     # Set startup time for uptime calculation
     app.state.start_time = time.time()
@@ -452,6 +465,45 @@ async def health_check():
         database_connected=db_manager is not None,
         uptime_seconds=time.time() - app.state.start_time if hasattr(app.state, 'start_time') else 0
     )
+
+
+@app.post("/summarize-query")
+async def summarize_query_endpoint(request: Dict[str, Any]):
+    """
+    Summarize a long query before sending to RAG pipeline.
+    Used by frontend to preprocess long user inputs (emails, error logs, etc.).
+    """
+    global query_summarizer
+    
+    if not query_summarizer:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Query summarization not available"}
+        )
+    
+    query = request.get("query", "")
+    if not query:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Query is required"}
+        )
+    
+    try:
+        summary, was_summarized, content_type = query_summarizer.summarize(query)
+        
+        return JSONResponse(content={
+            "summary": summary,
+            "was_summarized": was_summarized,
+            "content_type": content_type,
+            "original_length": len(query),
+            "summarized_length": len(summary)
+        })
+    except Exception as e:
+        logger.error(f"Error summarizing query: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Failed to summarize query: {str(e)}"}
+        )
 
 
 @app.post("/query", response_model=QueryResponse)
