@@ -36,9 +36,11 @@ export default function LoginPage() {
         return;
       }
 
-      // Redirect to main chat interface on success
+      // Redirect based on user role
+      // Admins go to /admin, regular users go to main chat
       // Use window.location for full page reload to ensure middleware sees the cookie
-      window.location.href = '/';
+      const redirectPath = data.role === 'ADMIN' ? '/admin' : '/';
+      window.location.href = redirectPath;
     } catch (err) {
       setError('An error occurred. Please try again.');
       setLoading(false);

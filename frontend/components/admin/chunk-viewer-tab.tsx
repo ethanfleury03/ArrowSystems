@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Table,
@@ -40,11 +40,7 @@ export function ChunkViewerTab() {
   const [regenerating, setRegenerating] = useState<string | null>(null);
   const { toast } = useToast();
 
-  useEffect(() => {
-    fetchChunks();
-  }, [page]);
-
-  const fetchChunks = async () => {
+  const fetchChunks = useCallback(async () => {
     try {
       setLoading(true);
       const response = await fetch(`/api/admin/chunks?page=${page}&page_size=50`);
@@ -61,7 +57,11 @@ export function ChunkViewerTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, toast]);
+
+  useEffect(() => {
+    fetchChunks();
+  }, [fetchChunks]);
 
   const handleRegenerateSummary = async (chunkId: string) => {
     try {

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Table,
   TableBody,
@@ -81,11 +81,7 @@ export function QueryAnalyticsTab() {
   
   const { toast } = useToast();
 
-  useEffect(() => {
-    fetchQueries();
-  }, [activeTab, currentPage, startDate, endDate, machineType, minConfidence, maxConfidence, sortBy, sortOrder, includeResolved]);
-
-  const fetchQueries = async () => {
+  const fetchQueries = useCallback(async () => {
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -121,7 +117,11 @@ export function QueryAnalyticsTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeTab, currentPage, startDate, endDate, machineType, minConfidence, maxConfidence, sortBy, sortOrder, includeResolved, pageSize, toast]);
+
+  useEffect(() => {
+    fetchQueries();
+  }, [fetchQueries]);
 
   const handleMarkResolved = async (queryId: string) => {
     try {
@@ -412,7 +412,7 @@ export function QueryAnalyticsTab() {
               <PaginationContent>
                 <PaginationPrevious
                   onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
-                  disabled={currentPage === 1}
+                  className={currentPage === 1 ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
                 />
                 {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
                   const page = currentPage <= 3 ? i + 1 : currentPage - 2 + i;
@@ -430,7 +430,7 @@ export function QueryAnalyticsTab() {
                 })}
                 <PaginationNext
                   onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
-                  disabled={currentPage === totalPages}
+                  className={currentPage === totalPages ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
                 />
               </PaginationContent>
             </Pagination>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Table,
@@ -28,11 +28,7 @@ export function SummariesTab() {
   const [generating, setGenerating] = useState(false);
   const { toast } = useToast();
 
-  useEffect(() => {
-    fetchMissingSummaries();
-  }, []);
-
-  const fetchMissingSummaries = async () => {
+  const fetchMissingSummaries = useCallback(async () => {
     try {
       setLoading(true);
       const response = await fetch('/api/admin/summaries/missing');
@@ -48,7 +44,11 @@ export function SummariesTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    fetchMissingSummaries();
+  }, [fetchMissingSummaries]);
 
   const handleBatchGenerate = async () => {
     try {

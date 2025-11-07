@@ -126,7 +126,7 @@ export function SearchSandboxTab() {
             <CardHeader>
               <CardTitle>Search Results</CardTitle>
               <CardDescription>
-                Query: "{results.query}" • {results.total_chunks} chunks retrieved
+                Query: &quot;{results.query}&quot; • {results.total_chunks} chunks retrieved
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
