@@ -19,9 +19,9 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -224,7 +224,7 @@ def _extract_document_sources(sources: List[Dict[str, Any]]) -> List[DocumentSou
     
     Args:
         sources: List of source dictionaries from RAG response (includes snippets)
-        
+            
     Returns:
         List of DocumentSource objects with doc_id, pages_used, and snippet
     """
@@ -442,6 +442,55 @@ class CacheStatsResponse(BaseModel):
     answer_generator: Dict[str, Any]
 
 
+# Admin API Models
+class DocumentInfo(BaseModel):
+    """Document information model."""
+    filename: str
+    size_bytes: int
+    uploaded_date: Optional[str] = None
+    chunk_count: int
+    file_path: str
+
+
+class ChunkInfo(BaseModel):
+    """Chunk information model."""
+    chunk_id: str
+    doc_title: str
+    chunk_text: str  # Trimmed to 200 chars
+    summary_exists: bool
+    embedding_exists: bool
+    page_label: Optional[str] = None
+    content_type: Optional[str] = None
+
+
+class ChunkDetail(BaseModel):
+    """Detailed chunk information."""
+    chunk_id: str
+    doc_title: str
+    chunk_text: str  # Full text
+    summary: Optional[str] = None
+    metadata: Dict[str, Any]
+    page_label: Optional[str] = None
+    content_type: Optional[str] = None
+
+
+class SearchSandboxRequest(BaseModel):
+    """Search sandbox request model."""
+    query: str
+    top_k: int = 10
+    alpha: float = 0.5
+
+
+class SearchSandboxResponse(BaseModel):
+    """Search sandbox response model."""
+    query: str
+    retrieved_chunks: List[Dict[str, Any]]
+    machine_detection_fired: bool
+    matched_machine_name: Optional[str] = None
+    document_ids: List[str]
+    total_chunks: int
+
+
 # API Endpoints
 @app.get("/", response_model=Dict[str, str])
 async def root():
@@ -570,6 +619,24 @@ async def query_knowledge_base(request: QueryRequest):
         # Extract document sources with page numbers for provenance
         document_sources = _extract_document_sources(response.sources)
         
+        # Track query for analytics
+        try:
+            from utils.query_tracker import log_query
+            documents_retrieved = [s['name'] for s in response.sources]
+            log_query(
+                query_text=request.query,
+                session_id=session_id,
+                answer_text=response.answer,
+                documents_retrieved=documents_retrieved,
+                relevance_score=response.confidence,  # Using confidence as relevance score
+                confidence=response.confidence,
+                response_time_ms=response_time_ms,
+                matched_machine_name=response.matched_machine_name,
+                sources=response.sources
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log query for analytics: {e}")
+        
         # Save to database if available
         if db_manager:
             try:
@@ -644,9 +711,9 @@ async def get_saved_responses(limit: int = 50, min_helpful_count: int = 1):
                 "sources": entry.get('sources', []),
                 "helpful_count": entry.get('helpful_count', 0),
                 "unhelpful_count": entry.get('unhelpful_count', 0),
-                "last_used": str(entry.get('last_used', '')),
-                "first_validated": str(entry.get('first_validated', '')),
-                "created_at": str(entry.get('created_at', ''))
+                "last_used": entry.get('last_used', ''),
+                "first_validated": entry.get('first_validated', ''),
+                "created_at": entry.get('created_at', '')
             })
         
         return {
@@ -654,13 +721,13 @@ async def get_saved_responses(limit: int = 50, min_helpful_count: int = 1):
             "count": len(formatted_responses),
             "saved": formatted_responses
         }
-        
     except Exception as e:
-        logger.error(f"Error fetching saved responses: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch saved responses: {str(e)}"
-        )
+        logger.error(f"Error fetching saved responses: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "saved": []
+        }
 
 
 @app.get("/history")
@@ -669,11 +736,11 @@ async def get_chat_history(user: str = "api_user", limit: int = 50):
     Get chat history for a user.
     
     Args:
-        user: Username (default: "api_user")
-        limit: Maximum number of queries to return (default: 50)
+        user: User identifier (default: "api_user")
+        limit: Maximum number of entries to return (default: 50)
     
     Returns:
-        List of query history items with query, answer, timestamp, and metadata
+        List of chat history entries
     """
     global db_manager
     
@@ -685,35 +752,20 @@ async def get_chat_history(user: str = "api_user", limit: int = 50):
         }
     
     try:
-        history = db_manager.get_user_query_history(user=user, limit=limit)
+        history = db_manager.get_query_history(user=user, limit=limit)
         
-        # Format history for frontend
+        # Format for frontend
         formatted_history = []
-        for item in history:
-            metadata = item.get('metadata', {})
-            if isinstance(metadata, str):
-                import json
-                try:
-                    metadata = json.loads(metadata)
-                except:
-                    metadata = {}
-            
-            # Get query_id - prefer integer ID, fall back to string ID from metadata
-            query_id = str(item.get('query_id', ''))
-            if not query_id and isinstance(metadata, dict):
-                query_id = str(metadata.get('query_id', ''))
-            if not query_id:
-                query_id = f"query_{item.get('id', 'unknown')}"
-            
+        for entry in history:
             formatted_history.append({
-                "id": query_id,
-                "query": str(item.get('query_text', '')) or '',
-                "answer": str(item.get('response_text', '')) or '',
-                "timestamp": str(item.get('timestamp', '')) or '',
-                "intent_type": metadata.get('intent_type', 'unknown') if isinstance(metadata, dict) else 'unknown',
-                "confidence": float(metadata.get('confidence', 0.0)) if isinstance(metadata, dict) else 0.0,
-                "sources": metadata.get('sources', []) if isinstance(metadata, dict) else [],
-                "response_time_ms": int(item.get('response_time_ms', 0)) or 0
+                "id": entry.get('id', ''),
+                "query": entry.get('query_text', ''),
+                "answer": entry.get('answer_text', ''),
+                "timestamp": entry.get('created_at', ''),
+                "intent_type": entry.get('intent_type', ''),
+                "confidence": entry.get('confidence', 0.0),
+                "sources": entry.get('sources', []),
+                "response_time_ms": entry.get('response_time_ms', 0)
             })
         
         return {
@@ -721,209 +773,951 @@ async def get_chat_history(user: str = "api_user", limit: int = 50):
             "count": len(formatted_history),
             "history": formatted_history
         }
-        
     except Exception as e:
-        logger.error(f"Error fetching chat history: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch chat history: {str(e)}"
-        )
-
-
-@app.post("/session/{session_id}/clear")
-async def clear_session(session_id: str):
-    """
-    Clear chat history for a specific session.
-    
-    Args:
-        session_id: Session ID to clear
-    """
-    await session_manager.clear_session(session_id)
-    return {
-        "status": "success",
-        "message": f"Session {session_id} cleared",
-        "session_id": session_id
-    }
-
-
-@app.get("/session/{session_id}/history")
-async def get_session_history(session_id: str):
-    """
-    Get chat history for a specific session.
-    
-    Args:
-        session_id: Session ID
-    """
-    history = await session_manager.get_history(session_id)
-    return {
-        "status": "success",
-        "session_id": session_id,
-        "message_count": len(history),
-        "history": history
-    }
-
-
-@app.get("/cache/stats", response_model=CacheStatsResponse)
-async def get_cache_stats():
-    """Get cache statistics."""
-    global rag_pipeline
-    
-    if not rag_pipeline or not rag_pipeline.is_initialized():
-        raise HTTPException(
-            status_code=503,
-            detail="RAG pipeline not initialized"
-        )
-    
-    try:
-        stats = rag_pipeline.get_cache_stats()
-        return CacheStatsResponse(**stats)
-    except Exception as e:
-        logger.error(f"Error getting cache stats: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting cache stats: {str(e)}"
-        )
-
-
-@app.post("/cache/clear")
-async def clear_caches():
-    """Clear all caches."""
-    global rag_pipeline
-    
-    if not rag_pipeline or not rag_pipeline.is_initialized():
-        raise HTTPException(
-            status_code=503,
-            detail="RAG pipeline not initialized"
-        )
-    
-    try:
-        rag_pipeline.clear_caches()
-        return {"message": "All caches cleared successfully"}
-    except Exception as e:
-        logger.error(f"Error clearing caches: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error clearing caches: {str(e)}"
-        )
+        logger.error(f"Error fetching chat history: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "history": []
+        }
 
 
 @app.get("/documents/{filename:path}")
 async def serve_document(filename: str):
     """
-    Serve PDF documents from the data directory.
-    
-    Args:
-        filename: PDF filename (e.g., "DuraFlex Installation Guide.pdf")
-    
-    Returns:
-        PDF file content
+    Serve document files (PDFs) from the data directory.
+    Used by frontend to display source documents.
     """
-    import os
-    from fastapi.responses import FileResponse
-    
-    # URL decode the filename (handles %20 for spaces, etc.)
     import urllib.parse
+    
+    # URL decode the filename
     filename = urllib.parse.unquote(filename)
     
     # Security: prevent directory traversal
-    filename = os.path.basename(filename)
+    if '..' in filename or filename.startswith('/'):
+        raise HTTPException(status_code=400, detail="Invalid filename")
     
-    # Find the file in data directory
+    # Try multiple possible data directory locations
     possible_paths = [
-        os.path.join("data", filename),
-        os.path.join("/app/data", filename),
-        os.path.join("../data", filename),
-        os.path.join("/workspace/data", filename),
-        os.path.join("/workspace/ArrowSystems/data", filename),
-        os.path.join("./data", filename)
+        "data",
+        "../data",
+        "/app/data",
+        "/workspace/data",
+        "/workspace/ArrowSystems/data"
     ]
     
-    file_path = None
-    for path in possible_paths:
-        if os.path.exists(path) and os.path.isfile(path):
-            file_path = path
-            logger.info(f"📄 Found document at: {file_path}")
-            break
+    for base_path in possible_paths:
+        file_path = os.path.join(base_path, filename)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            # Check file extension for security
+            if not filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+                raise HTTPException(status_code=400, detail="Invalid file type")
+            
+            return FileResponse(
+                file_path,
+                media_type="application/pdf" if filename.lower().endswith('.pdf') else "application/octet-stream",
+                filename=filename
+            )
     
-    if not file_path:
-        logger.warning(f"⚠️ Document not found: '{filename}'. Searched paths: {possible_paths}")
-        raise HTTPException(
-            status_code=404,
-            detail=f"Document '{filename}' not found. Available files in data directory."
-        )
-    
-    # Verify it's a PDF
-    if not filename.lower().endswith('.pdf'):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are supported"
-        )
-    
-    return FileResponse(
-        file_path,
-        media_type="application/pdf",
-        filename=filename
-    )
+    raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
 
 
-@app.get("/models/info")
-async def get_models_info():
-    """Get information about loaded models."""
+@app.post("/session/{session_id}/clear")
+async def clear_session(session_id: str):
+    """Clear chat history for a session."""
+    await session_manager.clear_session(session_id)
+    return {"status": "success", "message": f"Session {session_id} cleared"}
+
+
+@app.get("/session/{session_id}/history")
+async def get_session_history(session_id: str):
+    """Get chat history for a session."""
+    history = await session_manager.get_history(session_id)
+    return {"status": "success", "history": history}
+
+
+# =============================================================================
+# Admin API Endpoints
+# =============================================================================
+
+@app.get("/admin/documents")
+async def get_all_documents():
+    """
+    Get all documents in the index with enhanced metadata.
+    Returns list of documents with metadata including status, machine_model, etc.
+    """
     global rag_pipeline
     
     if not rag_pipeline or not rag_pipeline.is_initialized():
-        raise HTTPException(
-            status_code=503,
-            detail="RAG pipeline not initialized"
-        )
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
     try:
-        orchestrator = rag_pipeline.orchestrator
+        from utils.document_metadata import get_document_metadata
+        
+        index = rag_pipeline.orchestrator.index
+        if not index or not hasattr(index, 'docstore') or not index.docstore:
+            return {"documents": [], "total": 0}
+        
+        documents = []
+        docstore = index.docstore
+        
+        # Get all documents from docstore
+        doc_ids = list(docstore.docs.keys())
+        
+        # Group chunks by document filename and count pages
+        doc_chunks = {}
+        doc_pages = {}
+        if hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
+            retriever = rag_pipeline.orchestrator.retriever
+            if hasattr(retriever, 'corpus_nodes') and retriever.corpus_nodes:
+                for node_wrapper in retriever.corpus_nodes:
+                    node = node_wrapper.node if isinstance(node_wrapper, type('', (), {'node': None})()) and hasattr(node_wrapper, 'node') else node_wrapper
+                    if hasattr(node, 'metadata') and node.metadata:
+                        filename = node.metadata.get('file_name', 'Unknown')
+                        if filename not in doc_chunks:
+                            doc_chunks[filename] = []
+                            doc_pages[filename] = set()
+                        doc_chunks[filename].append(node)
+                        # Track unique pages
+                        page_label = node.metadata.get('page_label')
+                        if page_label:
+                            try:
+                                page_num = int(str(page_label).split('.')[0])  # Get page number
+                                doc_pages[filename].add(page_num)
+                            except:
+                                pass
+        
+        # Build document list
+        for doc_id in doc_ids[:1000]:  # Limit to first 1000
+            try:
+                doc = docstore.get_document(doc_id)
+                filename = doc.metadata.get('file_name', doc_id) if hasattr(doc, 'metadata') else doc_id
+                
+                # Get file path and size
+                file_path = os.path.join("data", filename)
+                size_bytes = 0
+                if os.path.exists(file_path):
+                    size_bytes = os.path.getsize(file_path)
+                
+                # Count chunks for this document
+                chunk_count = len(doc_chunks.get(filename, []))
+                
+                # Get page count
+                page_count = len(doc_pages.get(filename, set()))
+                if page_count == 0:
+                    # Fallback: estimate from chunk count or use 1
+                    page_count = max(1, chunk_count // 5)  # Rough estimate
+                
+                # Get file type
+                file_ext = os.path.splitext(filename)[1].lower()
+                file_type = file_ext[1:] if file_ext else 'pdf'  # Remove dot
+                
+                # Get metadata from document_metadata.json
+                doc_metadata = get_document_metadata(filename)
+                
+                documents.append({
+                    "filename": filename,
+                    "size_bytes": size_bytes,
+                    "uploaded_date": doc_metadata.get("last_ingestion_date"),
+                    "chunk_count": chunk_count,
+                    "page_count": page_count,
+                    "file_path": file_path,
+                    "file_type": file_type,
+                    "is_active": doc_metadata.get("is_active", True),
+                    "machine_model": doc_metadata.get("machine_model"),
+                    "category": doc_metadata.get("category"),
+                    "product_family": doc_metadata.get("product_family")
+                })
+            except Exception as e:
+                logger.debug(f"Error processing document {doc_id}: {e}")
+                continue
+        
+        # Remove duplicates by filename
+        seen = set()
+        unique_docs = []
+        for doc in documents:
+            if doc['filename'] not in seen:
+                seen.add(doc['filename'])
+                unique_docs.append(doc)
+        
+        return {"documents": unique_docs, "total": len(unique_docs)}
+        
+    except Exception as e:
+        logger.error(f"Error fetching documents: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
+
+
+@app.get("/admin/chunks")
+async def get_all_chunks(page: int = 1, page_size: int = 50):
+    """
+    Get paginated list of all chunks.
+    
+    Args:
+        page: Page number (1-indexed)
+        page_size: Number of chunks per page
+    """
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        retriever = rag_pipeline.orchestrator.retriever
+        if not retriever or not hasattr(retriever, 'corpus_nodes') or not retriever.corpus_nodes:
+            return {"chunks": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
+        
+        all_chunks = []
+        
+        for node_wrapper in retriever.corpus_nodes:
+            node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+            
+            # Get node metadata
+            metadata = node.metadata if hasattr(node, 'metadata') else {}
+            filename = metadata.get('file_name', 'Unknown')
+            chunk_text = node.text if hasattr(node, 'text') else str(node)
+            
+            # Check if summary exists (from query summarizer cache)
+            summary_exists = False
+            if query_summarizer:
+                # Check cache for this chunk
+                import hashlib
+                chunk_hash = hashlib.md5(chunk_text.encode('utf-8')).hexdigest()
+                cache_path = query_summarizer._get_cache_path(chunk_hash)
+                summary_exists = cache_path.exists()
+            
+            # Check if embedding exists (node has embedding)
+            embedding_exists = hasattr(node, 'embedding') and node.embedding is not None
+            
+            chunk_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+            
+            all_chunks.append({
+                "chunk_id": chunk_id,
+                "doc_title": filename,
+                "chunk_text": chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text,
+                "summary_exists": summary_exists,
+                "embedding_exists": embedding_exists,
+                "page_label": metadata.get('page_label'),
+                "content_type": metadata.get('content_type', 'text')
+            })
+        
+        # Paginate
+        total = len(all_chunks)
+        total_pages = (total + page_size - 1) // page_size
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_chunks = all_chunks[start_idx:end_idx]
         
         return {
-            "embedding_model": {
-                "name": getattr(orchestrator.embed_model, 'model_name', 'Unknown'),
-                "device": getattr(orchestrator.embed_model, 'device', 'Unknown')
-            },
-            "reranker": {
-                "available": orchestrator.reranker is not None,
-                "name": getattr(orchestrator.reranker, 'model_name', 'Unknown') if orchestrator.reranker else None
-            },
-            "llm_evaluation": {
-                "enabled": orchestrator.document_evaluator is not None,
-                "model": getattr(orchestrator.document_evaluator, 'model_name', 'Unknown') if orchestrator.document_evaluator else None
-            },
-            "llm_answers": {
-                "enabled": orchestrator.answer_generator is not None,
-                "model": getattr(orchestrator.answer_generator, 'model_name', 'Unknown') if orchestrator.answer_generator else None
-            }
+            "chunks": paginated_chunks,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages
         }
+        
     except Exception as e:
-        logger.error(f"Error getting models info: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting models info: {str(e)}"
+        logger.error(f"Error fetching chunks: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch chunks: {str(e)}")
+
+
+@app.get("/admin/chunks/{chunk_id}")
+async def get_chunk_detail(chunk_id: str):
+    """Get detailed information for a specific chunk."""
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        retriever = rag_pipeline.orchestrator.retriever
+        if not retriever or not hasattr(retriever, 'corpus_nodes'):
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        
+        # Find the chunk
+        for node_wrapper in retriever.corpus_nodes:
+            node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+            current_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+            
+            if current_id == chunk_id:
+                metadata = node.metadata if hasattr(node, 'metadata') else {}
+                chunk_text = node.text if hasattr(node, 'text') else str(node)
+                
+                # Get summary if exists
+                summary = None
+                if query_summarizer:
+                    import hashlib
+                    chunk_hash = hashlib.md5(chunk_text.encode('utf-8')).hexdigest()
+                    cached_summary = query_summarizer._load_from_cache(chunk_hash)
+                    if cached_summary:
+                        summary = cached_summary
+                
+                return {
+                    "chunk_id": chunk_id,
+                    "doc_title": metadata.get('file_name', 'Unknown'),
+                    "chunk_text": chunk_text,
+                    "summary": summary,
+                    "metadata": metadata,
+                    "page_label": metadata.get('page_label'),
+                    "content_type": metadata.get('content_type', 'text')
+                }
+        
+        raise HTTPException(status_code=404, detail="Chunk not found")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching chunk detail: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch chunk: {str(e)}")
+
+
+@app.get("/admin/documents/{filename}/chunks")
+async def get_document_chunks(filename: str):
+    """Get all chunks for a specific document."""
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        import urllib.parse
+        filename = urllib.parse.unquote(filename)
+        
+        retriever = rag_pipeline.orchestrator.retriever
+        if not retriever or not hasattr(retriever, 'corpus_nodes'):
+            return {"chunks": [], "total": 0}
+        
+        document_chunks = []
+        
+        for node_wrapper in retriever.corpus_nodes:
+            node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+            metadata = node.metadata if hasattr(node, 'metadata') else {}
+            
+            if metadata.get('file_name') == filename:
+                chunk_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                chunk_text = node.text if hasattr(node, 'text') else str(node)
+                
+                document_chunks.append({
+                    "chunk_id": chunk_id,
+                    "chunk_text": chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text,
+                    "page_label": metadata.get('page_label'),
+                    "content_type": metadata.get('content_type', 'text')
+                })
+        
+        return {"chunks": document_chunks, "total": len(document_chunks)}
+        
+    except Exception as e:
+        logger.error(f"Error fetching document chunks: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch document chunks: {str(e)}")
+
+
+@app.post("/admin/documents/{filename}/toggle")
+async def toggle_document_status(filename: str, request: Dict[str, Any]):
+    """
+    Enable or disable a document.
+    Inactive documents are excluded from search retrieval.
+    """
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        import urllib.parse
+        filename = urllib.parse.unquote(filename)
+        
+        # Security check
+        if '..' in filename or filename.startswith('/'):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        is_active = request.get("is_active", True)
+        
+        from utils.document_metadata import set_document_active
+        set_document_active(filename, is_active)
+        
+        status = "enabled" if is_active else "disabled"
+        logger.info(f"Document {filename} {status}")
+        
+        return {
+            "status": "success",
+            "message": f"Document {filename} {status}",
+            "is_active": is_active
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling document status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to toggle document status: {str(e)}")
+
+
+@app.post("/admin/documents/{filename}/metadata")
+async def update_document_metadata_endpoint(filename: str, request: Dict[str, Any]):
+    """
+    Update document metadata (machine_model, category, product_family).
+    """
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        import urllib.parse
+        filename = urllib.parse.unquote(filename)
+        
+        # Security check
+        if '..' in filename or filename.startswith('/'):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        # Extract allowed metadata fields
+        updates = {}
+        allowed_fields = ["machine_model", "category", "product_family"]
+        for field in allowed_fields:
+            if field in request:
+                updates[field] = request[field]
+        
+        if not updates:
+            raise HTTPException(status_code=400, detail="No valid metadata fields provided")
+        
+        from utils.document_metadata import update_document_metadata
+        update_document_metadata(filename, updates)
+        
+        logger.info(f"Updated metadata for {filename}: {updates}")
+        
+        return {
+            "status": "success",
+            "message": f"Metadata updated for {filename}",
+            "metadata": updates
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating metadata: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update metadata: {str(e)}")
+
+
+@app.delete("/admin/documents/{filename}")
+async def delete_document(filename: str):
+    """
+    Delete a document completely from:
+    - data storage (data/ and data/original_pdfs/)
+    - vector store entries
+    - docstore index
+    - metadata file
+    Then reload RAG pipeline.
+    """
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        import urllib.parse
+        filename = urllib.parse.unquote(filename)
+        
+        # Security check
+        if '..' in filename or filename.startswith('/'):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        # Delete file from data directories
+        data_path = os.path.join("data", filename)
+        original_path = os.path.join("data/original_pdfs", filename)
+        
+        deleted_files = []
+        if os.path.exists(data_path):
+            os.remove(data_path)
+            deleted_files.append(data_path)
+        if os.path.exists(original_path):
+            os.remove(original_path)
+            deleted_files.append(original_path)
+        
+        # Delete metadata
+        from utils.document_metadata import delete_document_metadata
+        delete_document_metadata(filename)
+        
+        # Remove from vector store and docstore
+        # Note: LlamaIndex doesn't support direct deletion, so we need to rebuild
+        # For now, mark as deleted and filter in retrieval
+        # In production, you'd want to trigger a re-index
+        
+        # Reload RAG pipeline
+        if rag_pipeline:
+            try:
+                # Determine storage path
+                possible_paths = [
+                    "latest_model",
+                    "../latest_model",
+                    "/workspace/latest_model",
+                    "/workspace/ArrowSystems/latest_model",
+                    "/workspace/storage",
+                    "./storage"
+                ]
+                
+                storage_path = None
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        storage_path = path
+                        break
+                
+                if storage_path:
+                    logger.info("Reloading RAG pipeline after document deletion...")
+                    rag_pipeline.orchestrator.load_index(storage_dir=storage_path)
+                    logger.info("✅ RAG pipeline reloaded")
+            except Exception as e:
+                logger.warning(f"Failed to reload RAG pipeline: {e}")
+        
+        logger.info(f"Deleted document: {filename} (files: {deleted_files})")
+        
+        return {
+            "status": "success",
+            "message": f"Document {filename} deleted completely. RAG pipeline reloaded.",
+            "deleted_files": deleted_files
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting document: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
+
+
+# =============================================================================
+# Admin Query Analytics Endpoints
+# =============================================================================
+
+@app.get("/admin/queries")
+async def get_all_queries_admin(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    machine_type: Optional[str] = None,
+    min_confidence: Optional[float] = None,
+    max_confidence: Optional[float] = None,
+    limit: int = 100,
+    offset: int = 0,
+    sort_by: str = "timestamp",
+    sort_order: str = "desc"
+):
+    """
+    Get all queries with filtering and sorting for admin analytics.
+    """
+    try:
+        from utils.query_tracker import get_all_queries
+        
+        result = get_all_queries(
+            start_date=start_date,
+            end_date=end_date,
+            machine_type=machine_type,
+            min_confidence=min_confidence,
+            max_confidence=max_confidence,
+            limit=limit,
+            offset=offset,
+            sort_by=sort_by,
+            sort_order=sort_order
         )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error fetching queries: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch queries: {str(e)}")
 
 
-# Error handlers
-@app.exception_handler(404)
-async def not_found_handler(request, exc):
-    """Handle 404 errors."""
-    return JSONResponse(
-        status_code=404,
-        content={"detail": "Endpoint not found. Check /docs for available endpoints."}
-    )
+@app.get("/admin/queries/failed")
+async def get_failed_queries_admin(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    machine_type: Optional[str] = None,
+    include_resolved: bool = False,
+    limit: int = 100,
+    offset: int = 0
+):
+    """
+    Get failed queries (low confidence or no documents retrieved).
+    """
+    try:
+        from utils.query_tracker import get_failed_queries
+        
+        result = get_failed_queries(
+            start_date=start_date,
+            end_date=end_date,
+            machine_type=machine_type,
+            include_resolved=include_resolved,
+            limit=limit,
+            offset=offset
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error fetching failed queries: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch failed queries: {str(e)}")
 
 
-@app.exception_handler(500)
-async def internal_error_handler(request, exc):
-    """Handle 500 errors."""
-    logger.error(f"Internal server error: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error. Check logs for details."}
-    )
+@app.post("/admin/queries/mark_resolved")
+async def mark_query_resolved(request: Dict[str, Any]):
+    """
+    Mark a failed query as resolved.
+    """
+    try:
+        from utils.query_tracker import mark_query_resolved
+        
+        query_id = request.get("query_id")
+        if not query_id:
+            raise HTTPException(status_code=400, detail="query_id is required")
+        
+        success = mark_query_resolved(query_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Query not found")
+        
+        return {
+            "status": "success",
+            "message": f"Query {query_id} marked as resolved"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error marking query as resolved: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to mark query as resolved: {str(e)}")
+
+
+@app.get("/admin/queries/stats")
+async def get_query_stats():
+    """
+    Get aggregate statistics about queries.
+    """
+    try:
+        from utils.query_tracker import get_query_stats
+        
+        stats = get_query_stats()
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Error fetching query stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch query stats: {str(e)}")
+
+
+@app.post("/admin/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """
+    Upload a document (PDF or DOCX) and trigger single-file ingestion.
+    Saves file to data/original_pdfs/ and ingests it into the existing index.
+    """
+    # Security check
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+    
+    allowed_extensions = ['.pdf', '.docx', '.md', '.markdown']
+    if not any(file.filename.lower().endswith(ext) for ext in allowed_extensions):
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}")
+    
+    try:
+        # Save file to data/original_pdfs/ directory
+        original_pdfs_dir = "data/original_pdfs"
+        os.makedirs(original_pdfs_dir, exist_ok=True)
+        
+        # Also save to data/ for compatibility
+        data_dir = "data"
+        os.makedirs(data_dir, exist_ok=True)
+        
+        # Read file content
+        content = await file.read()
+        
+        # Save to both locations
+        original_path = os.path.join(original_pdfs_dir, file.filename)
+        data_path = os.path.join(data_dir, file.filename)
+        
+        with open(original_path, "wb") as f:
+            f.write(content)
+        
+        with open(data_path, "wb") as f:
+            f.write(content)
+        
+        logger.info(f"Uploaded file: {original_path} ({len(content)} bytes)")
+        
+        # Import single-file ingestion utility
+        from utils.single_file_ingestion import ingest_single_file
+        
+        # Determine storage directory (same logic as main initialization)
+        possible_paths = [
+            "latest_model",
+            "../latest_model",
+            "/workspace/latest_model",
+            "/workspace/ArrowSystems/latest_model",
+            "/workspace/storage",
+            "./storage"
+        ]
+        
+        storage_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                storage_path = path
+                break
+        
+        if not storage_path:
+            raise HTTPException(
+                status_code=503,
+                detail="Index not found. Please ensure latest_model directory exists."
+            )
+        
+        # Use environment variable for cache directory if set
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface/hub')
+        if cache_dir.endswith('huggingface'):
+            cache_dir = os.path.join(cache_dir, 'hub')
+        
+        # Ingest the single file
+        logger.info(f"Starting ingestion for {file.filename}...")
+        result = ingest_single_file(
+            file_path=data_path,  # Use data/ path for ingestion
+            storage_dir=storage_path,
+            cache_dir=cache_dir,
+            enable_rewriting=False  # Can be made configurable
+        )
+        
+        if not result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Ingestion failed: {result.get('error', 'Unknown error')}"
+            )
+        
+        # Reload RAG pipeline to pick up new document
+        global rag_pipeline
+        if rag_pipeline and rag_pipeline.is_initialized():
+            logger.info("Reloading RAG pipeline to include new document...")
+            try:
+                rag_pipeline.orchestrator.load_index(storage_dir=storage_path)
+                logger.info("✅ RAG pipeline reloaded successfully")
+            except Exception as e:
+                logger.warning(f"Failed to reload RAG pipeline: {e}. New document may not be immediately searchable.")
+        
+        return {
+            "status": "success",
+            "message": f"File {file.filename} uploaded and ingested successfully.",
+            "file_path": original_path,
+            "size_bytes": len(content),
+            "doc_id": result["doc_id"],
+            "filename": result["filename"],
+            "page_count": result["page_count"],
+            "chunk_count": result["chunk_count"],
+            "text_chunks": result.get("text_chunks", 0),
+            "non_text_chunks": result.get("non_text_chunks", 0)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading/ingesting document: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to upload/ingest document: {str(e)}")
+
+
+@app.post("/admin/chunks/{chunk_id}/regenerate-summary")
+async def regenerate_chunk_summary(chunk_id: str):
+    """Regenerate summary for a specific chunk."""
+    global rag_pipeline, query_summarizer
+    
+    if not query_summarizer:
+        raise HTTPException(status_code=503, detail="Query summarizer not available")
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        # Find the chunk
+        retriever = rag_pipeline.orchestrator.retriever
+        if not retriever or not hasattr(retriever, 'corpus_nodes'):
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        
+        chunk_text = None
+        for node_wrapper in retriever.corpus_nodes:
+            node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+            current_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+            
+            if current_id == chunk_id:
+                chunk_text = node.text if hasattr(node, 'text') else str(node)
+                break
+        
+        if not chunk_text:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        
+        # Generate summary
+        summary, was_summarized, _ = query_summarizer.summarize(chunk_text)
+        
+        return {
+            "status": "success",
+            "chunk_id": chunk_id,
+            "summary": summary,
+            "was_summarized": was_summarized
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error regenerating summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate summary: {str(e)}")
+
+
+@app.delete("/admin/chunks/{chunk_id}")
+async def delete_chunk(chunk_id: str):
+    """
+    Delete a chunk from the index.
+    Note: This requires re-indexing to take effect.
+    """
+    # Note: LlamaIndex doesn't support direct chunk deletion
+    # This would require re-indexing without that chunk
+    # For now, return a message indicating re-index is needed
+    
+    return {
+        "status": "info",
+        "message": "Chunk deletion requires re-indexing. Please remove the source document and re-run ingest.py"
+    }
+
+
+@app.get("/admin/summaries/missing")
+async def get_missing_summaries():
+    """Get all chunks that are missing summaries."""
+    global rag_pipeline, query_summarizer
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    if not query_summarizer:
+        return {"chunks": [], "total": 0}
+    
+    try:
+        retriever = rag_pipeline.orchestrator.retriever
+        if not retriever or not hasattr(retriever, 'corpus_nodes'):
+            return {"chunks": [], "total": 0}
+        
+        missing_summaries = []
+        
+        for node_wrapper in retriever.corpus_nodes:
+            node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+            metadata = node.metadata if hasattr(node, 'metadata') else {}
+            chunk_text = node.text if hasattr(node, 'text') else str(node)
+            
+            # Check if summary exists
+            import hashlib
+            chunk_hash = hashlib.md5(chunk_text.encode('utf-8')).hexdigest()
+            cache_path = query_summarizer._get_cache_path(chunk_hash)
+            summary_exists = cache_path.exists()
+            
+            if not summary_exists:
+                chunk_id = node.node_id if hasattr(node, 'node_id') else str(id(node))
+                missing_summaries.append({
+                    "chunk_id": chunk_id,
+                    "doc_title": metadata.get('file_name', 'Unknown'),
+                    "chunk_text": chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text,
+                    "page_label": metadata.get('page_label'),
+                    "content_type": metadata.get('content_type', 'text')
+                })
+        
+        return {"chunks": missing_summaries, "total": len(missing_summaries)}
+        
+    except Exception as e:
+        logger.error(f"Error fetching missing summaries: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch missing summaries: {str(e)}")
+
+
+@app.post("/admin/summaries/generate-batch")
+async def generate_batch_summaries():
+    """Generate summaries for all chunks missing summaries."""
+    global rag_pipeline, query_summarizer
+    
+    if not query_summarizer:
+        raise HTTPException(status_code=503, detail="Query summarizer not available")
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        retriever = rag_pipeline.orchestrator.retriever
+        if not retriever or not hasattr(retriever, 'corpus_nodes'):
+            return {"generated": 0, "total": 0, "errors": []}
+        
+        generated = 0
+        errors = []
+        
+        for node_wrapper in retriever.corpus_nodes:
+            node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+            chunk_text = node.text if hasattr(node, 'text') else str(node)
+            
+            # Check if summary exists
+            import hashlib
+            chunk_hash = hashlib.md5(chunk_text.encode('utf-8')).hexdigest()
+            cache_path = query_summarizer._get_cache_path(chunk_hash)
+            
+            if not cache_path.exists():
+                try:
+                    # Generate summary
+                    summary, was_summarized, _ = query_summarizer.summarize(chunk_text)
+                    if was_summarized:
+                        generated += 1
+                except Exception as e:
+                    errors.append(str(e))
+                    logger.warning(f"Failed to generate summary: {e}")
+        
+        return {
+            "status": "success",
+            "generated": generated,
+            "total": len(retriever.corpus_nodes),
+            "errors": errors
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating batch summaries: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate batch summaries: {str(e)}")
+
+
+@app.post("/admin/search-sandbox", response_model=SearchSandboxResponse)
+async def search_sandbox(request: SearchSandboxRequest):
+    """
+    Search sandbox endpoint for admin testing.
+    Returns detailed retrieval information for debugging.
+    """
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        # Execute search
+        response = rag_pipeline.query(
+            query=request.query,
+            top_k=request.top_k,
+            alpha=request.alpha
+        )
+        
+        # Extract chunk details
+        retrieved_chunks = []
+        document_ids = set()
+        
+        for source in response.sources:
+            doc_name = source.get('name', 'Unknown')
+            document_ids.add(doc_name)
+            
+            retrieved_chunks.append({
+                "doc_id": doc_name,
+                "pages": source.get('pages', 'N/A'),
+                "content_type": source.get('content_type', 'text'),
+                "source_id": source.get('id', '')
+            })
+        
+        # Check machine detection
+        machine_detection_fired = response.matched_machine_name is not None
+        
+        return SearchSandboxResponse(
+            query=request.query,
+            retrieved_chunks=retrieved_chunks,
+            machine_detection_fired=machine_detection_fired,
+            matched_machine_name=response.matched_machine_name,
+            document_ids=list(document_ids),
+            total_chunks=len(retrieved_chunks)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in search sandbox: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
 # Startup time is now set in lifespan handler above
@@ -937,19 +1731,14 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8501, help="Port to bind to")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
-    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes")
     
     args = parser.parse_args()
-    
-    logger.info(f"🚀 Starting FastAPI server on {args.host}:{args.port}")
-    logger.info(f"📚 API documentation available at http://{args.host}:{args.port}/docs")
     
     uvicorn.run(
         "api:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
-        workers=args.workers if not args.reload else 1,
         log_level="info"
     )
 

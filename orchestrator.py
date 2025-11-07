@@ -760,9 +760,18 @@ class HybridRetriever:
         """
         Perform BM25 keyword search with filename boosting and pluralization handling.
         Documents with matching filenames get significant score boost.
+        Filters out inactive documents (is_active=False).
         """
         if not self.bm25 or not self.corpus_nodes:
             return []
+        
+        # Import document metadata checker
+        try:
+            from utils.document_metadata import is_document_active
+        except ImportError:
+            # Fallback if metadata module not available
+            def is_document_active(filename: str) -> bool:
+                return True
         
         # Tokenize query
         tokenized_query = query.lower().split()
@@ -802,6 +811,11 @@ class HybridRetriever:
             elif hasattr(node_wrapper, 'metadata') and node_wrapper.metadata:
                 filename = node_wrapper.metadata.get('file_name', '')
             
+            # Filter out inactive documents
+            if filename and not is_document_active(filename):
+                scores[idx] = 0.0  # Set score to 0 for inactive documents
+                continue
+            
             if filename:
                 filename_lower = filename.lower()
                 # Check if query terms appear in filename (use original terms, not expanded)
@@ -836,8 +850,16 @@ class HybridRetriever:
         return results
     
     def dense_search(self, query: str, top_k: int = 20) -> List[NodeWithScore]:
-        """Perform dense embedding search."""
+        """Perform dense embedding search. Filters out inactive documents."""
         try:
+            # Import document metadata checker
+            try:
+                from utils.document_metadata import is_document_active
+            except ImportError:
+                # Fallback if metadata module not available
+                def is_document_active(filename: str) -> bool:
+                    return True
+            
             # CRITICAL: Ensure embedding model is set before creating retriever
             # This must match the model used when building the index
             if not self.embed_model:
@@ -848,7 +870,7 @@ class HybridRetriever:
             Settings.embed_model = self.embed_model
             
             # Create retriever with explicit embedding model if possible
-            retriever = self.index.as_retriever(similarity_top_k=top_k)
+            retriever = self.index.as_retriever(similarity_top_k=top_k * 2)  # Get more to filter
             
             # Double-check: ensure retriever uses the correct embedding model
             # Some LlamaIndex versions need explicit setting
@@ -857,6 +879,22 @@ class HybridRetriever:
                     retriever.service_context.embed_model = self.embed_model
             
             results = retriever.retrieve(query)
+            
+            # Filter out inactive documents
+            filtered_results = []
+            for node in results:
+                filename = ""
+                if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
+                    if hasattr(node.node, 'metadata') and node.node.metadata:
+                        filename = node.node.metadata.get('file_name', '')
+                elif hasattr(node, 'metadata') and node.metadata:
+                    filename = node.metadata.get('file_name', '')
+                
+                # Only include active documents
+                if not filename or is_document_active(filename):
+                    filtered_results.append(node)
+            
+            results = filtered_results[:top_k]  # Trim to top_k after filtering
             
             if not results:
                 logger.warning(f"Dense search returned 0 results for query: {query[:50]}")
@@ -911,6 +949,13 @@ class HybridRetriever:
                     logger.debug(f"Broad query '{broad_query}' failed: {e}")
                     continue
             
+            # Import document metadata checker
+            try:
+                from utils.document_metadata import is_document_active
+            except ImportError:
+                def is_document_active(filename: str) -> bool:
+                    return True
+            
             # Group nodes by filename first
             nodes_by_filename = {}
             for node in all_nodes:
@@ -921,6 +966,10 @@ class HybridRetriever:
                         filename = node.node.metadata.get('file_name', '') or node.node.metadata.get('filename', '')
                 elif hasattr(node, 'metadata') and node.metadata:
                     filename = node.metadata.get('file_name', '') or node.metadata.get('filename', '')
+                
+                # Skip inactive documents
+                if filename and not is_document_active(filename):
+                    continue
                 
                 if filename:
                     if filename not in nodes_by_filename:
@@ -957,7 +1006,7 @@ class HybridRetriever:
         top_k: int = 10,
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
-        machine_filename_patterns: Optional[List[str]] = None
+        machine_filename_patterns: Optional[List[str]] = None  # Unused but kept for API compatibility
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search combining BM25 and dense embeddings (in parallel).
@@ -1236,7 +1285,8 @@ class HybridRetriever:
         top_k: int = 10,
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
-        enable_llm_evaluation: bool = True
+        enable_llm_evaluation: bool = True,
+        machine_filename_patterns: Optional[List[str]] = None
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search with optional LLM-based document evaluation.
@@ -1598,7 +1648,8 @@ class DocumentEvaluator:
         self, 
         query: str, 
         nodes: List[NodeWithScore],
-        max_documents: int = 15  # Increased from 3 to 15 for better coverage
+        max_documents: int = 15,  # Increased from 3 to 15 for better coverage
+        machine_filename_patterns: Optional[List[str]] = None  # For compatibility with hybrid_search calls
     ) -> List[NodeWithScore]:
         """
         Evaluate and re-rank retrieved documents using Claude.
