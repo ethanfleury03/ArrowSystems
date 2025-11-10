@@ -11,24 +11,9 @@ import { Sidebar } from "@/components/sidebar"
 import { DocumentsPanel } from "@/components/documents-panel"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Send, Sparkles, Menu, MessageSquare, FileText } from "lucide-react"
-import { sendQuery, getChatHistory, ChatHistoryItem, DocumentSource } from "@/lib/api"
+import { sendQuery, getChatHistory, ChatHistoryItem } from "@/lib/api"
+import type { Message, MessageSource } from "@/types/message"
 import { QuerySettings } from "@/components/sidebar"
-
-type Source = {
-  id: string
-  title: string
-  snippet: string
-  url?: string
-}
-
-type Message = {
-  id: string
-  role: "user" | "assistant"
-  content: string
-  timestamp: Date
-  sources?: Source[]
-  documentSources?: DocumentSource[]
-}
 
 export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([])
@@ -69,18 +54,48 @@ export function ChatInterface() {
 
     // Call RAG backend API
     try {
+      const currentSettings = querySettingsRef.current
       const response = await sendQuery(userMessage.content, {
-        top_k: querySettingsRef.current.topK,
-        alpha: querySettingsRef.current.alpha,
-        dynamic_windowing: querySettingsRef.current.dynamicWindowing,
+        top_k: currentSettings.topK,
+        alpha: currentSettings.alpha,
+        dynamic_windowing: currentSettings.dynamicWindowing,
       })
-      
+      const structuredSources = (response.sources ?? []).map((source) => ({
+        id: source.id,
+        name: source.name,
+        pages: source.pages,
+        content_type: source.content_type,
+      }))
+      const displaySources: MessageSource[] = (response.sources ?? []).map((source) => {
+        const pagesLabel = source.pages && source.pages !== "N/A" ? `Pages: ${source.pages}` : "Pages not specified"
+        const contentLabel = source.content_type ? source.content_type.toUpperCase() : "TEXT"
+        return {
+          id: source.id,
+          title: source.name,
+          snippet: `${contentLabel} · ${pagesLabel}`,
+        }
+      })
+
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
         content: response.answer,
         timestamp: new Date(),
-        documentSources: response.document_sources || [],
+        sources: displaySources,
+        metadata: {
+          query: userMessage.content,
+          reasoning: response.reasoning,
+          structuredSources,
+          documentSources: response.document_sources || [],
+          confidence: response.confidence,
+          intentType: response.intent_type,
+          intentConfidence: response.intent_confidence,
+          sessionId: response.session_id ?? undefined,
+          topK: currentSettings.topK,
+          alpha: currentSettings.alpha,
+          matchedMachineName: response.matched_machine_name ?? undefined,
+          isSaved: response.is_saved ?? false,
+        },
       }
       
       // Show summarization notice if query was summarized
@@ -148,6 +163,18 @@ export function ChatInterface() {
     querySettingsRef.current = settings
   }
 
+  const handleLoadConversation = (loadedMessages: Message[]) => {
+    if (!loadedMessages?.length) {
+      setSidebarOpen(false)
+      return
+    }
+
+    setMessages((prev) => [...prev, ...loadedMessages])
+    setSidebarOpen(false)
+    setInput("")
+    textareaRef.current?.focus()
+  }
+
   return (
     <div className="flex h-screen">
       <Sidebar 
@@ -155,6 +182,7 @@ export function ChatInterface() {
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onNewConversationReady={handleNewConversationReady}
         onSettingsChange={handleSettingsChange}
+        onLoadConversation={handleLoadConversation}
       />
 
       <div className="flex flex-1 flex-col relative">
@@ -203,8 +231,8 @@ export function ChatInterface() {
                     <FileText className="h-4 w-4" />
                     Documents
                     {(() => {
-                      const lastMessage = messages[messages.length - 1]
-                      const docCount = lastMessage?.documentSources?.length || 0
+                      const lastAssistant = [...messages].reverse().find((msg) => msg.role === "assistant")
+                      const docCount = lastAssistant?.metadata?.documentSources?.length || 0
                       return docCount > 0 ? (
                         <span className="ml-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
                           {docCount}
@@ -242,8 +270,8 @@ export function ChatInterface() {
               
               <TabsContent value="documents" className="flex-1 overflow-hidden m-0 mt-0">
                 {(() => {
-                  const lastMessage = messages[messages.length - 1]
-                  const documentSources = lastMessage?.documentSources || []
+                  const lastAssistant = [...messages].reverse().find((msg) => msg.role === "assistant")
+                  const documentSources = lastAssistant?.metadata?.documentSources || []
                   return <DocumentsPanel documentSources={documentSources} />
                 })()}
               </TabsContent>

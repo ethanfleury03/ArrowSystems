@@ -47,3 +47,5 @@ main()
     await prisma.$disconnect();
   });
 
+
+

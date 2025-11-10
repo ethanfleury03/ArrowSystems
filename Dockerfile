@@ -24,7 +24,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         curl \
         git \
         libgomp1 \
+        nodejs \
+        npm \
         && rm -rf /var/lib/apt/lists/*
+
+# Install Prisma CLIs required for generating the Python client
+RUN npm install -g prisma prisma-client-py
 
 # Create non-root user early
 RUN useradd -m -u 1000 appuser
@@ -77,6 +82,7 @@ ENV HF_DATASETS_CACHE=/app/.cache/huggingface
 ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
 
 # Create necessary directories
+# TODO: In production, mount GCS bucket for /data and use vector DB for latest_model
 RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/huggingface
 
 # Copy Python dependencies from dependencies stage (no build tools)
@@ -85,13 +91,33 @@ COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 
 # Create startup script (updated for runtime model downloads)
-RUN printf '#!/bin/bash\nset -e\n\n# Load .env file if it exists\nif [ -f ".env" ]; then\n    echo "📋 Loading environment variables from .env file..."\n    set -a\n    while IFS= read -r line || [ -n "$line" ]; do\n        if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then\n            continue\n        fi\n        export "$(echo "$line" | tr -d '\''\r'\'')"\n    done < .env\n    set +a\n    echo "✅ Environment variables loaded"\nfi\n\necho "=========================================="\nif [ "$BUILD_ENV" = "development" ]; then\n    echo "🔧 DuraFlex Technical Assistant (DEV)"\nelse\n    echo "🔧 DuraFlex Technical Assistant"\nfi\necho "=========================================="\necho ""\necho "📥 Models will download automatically on first use if not cached..."\necho ""\n\n# Check if index exists\nif [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then\n    echo "✅ RAG index found in latest_model/"\n    echo "   📊 Indexed chunks: $(python -c '\''import json; print(len(json.load(open("latest_model/docstore.json"))["docstore/data"]))'\'' 2>/dev/null || echo '\''unknown'\'')"\n    echo ""\nelse\n    echo "⚠️  RAG Index Not Found! Running ingestion..."\n    python ingest.py\n    echo "✅ Ingestion complete!"\nfi\n\necho "🚀 Starting FastAPI backend server..."\necho ""\necho "API will be available at: http://localhost:8000"\necho "API docs available at: http://localhost:8000/docs"\necho ""\necho "⚠️  Note: This container runs the backend API only."\necho "   Use docker-compose.yml to run both backend and frontend together."\necho ""\n\n# Start FastAPI with environment-specific settings\nif [ "$BUILD_ENV" = "development" ]; then\n    exec python api.py --host 0.0.0.0 --port 8000 --reload\nelse\n    exec python api.py --host 0.0.0.0 --port 8000\nfi\n' > /app/start.sh && chmod +x /app/start.sh
+RUN printf '#!/bin/bash\nset -e\n\n# Load .env file if it exists\nif [ -f ".env" ]; then\n    echo "📋 Loading environment variables from .env file..."\n    set -a\n    while IFS= read -r line || [ -n "$line" ]; do\n        if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then\n            continue\n        fi\n        export "$(echo "$line" | tr -d '\r')"\n    done < .env\n    set +a\n    echo "✅ Environment variables loaded"\nfi\n\necho "=========================================="\nif [ "$BUILD_ENV" = "development" ]; then\n    echo "🔧 DuraFlex Technical Assistant (DEV)"\nelse\n    echo "🔧 DuraFlex Technical Assistant"\nfi\necho "=========================================="\necho ""\necho "📥 Models will download automatically on first use if not cached..."\necho ""\n\n# Check if index exists\nif [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then\n    echo "✅ RAG index found in latest_model/"\n    echo "   📊 Indexed chunks: $(python -c 'import json; print(len(json.load(open("latest_model/docstore.json"))["docstore/data"]))' 2>/dev/null || echo 'unknown')"\n    echo ""\nelse\n    echo "⚠️  RAG Index Not Found! Running ingestion..."\n    python ingest.py\n    echo "✅ Ingestion complete!"\nfi\n\necho "🚀 Starting FastAPI backend server..."\necho ""\necho "API will be available at: http://localhost:8000"\necho "API docs available at: http://localhost:8000/docs"\necho ""\necho "⚠️  Note: This container runs the backend API only."\necho "   Use docker-compose.yml to run both backend and frontend together."\necho ""\n\n# Start FastAPI with environment-specific settings\nif [ "$BUILD_ENV" = "development" ]; then\n    exec python api.py --host 0.0.0.0 --port 8000 --reload\nelse\n    exec python api.py --host 0.0.0.0 --port 8000\nfi\n' > /app/start.sh && chmod +x /app/start.sh
 
 # Create health check script
 RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && chmod +x /app/healthcheck.sh
 
 # Copy application code (this is the frequently changing part)
 COPY . .
+
+# Install Prisma CLI and generate Python client during build
+RUN npm install -g prisma && \
+    python -m prisma generate && \
+    python - <<'PY' \
+import pathlib, shutil, prisma, os
+src = pathlib.Path('/app/prisma/generated')
+dst = pathlib.Path(prisma.__file__).parent
+for item in src.iterdir():
+    target = dst / item.name
+    if target.exists():
+        if target.is_file() or target.is_symlink():
+            target.unlink()
+        else:
+            shutil.rmtree(target)
+    if item.is_dir():
+        shutil.copytree(item, target)
+    else:
+        shutil.copy2(item, target)
+PY
 
 # Set ownership and permissions
 RUN chown -R appuser:appuser /app && \

@@ -26,8 +26,12 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 from rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
-from utils.postgres_manager import PostgresManager
+from orchestrator import StructuredResponse, QueryIntent
+from utils.postgres_manager import PrismaManager
 from utils.query_summarizer import QuerySummarizer
+from utils.feedback_manager import FeedbackManager
+from utils.saved_response_manager import SavedResponseManager
+from db.prisma_client import get_prisma
 
 # Configure logging
 logging.basicConfig(
@@ -44,6 +48,9 @@ logger = logging.getLogger(__name__)
 rag_pipeline = None
 db_manager = None
 query_summarizer = None  # Query summarization utility
+feedback_manager = None  # Local JSON feedback store
+saved_response_manager = None  # Local saved response store
+prisma_client = None
 
 
 # =============================================================================
@@ -289,18 +296,28 @@ async def lifespan(app: FastAPI):
     Application lifespan manager.
     Handles startup and shutdown events.
     """
-    global rag_pipeline, db_manager, query_summarizer
+    global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
+    global prisma_client
     
     # Startup
     logger.info("🚀 Starting FastAPI backend...")
-    
+
+    # Ensure logs directory exists for feedback storage
+    os.makedirs("logs", exist_ok=True)
     try:
-        # Initialize database manager
-        db_manager = PostgresManager()
-        logger.info(f"✅ Database connection initialized (Google Cloud SQL)")
+        feedback_path = os.path.join("logs", "saved_answers.json")
+        feedback_manager = FeedbackManager(feedback_path)
+        logger.info("✅ Feedback manager initialized")
     except Exception as e:
-        logger.warning(f"⚠️ Database initialization failed: {e}")
-        db_manager = None
+        feedback_manager = None
+        logger.warning(f"⚠️ Feedback manager initialization failed: {e}")
+
+    prisma_client = get_prisma()
+    await prisma_client.connect()
+    logger.info("✅ Prisma connected to Postgres")
+
+    db_manager = PrismaManager(prisma_client)
+    saved_response_manager = SavedResponseManager(prisma_client)
     
     # Initialize RAG pipeline
     try:
@@ -364,6 +381,9 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("🛑 Shutting down FastAPI backend...")
+    if prisma_client:
+        await prisma_client.disconnect()
+        logger.info("ℹ️ Prisma disconnected")
 
 
 # Create FastAPI app with lifespan
@@ -424,6 +444,66 @@ class QueryResponse(BaseModel):
     session_id: Optional[str] = None
     cache_hit: bool = False
     matched_machine_name: Optional[str] = None  # Machine name matched in query (if >=95% similarity)
+    is_saved: bool = False
+
+
+class FeedbackRequest(BaseModel):
+    """Request model for feedback endpoint."""
+    query: str = Field(..., description="Original user query", min_length=1)
+    answer: str = Field(..., description="Assistant response that was rated", min_length=1)
+    is_helpful: bool = Field(..., description="True if marked helpful, False if unhelpful")
+    session_id: Optional[str] = Field(None, description="Session identifier associated with the response")
+    reasoning: Optional[str] = Field(None, description="Reasoning summary returned with the response")
+    sources: List[SourceInfo] = Field(default_factory=list, description="Structured sources backing the answer")
+    document_sources: Optional[List[DocumentSource]] = Field(
+        None, description="Document provenance with page numbers and snippets"
+    )
+    confidence: Optional[float] = Field(None, description="Confidence score returned with the response")
+    intent_type: Optional[str] = Field(None, description="Detected intent type")
+    intent_confidence: Optional[float] = Field(None, description="Intent confidence score")
+    matched_machine_name: Optional[str] = Field(None, description="Matched machine name, if any")
+    top_k: int = Field(10, description="Top-k used when generating the response", ge=1, le=50)
+    alpha: float = Field(0.5, description="Alpha used when generating the response", ge=0.0, le=1.0)
+    user: str = Field("api_user", description="User providing the feedback")
+
+
+class FeedbackResponse(BaseModel):
+    """Response model for feedback endpoint."""
+    status: str
+    saved_to_file: bool
+    saved_to_db: bool
+    cache_updated: bool
+    message: Optional[str] = None
+
+
+class SaveResponseRequest(BaseModel):
+    """Request model for saving/unsaving responses."""
+    query: str = Field(..., description="Original user query", min_length=1)
+    answer: str = Field(..., description="Assistant response to toggle", min_length=1)
+    is_saved: bool = Field(True, description="Set to true to save, false to unsave")
+    session_id: Optional[str] = Field(None, description="Session identifier")
+    reasoning: Optional[str] = Field(None, description="Reasoning summary")
+    sources: List[SourceInfo] = Field(default_factory=list, description="Structured sources")
+    document_sources: Optional[List[DocumentSource]] = Field(
+        None, description="Document provenance with page numbers and snippets"
+    )
+    confidence: Optional[float] = Field(None, description="Confidence score")
+    intent_type: Optional[str] = Field(None, description="Intent classification")
+    intent_confidence: Optional[float] = Field(None, description="Intent confidence")
+    matched_machine_name: Optional[str] = Field(None, description="Matched machine name, if applicable")
+    top_k: int = Field(10, description="Top-k used during retrieval", ge=1, le=50)
+    alpha: float = Field(0.5, description="Alpha balance used during retrieval", ge=0.0, le=1.0)
+    user: str = Field("api_user", description="User toggling the saved state")
+
+
+class SaveResponseResponse(BaseModel):
+    """Response model for saving/unsaving responses."""
+    status: str
+    is_saved: bool
+    saved_to_file: bool
+    saved_to_db: bool
+    cache_updated: bool
+    message: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -564,7 +644,7 @@ async def query_knowledge_base(request: QueryRequest):
     answer, reasoning, sources, and metadata. If session_id is provided,
     chat history is maintained and included in the LLM context.
     """
-    global rag_pipeline
+    global rag_pipeline, db_manager, saved_response_manager
     
     if not rag_pipeline or not rag_pipeline.is_initialized():
         raise HTTPException(
@@ -638,10 +718,12 @@ async def query_knowledge_base(request: QueryRequest):
             logger.warning(f"Failed to log query for analytics: {e}")
         
         # Save to database if available
+        user_id = "api_user"  # TODO: replace with authenticated user when auth is wired
+
         if db_manager:
             try:
-                query_id = db_manager.save_query(
-                    user="api_user",  # Could be extracted from auth headers
+                await db_manager.save_query(
+                    user=user_id,
                     query_text=request.query,
                     answer_text=response.answer,
                     intent_type=response.intent.intent_type,
@@ -651,9 +733,16 @@ async def query_knowledge_base(request: QueryRequest):
                     response_time_ms=response_time_ms,
                     session_id=session_id
                 )
-                logger.info(f"Query saved to database: {query_id}")
+                logger.info("Query saved to database")
             except Exception as e:
                 logger.warning(f"Failed to save query to database: {e}")
+
+        is_saved = False
+        if saved_response_manager:
+            try:
+                is_saved = await saved_response_manager.is_saved(request.query, user_id)
+            except Exception as e:
+                logger.debug(f"Saved-state check failed: {e}")
         
         return QueryResponse(
             query=response.query,
@@ -666,7 +755,8 @@ async def query_knowledge_base(request: QueryRequest):
             intent_confidence=response.intent.confidence,
             response_time_ms=response_time_ms,
             session_id=session_id,
-            matched_machine_name=response.matched_machine_name
+            matched_machine_name=response.matched_machine_name,
+            is_saved=is_saved
         )
         
     except Exception as e:
@@ -677,8 +767,161 @@ async def query_knowledge_base(request: QueryRequest):
         )
 
 
+@app.post("/feedback", response_model=FeedbackResponse)
+async def submit_feedback(request: FeedbackRequest) -> FeedbackResponse:
+    """
+    Capture user feedback (thumbs up/down) for a given response.
+    Persists to local JSON store, optional database, and updates caches.
+    """
+    global feedback_manager, db_manager, rag_pipeline
+
+    if not request.query.strip() or not request.answer.strip():
+        raise HTTPException(status_code=400, detail="Query and answer are required for feedback.")
+
+    saved_to_file = False
+    saved_to_db = False
+    cache_updated = False
+
+    # Persist feedback to JSON store
+    if feedback_manager:
+        try:
+            saved_to_file = feedback_manager.save_feedback(
+                query=request.query,
+                answer=request.answer,
+                is_helpful=request.is_helpful,
+                confidence=request.confidence or 0.0,
+                intent_type=request.intent_type or "",
+                sources=[source.name for source in request.sources],
+                user=request.user or "api_user"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist feedback locally: {e}")
+
+    if db_manager and request.query:
+        try:
+            saved_to_db = await db_manager.save_feedback(
+                query_id=request.query,
+                user=request.user or "api_user",
+                is_helpful=request.is_helpful,
+                confidence=request.confidence,
+                intent_type=request.intent_type,
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist feedback to Prisma: %s", exc)
+
+    pipeline = rag_pipeline
+    if pipeline and pipeline.is_initialized():
+        try:
+            if request.is_helpful:
+                intent = QueryIntent(
+                    intent_type=request.intent_type or "general",
+                    confidence=request.intent_confidence or (request.confidence or 0.0),
+                    keywords=[],
+                    requires_subqueries=False
+                )
+                structured_sources = [
+                    {
+                        "id": source.id,
+                        "name": source.name,
+                        "pages": source.pages,
+                        "content_type": source.content_type
+                    }
+                    for source in request.sources
+                ]
+                response_obj = StructuredResponse(
+                    query=request.query,
+                    answer=request.answer,
+                    reasoning=request.reasoning or "",
+                    sources=structured_sources,
+                    confidence=request.confidence or 0.0,
+                    intent=intent,
+                    matched_machine_name=request.matched_machine_name
+                )
+                pipeline.orchestrator.cache.set(request.query, response_obj, request.top_k, request.alpha)
+                if pipeline.orchestrator.semantic_cache:
+                    pipeline.orchestrator.semantic_cache.set(request.query, response_obj)
+                cache_updated = True
+            else:
+                removed_exact = pipeline.orchestrator.cache.remove(request.query, request.top_k, request.alpha)
+                if pipeline.orchestrator.semantic_cache:
+                    pipeline.orchestrator.semantic_cache.remove(request.query)
+                cache_updated = removed_exact
+        except Exception as e:
+            logger.warning(f"Failed to update caches based on feedback: {e}")
+
+    status = "success"
+    message = "Feedback recorded"
+    if not saved_to_file and not saved_to_db:
+        status = "accepted"
+        message = "Feedback accepted but not persisted (no storage available)."
+
+    return FeedbackResponse(
+        status=status,
+        saved_to_file=saved_to_file,
+        saved_to_db=saved_to_db,
+        cache_updated=cache_updated,
+        message=message
+    )
+
+
+@app.post("/saved", response_model=SaveResponseResponse)
+async def toggle_saved_response(request: SaveResponseRequest) -> SaveResponseResponse:
+    """
+    Save or unsave a response (bookmark functionality).
+    """
+    global saved_response_manager
+
+    if not request.query.strip() or not request.answer.strip():
+        raise HTTPException(status_code=400, detail="Query and answer are required to save a response.")
+
+    user_id = request.user or "api_user"
+    saved_to_file = False
+    saved_to_db = False  # Dedicated DB storage not implemented
+    cache_updated = False
+
+    if request.is_saved:
+        # Persist to local storage
+        if saved_response_manager:
+            try:
+                saved_to_file = await saved_response_manager.save_response(
+                    query=request.query,
+                    answer=request.answer,
+                    user=user_id,
+                    sources=[source.name for source in request.sources],
+                )
+                saved_to_db = saved_to_file
+            except Exception as e:
+                logger.warning(f"Failed to persist saved response locally: {e}")
+    else:
+        # Remove from local storage
+        if saved_response_manager:
+            try:
+                saved_to_file = await saved_response_manager.remove_response(request.query, user_id)
+                saved_to_db = saved_to_file
+            except Exception as e:
+                logger.warning(f"Failed to remove saved response locally: {e}")
+        cache_updated = False
+
+    status = "success"
+    message = "Response saved" if request.is_saved else "Response unsaved"
+    if not request.is_saved and not (saved_to_file or saved_to_db):
+        status = "accepted"
+        message = "Response unsaved (no persisted entries found)."
+    elif request.is_saved and not (saved_to_file or saved_to_db):
+        status = "accepted"
+        message = "Response saved in memory (no persistence available)."
+
+    return SaveResponseResponse(
+        status=status,
+        is_saved=request.is_saved,
+        saved_to_file=saved_to_file,
+        saved_to_db=saved_to_db,
+        cache_updated=cache_updated,
+        message=message,
+    )
+
 @app.get("/saved")
-async def get_saved_responses(limit: int = 50, min_helpful_count: int = 1):
+async def get_saved_responses(limit: int = 50, min_helpful_count: int = 1, user: str = "api_user"):
     """
     Get saved/validated responses that have been marked as helpful.
     
@@ -689,40 +932,40 @@ async def get_saved_responses(limit: int = 50, min_helpful_count: int = 1):
     Returns:
         List of saved responses with query, answer, sources, and metadata
     """
-    global db_manager
+    global saved_response_manager
     
-    if not db_manager:
+    if not saved_response_manager:
         return {
-            "status": "no_database",
-            "message": "Database not available",
+            "status": "no_storage",
+            "message": "Saved response storage not available",
             "saved": []
         }
     
     try:
-        validated_entries = db_manager.get_all_validated_qna(limit=limit, min_helpful_count=min_helpful_count)
-        
-        # Format for frontend
-        formatted_responses = []
-        for entry in validated_entries:
-            formatted_responses.append({
-                "id": entry.get('query_hash', ''),
-                "query": entry.get('query_text', ''),
-                "answer": entry.get('answer_text', ''),
-                "sources": entry.get('sources', []),
-                "helpful_count": entry.get('helpful_count', 0),
-                "unhelpful_count": entry.get('unhelpful_count', 0),
-                "last_used": entry.get('last_used', ''),
-                "first_validated": entry.get('first_validated', ''),
-                "created_at": entry.get('created_at', '')
-            })
+        entries = await saved_response_manager.list_responses(user=user)
+        filtered = [
+            {
+                "id": entry.get("id", ""),
+                "query": entry.get("query", ""),
+                "answer": entry.get("answer", ""),
+                "sources": entry.get("sources", []),
+                "helpful_count": entry.get("helpful_count", 0),
+                "unhelpful_count": entry.get("unhelpful_count", 0),
+                "last_used": entry.get("last_used", entry.get("updated_at", "")),
+                "first_validated": entry.get("created_at", ""),
+                "created_at": entry.get("created_at", "")
+            }
+            for entry in entries
+            if entry.get("helpful_count", 0) >= min_helpful_count
+        ][:limit]
         
         return {
             "status": "success",
-            "count": len(formatted_responses),
-            "saved": formatted_responses
+            "count": len(filtered),
+            "saved": filtered
         }
     except Exception as e:
-        logger.error(f"Error fetching saved responses: {e}", exc_info=True)
+        logger.error(f"Error reading saved responses: {e}")
         return {
             "status": "error",
             "message": str(e),
@@ -752,7 +995,7 @@ async def get_chat_history(user: str = "api_user", limit: int = 50):
         }
     
     try:
-        history = db_manager.get_query_history(user=user, limit=limit)
+        history = await db_manager.get_query_history(user=user, limit=limit)
         
         # Format for frontend
         formatted_history = []
