@@ -100,6 +100,9 @@ Thumbs.db
 
 # Node.js (if any)
 node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -116,6 +119,20 @@ data/*.docx
 data/*.xlsx
 data/*.csv
 !data/.gitkeep
+
+# Exclude large runtime assets from Docker image
+data/
+latest_model/
+logs/
+rag_app.db
+config/users.yaml
+Users.txt
+frontend/node_modules/
+
+# Keep placeholder files for directory structure
+!data/.gitkeep
+!latest_model/.gitkeep
+!logs/.gitkeep
 
 # Cache directories
 .cache/

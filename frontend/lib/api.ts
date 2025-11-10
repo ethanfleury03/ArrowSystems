@@ -15,6 +15,13 @@ const apiClient = axios.create({
   },
 });
 
+export interface SourceInfo {
+  id: string;
+  name: string;
+  pages: string;
+  content_type: string;
+}
+
 export interface DocumentSource {
   doc_id: string;
   pages_used: number[];
@@ -32,12 +39,7 @@ export interface QueryResponse {
   query: string;
   answer: string;
   reasoning?: string;
-  sources?: Array<{
-    id: string;
-    name: string;
-    pages: string;
-    content_type: string;
-  }>;
+  sources?: SourceInfo[];
   document_sources?: DocumentSource[];
   confidence?: number;
   intent_type?: string;
@@ -47,6 +49,7 @@ export interface QueryResponse {
   cache_hit?: boolean;
   matched_machine_name?: string;
   summarization_info?: SummarizationInfo;
+  is_saved?: boolean;
 }
 
 export interface QueryParams {
@@ -131,13 +134,90 @@ export interface SavedResponsesResponse {
   saved: SavedResponse[];
 }
 
-export async function getSavedResponses(limit: number = 50, minHelpfulCount: number = 1): Promise<SavedResponsesResponse> {
+export async function getSavedResponses(limit: number = 50, minHelpfulCount: number = 1, user: string = 'api_user'): Promise<SavedResponsesResponse> {
   try {
-    const response = await apiClient.get<SavedResponsesResponse>(`/saved?limit=${limit}&min_helpful_count=${minHelpfulCount}`);
+    const response = await apiClient.get<SavedResponsesResponse>(`/saved?user=${user}&limit=${limit}&min_helpful_count=${minHelpfulCount}`);
     return response.data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to get saved responses';
+      throw new Error(errorMessage);
+    }
+    throw error;
+  }
+}
+
+export interface FeedbackPayload {
+  query: string;
+  answer: string;
+  is_helpful: boolean;
+  session_id?: string;
+  reasoning?: string;
+  sources?: SourceInfo[];
+  document_sources?: DocumentSource[];
+  confidence?: number;
+  intent_type?: string;
+  intent_confidence?: number;
+  matched_machine_name?: string;
+  top_k?: number;
+  alpha?: number;
+  user?: string;
+}
+
+export interface FeedbackResponse {
+  status: string;
+  saved_to_file: boolean;
+  saved_to_db: boolean;
+  cache_updated: boolean;
+  message?: string;
+}
+
+export async function submitFeedback(payload: FeedbackPayload): Promise<FeedbackResponse> {
+  try {
+    const response = await apiClient.post<FeedbackResponse>('/feedback', payload);
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to submit feedback';
+      throw new Error(errorMessage);
+    }
+    throw error;
+  }
+}
+
+export interface SaveResponsePayload {
+  query: string;
+  answer: string;
+  is_saved: boolean;
+  session_id?: string;
+  reasoning?: string;
+  sources?: SourceInfo[];
+  document_sources?: DocumentSource[];
+  confidence?: number;
+  intent_type?: string;
+  intent_confidence?: number;
+  matched_machine_name?: string;
+  top_k?: number;
+  alpha?: number;
+  user?: string;
+}
+
+export interface SaveResponseResult {
+  status: string;
+  is_saved: boolean;
+  saved_to_file: boolean;
+  saved_to_db: boolean;
+  cache_updated: boolean;
+  message?: string;
+}
+
+export async function toggleSavedResponse(payload: SaveResponsePayload): Promise<SaveResponseResult> {
+  try {
+    const response = await apiClient.post<SaveResponseResult>('/saved', payload);
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to save response';
       throw new Error(errorMessage);
     }
     throw error;

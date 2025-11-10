@@ -8,12 +8,14 @@ import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { useState, useEffect } from "react"
 import { getChatHistory, ChatHistoryItem, getHealth, getSavedResponses, SavedResponse } from "@/lib/api"
+import type { Message as ChatMessage, MessageSource } from "@/types/message"
 
 interface SidebarProps {
   isOpen: boolean
   onToggle: () => void
   onNewConversationReady?: (adder: (conversation: ChatHistoryItem) => void) => void
   onSettingsChange?: (settings: QuerySettings) => void
+  onLoadConversation?: (messages: ChatMessage[]) => void
 }
 
 export interface QuerySettings {
@@ -24,7 +26,7 @@ export interface QuerySettings {
 
 // Removed mock data - will use real data from API
 
-export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsChange }: SidebarProps) {
+export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsChange, onLoadConversation }: SidebarProps) {
   const [activeTab, setActiveTab] = useState<"options" | "saved" | "history" | "settings">("options")
   const [searchQuery, setSearchQuery] = useState("")
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([])
@@ -77,11 +79,18 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
 
   // Fetch saved responses when showing saved tab
   useEffect(() => {
-    if (activeTab === "saved" && savedResponses.length === 0 && !isLoadingSaved) {
+    if (activeTab === "saved" && !isLoadingSaved) {
       fetchSavedResponses()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab])
+
+  useEffect(() => {
+    const handler = () => fetchSavedResponses()
+    window.addEventListener("saved-responses:refresh", handler)
+    return () => window.removeEventListener("saved-responses:refresh", handler)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const fetchChatHistory = async () => {
     setIsLoadingHistory(true)
@@ -101,7 +110,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   const fetchSavedResponses = async () => {
     setIsLoadingSaved(true)
     try {
-      const response = await getSavedResponses(50, 1)  // Changed to 1 - show responses with at least 1 thumbs up
+      const response = await getSavedResponses(50, 1, 'api_user')  // Show responses saved by current user
       if (response.status === 'success') {
         setSavedResponses(response.saved)
       }
@@ -117,6 +126,114 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     chat.query.toLowerCase().includes(searchQuery.toLowerCase()) ||
     chat.answer.toLowerCase().includes(searchQuery.toLowerCase())
   )
+
+  const buildStructuredSources = (sources?: string[]) => {
+    return (sources ?? []).map((name, index) => ({
+      id: `[${index + 1}]`,
+      name,
+      pages: "N/A",
+      content_type: "text",
+    }))
+  }
+
+  const buildDisplaySources = (structuredSources: ReturnType<typeof buildStructuredSources>): MessageSource[] => {
+    return structuredSources.map((source) => ({
+      id: source.id,
+      title: source.name,
+      snippet: "Referenced document",
+    }))
+  }
+
+  const parseTimestamp = (value?: string) => {
+    if (!value) return new Date()
+    const parsed = new Date(value)
+    return isNaN(parsed.getTime()) ? new Date() : parsed
+  }
+
+  const loadConversationFromHistory = (chat: ChatHistoryItem) => {
+    if (!onLoadConversation) return
+
+    const structuredSources = buildStructuredSources(chat.sources)
+    const displaySources = buildDisplaySources(structuredSources)
+    const timestamp = parseTimestamp(chat.timestamp)
+
+    const conversation: ChatMessage[] = [
+      {
+        id: `${chat.id}-user`,
+        role: "user",
+        content: chat.query,
+        timestamp,
+      },
+      {
+        id: `${chat.id}-assistant`,
+        role: "assistant",
+        content: chat.answer,
+        timestamp,
+        sources: displaySources,
+        metadata: {
+          query: chat.query,
+          reasoning: "",
+          structuredSources,
+          documentSources: [],
+          confidence: chat.confidence,
+          intentType: chat.intent_type,
+          intentConfidence: chat.confidence,
+          sessionId: undefined,
+          topK: 10,
+          alpha: 0.5,
+          matchedMachineName: undefined,
+          isSaved: false,
+        },
+      },
+    ]
+
+    onLoadConversation(conversation)
+    setShowChatHistory(false)
+    setActiveTab("options")
+    setSearchQuery("")
+  }
+
+  const loadConversationFromSaved = (response: SavedResponse) => {
+    if (!onLoadConversation) return
+
+    const structuredSources = buildStructuredSources(response.sources)
+    const displaySources = buildDisplaySources(structuredSources)
+    const timestamp = parseTimestamp(response.last_used)
+
+    const conversation: ChatMessage[] = [
+      {
+        id: `${response.id}-user`,
+        role: "user",
+        content: response.query,
+        timestamp,
+      },
+      {
+        id: `${response.id}-assistant`,
+        role: "assistant",
+        content: response.answer,
+        timestamp,
+        sources: displaySources,
+        metadata: {
+          query: response.query,
+          reasoning: "",
+          structuredSources,
+          documentSources: [],
+          confidence: response.helpful_count > 0 ? Math.min(response.helpful_count / 5, 0.95) : undefined,
+          intentType: undefined,
+          intentConfidence: undefined,
+          sessionId: undefined,
+          topK: 10,
+          alpha: 0.5,
+          matchedMachineName: undefined,
+          isSaved: true,
+        },
+      },
+    ]
+
+    onLoadConversation(conversation)
+    setActiveTab("options")
+    setSearchQuery("")
+  }
 
   const handleChatHistoryClick = () => {
     setShowChatHistory(true)
@@ -370,8 +487,8 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                         key={chat.id}
                         className="w-full rounded-lg border border-border bg-card p-3 text-left transition-colors hover:bg-accent hover:border-primary/50 group"
                         onClick={() => {
-                          // TODO: Load this conversation into the chat
-                          console.log("Load conversation:", chat.id)
+                          loadConversationFromHistory(chat)
+                          onToggle()
                         }}
                       >
                         <div className="flex items-start gap-2">
@@ -671,8 +788,8 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                         key={response.id}
                         className="w-full rounded-lg border border-border bg-card p-3 text-left transition-colors hover:bg-accent hover:border-primary/50 group"
                         onClick={() => {
-                          // TODO: Load this saved response into the chat
-                          console.log("Load saved response:", response.id)
+                          loadConversationFromSaved(response)
+                          onToggle()
                         }}
                       >
                         <div className="flex items-start gap-2">

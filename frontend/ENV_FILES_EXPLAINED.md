@@ -66,3 +66,5 @@ But since you're using Docker, **only the root `.env` matters**.
 2. Add the variables above
 3. Restart Docker: `docker compose down && docker compose up --build`
 
+
+

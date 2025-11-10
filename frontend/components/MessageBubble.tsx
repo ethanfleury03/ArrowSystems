@@ -10,7 +10,7 @@ interface MessageBubbleProps {
 }
 
 export default function MessageBubble({ message }: MessageBubbleProps) {
-  const isUser = message.sender === 'user';
+  const isUser = message.role === 'user';
 
   return (
     <motion.div
@@ -27,11 +27,11 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         }`}
       >
         {isUser ? (
-          <p className="whitespace-pre-wrap break-words">{message.text}</p>
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
           <div className="prose prose-sm dark:prose-invert max-w-none">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {message.text}
+              {message.content}
             </ReactMarkdown>
           </div>
         )}

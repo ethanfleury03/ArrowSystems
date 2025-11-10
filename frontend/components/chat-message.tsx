@@ -7,21 +7,9 @@ import { Card, CardContent } from "@/components/ui/card"
 import { useState } from "react"
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-
-type Source = {
-  id: string
-  title: string
-  snippet: string
-  url?: string
-}
-
-type Message = {
-  id: string
-  role: "user" | "assistant"
-  content: string
-  timestamp: Date
-  sources?: Source[]
-}
+import { submitFeedback, toggleSavedResponse } from "@/lib/api"
+import type { Message } from "@/types/message"
+import { useToast } from "@/hooks/use-toast"
 
 interface ChatMessageProps {
   message: Message
@@ -30,18 +18,126 @@ interface ChatMessageProps {
 export function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user"
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null)
-  const [isSaved, setIsSaved] = useState(false)
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false)
+  const [isSaved, setIsSaved] = useState(message.metadata?.isSaved ?? false)
+  const [isSaving, setIsSaving] = useState(false)
+  const { toast } = useToast()
 
-  const handleFeedback = (type: "up" | "down") => {
-    setFeedback(feedback === type ? null : type)
-    // TODO: Send feedback to backend
-    console.log(`Feedback: ${type} for message ${message.id}`)
+  const handleFeedback = async (type: "up" | "down") => {
+    if (!message.metadata) {
+      toast({
+        variant: "destructive",
+        title: "Feedback unavailable",
+        description: "This response is missing metadata required to send feedback.",
+      })
+      return
+    }
+
+    if (feedback === type || isSubmittingFeedback) {
+      return
+    }
+
+    const previousFeedback = feedback
+    setFeedback(type)
+    setIsSubmittingFeedback(true)
+
+    try {
+      await submitFeedback({
+        query: message.metadata.query,
+        answer: message.content,
+        reasoning: message.metadata.reasoning,
+        sources: message.metadata.structuredSources ?? [],
+        document_sources: message.metadata.documentSources,
+        confidence: message.metadata.confidence,
+        intent_type: message.metadata.intentType,
+        intent_confidence: message.metadata.intentConfidence,
+        session_id: message.metadata.sessionId,
+        matched_machine_name: message.metadata.matchedMachineName,
+        top_k: message.metadata.topK ?? 10,
+        alpha: message.metadata.alpha ?? 0.5,
+        is_helpful: type === "up",
+      })
+
+      toast({
+        title: type === "up" ? "Marked as helpful" : "Marked as unhelpful",
+        description: "Thank you for your feedback!",
+      })
+    } catch (error) {
+      setFeedback(previousFeedback)
+
+      const description =
+        error instanceof Error ? error.message : "Unable to submit feedback. Please try again."
+
+      toast({
+        variant: "destructive",
+        title: "Feedback failed",
+        description,
+      })
+    } finally {
+      setIsSubmittingFeedback(false)
+    }
   }
 
-  const handleSave = () => {
-    setIsSaved(!isSaved)
-    // TODO: Save response to backend
-    console.log(`${isSaved ? "Unsaved" : "Saved"} message ${message.id}`)
+  const handleSave = async () => {
+    if (!message.metadata) {
+      toast({
+        variant: "destructive",
+        title: "Unable to save response",
+        description: "This response is missing metadata required to save.",
+      })
+      return
+    }
+
+    if (isSaving) {
+      return
+    }
+
+    const nextSavedState = !isSaved
+    setIsSaved(nextSavedState)
+    setIsSaving(true)
+
+    try {
+      const payload = {
+        query: message.metadata.query,
+        answer: message.content,
+        reasoning: message.metadata.reasoning,
+        sources: message.metadata.structuredSources ?? [],
+        document_sources: message.metadata.documentSources,
+        confidence: message.metadata.confidence,
+        intent_type: message.metadata.intentType,
+        intent_confidence: message.metadata.intentConfidence,
+        session_id: message.metadata.sessionId,
+        matched_machine_name: message.metadata.matchedMachineName,
+        top_k: message.metadata.topK ?? 10,
+        alpha: message.metadata.alpha ?? 0.5,
+        is_saved: nextSavedState,
+      }
+
+      await toggleSavedResponse(payload)
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("saved-responses:refresh"))
+      }
+
+      toast({
+        title: nextSavedState ? "Response saved" : "Response removed",
+        description: nextSavedState
+          ? "You can find this response in the Saved tab."
+          : "The response has been removed from your saved list.",
+      })
+    } catch (error) {
+      setIsSaved(!nextSavedState)
+      const description =
+        error instanceof Error ? error.message : "Unable to update saved responses. Please try again."
+
+      toast({
+        variant: "destructive",
+        title: nextSavedState ? "Failed to save response" : "Failed to unsave response",
+        description,
+      })
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   return (
@@ -116,6 +212,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 variant="ghost"
                 size="icon"
                 className={cn("h-7 w-7", feedback === "up" && "bg-accent text-primary")}
+                disabled={isSubmittingFeedback}
                 onClick={() => handleFeedback("up")}
               >
                 <ThumbsUp className="h-3.5 w-3.5" />
@@ -124,6 +221,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 variant="ghost"
                 size="icon"
                 className={cn("h-7 w-7", feedback === "down" && "bg-accent text-destructive")}
+                disabled={isSubmittingFeedback}
                 onClick={() => handleFeedback("down")}
               >
                 <ThumbsDown className="h-3.5 w-3.5" />
@@ -131,10 +229,16 @@ export function ChatMessage({ message }: ChatMessageProps) {
               <Button
                 variant="ghost"
                 size="icon"
-                className={cn("h-7 w-7", isSaved && "bg-accent text-primary")}
+                className={cn("h-7 w-7", isSaved ? "bg-accent text-amber-500" : "text-muted-foreground")}
+                disabled={isSaving}
                 onClick={handleSave}
               >
-                <Bookmark className={cn("h-3.5 w-3.5", isSaved && "fill-current")} />
+                <Bookmark
+                  className={cn(
+                    "h-3.5 w-3.5 transition-colors",
+                    isSaved ? "fill-amber-400 text-amber-500" : "fill-background text-muted-foreground"
+                  )}
+                />
               </Button>
             </div>
           </>

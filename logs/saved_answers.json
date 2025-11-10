@@ -1,1 +1,34 @@
-[]
+[
+  {
+    "id": "20251110151933786554",
+    "timestamp": "2025-11-10T15:19:33.786573",
+    "user": "api_user",
+    "query": "What are the duraflex system requirements? ",
+    "answer": "Definition: Mechanical Controller PCA: PCA board controlling motors and sensors on all DuraFlex modules\n\nBased on the provided documents, the DuraFlex system has specific hardware and software requirements for optimal performance.\n\n## Hardware Requirements\n\nThe DuraFlex system requires high-performance computing specifications that vary based on application needs [7][8][9]:\n\n**Standard Configuration:**\n- AMD Ryzen 9 5950X CPU with 3.40 GHz 16-Core Processor (32 threads) and 4.90 GHz Max Turbo Frequency [7]\n- Closed Loop Water Cooler [7]\n- 32GB DDR4-3600 MHz Memory [7]\n- Storage: 1 x Samsung 500GB 970 EVO Plus NVMe SSD and 1 x 960GB Enterprise Solid State Drive [7]\n- Network: 1 x Intel 2 Port Ethernet Converged Network Adapter X710-DA2 (X710DA2BLK) with 1 x Intel Ethernet SFP+SR Optic (E10GSFPSR) [7]\n- Graphics: GeForce GT710 Graphic Card [7]\n\n**Higher Performance Configuration:**\nFor suboptimal input files, 2-wide applications, duplex operations, or POD systems requiring real-time page requests in any order [9]:\n- CPU with 2.10 GHz Base/4.90 Max Turbo, 12 Core/20 Thread [8]\n- 32GB DDR5 3200MHz Memory [8]\n- One (1) 500GB Samsung 980 PRO NVMe [9]\n- One (1) Intel Gigabit CT Desktop Adapter [9]\n- One (1) Intel 2 Port \u2013 10Gbase-T Ethernet Converged Network Adapter [9]\n- One (1) GeForce GT 730 Graphic Card [9]\n\n## Software Requirements\n\n**Operating System:**\n- Microsoft Windows 11 Pro 64 bit [7][9]\n\n**Development Environment:**\n- Python 2.7 is required for development work [11]\n- Kareela Development Package must be installed for OEM software development [11]\n\n## System Architecture Components\n\nThe DuraFlex system includes several software interfaces and components [13]:\n- Host driver\n- Image stitching and alignment\n- Color profile generation\n- Job Submission Library (JSL)\n\nThe system utilizes specific network services including _kareela-command._tcp and _kareela-event._tcp [12], and provides PES (Print Engine Server) commands for system control through the KPesCommands.thrift interface [14].\n\n## Summary\n\nThe DuraFlex system requires substantial computing resources with multi-core processors, high-speed memory, NVMe storage, and specialized network adapters. The system is designed to handle demanding printing applications with configurations scalable based on performance requirements, from standard single-wide printing to high-performance duplex and multi-wide operations.",
+    "is_helpful": true,
+    "confidence": 1.0,
+    "intent_type": "lookup",
+    "sources": [
+      "DuraFlex TB0002 Printhead Identification and System Compatibility 20Nov2020.pdf",
+      "DuraFlex Software Databook and Design Guide R3.1.1_V1.00_09Jun2020.pdf",
+      "DuraFlex System Requirements _ Xitron Support.pdf"
+    ],
+    "feedback_type": "positive"
+  },
+  {
+    "id": "20251110152331090547",
+    "timestamp": "2025-11-10T15:23:31.090563",
+    "user": "api_user",
+    "query": "what are the duraflex system requirements?",
+    "answer": "Definition: Mechanical Controller PCA: PCA board controlling motors and sensors on all DuraFlex modules\n\nBased on the provided documents, the DuraFlex system has specific hardware and software requirements for optimal performance.\n\n## Hardware Requirements\n\nThe DuraFlex system requires high-performance computing specifications that vary based on application needs [7][8][9]:\n\n**Standard Configuration:**\n- AMD Ryzen 9 5950X CPU with 3.40 GHz 16-Core Processor (32 threads) and 4.90 GHz Max Turbo Frequency [7]\n- Closed Loop Water Cooler [7]\n- 32GB DDR4-3600 MHz Memory [7]\n- Storage: 1 x Samsung 500GB 970 EVO Plus NVMe SSD and 1 x 960GB Enterprise Solid State Drive [7]\n- Network: 1 x Intel 2 Port Ethernet Converged Network Adapter X710-DA2 (X710DA2BLK) with 1 x Intel Ethernet SFP+SR Optic (E10GSFPSR) [7]\n- Graphics: GeForce GT710 Graphic Card [7]\n\n**Higher Performance Configuration:**\nFor suboptimal input files, 2-wide applications, duplex operations, or POD systems requiring real-time page requests in any order [9]:\n- CPU with 2.10 GHz Base/4.90 Max Turbo, 12 Core/20 Thread [8]\n- 32GB DDR5 3200MHz Memory [8]\n- One (1) 500GB Samsung 980 PRO NVMe [9]\n- One (1) Intel Gigabit CT Desktop Adapter [9]\n- One (1) Intel 2 Port \u2013 10Gbase-T Ethernet Converged Network Adapter [9]\n- One (1) GeForce GT 730 Graphic Card [9]\n\n## Software Requirements\n\n**Operating System:**\n- Microsoft Windows 11 Pro 64 bit [7][9]\n\n**Development Environment:**\n- Python 2.7 is required for development work [11]\n- Kareela Development Package must be installed for OEM software development [11]\n\n## System Architecture Components\n\nThe DuraFlex system includes several software interfaces and components [13]:\n- Host driver\n- Image stitching and alignment\n- Color profile generation\n- Job Submission Library (JSL)\n\nThe system utilizes specific network services including _kareela-command._tcp and _kareela-event._tcp [12], and provides PES (Print Engine Server) commands for system control through the KPesCommands.thrift interface [14].\n\n## Summary\n\nThe DuraFlex system requires substantial computing resources with multi-core processors, high-speed memory, NVMe storage, and specialized network adapters. The system is designed to handle demanding printing applications with configurations scalable based on performance requirements, from standard single-wide printing to high-performance duplex and multi-wide operations.",
+    "is_helpful": true,
+    "confidence": 1.0,
+    "intent_type": "lookup",
+    "sources": [
+      "DuraFlex TB0002 Printhead Identification and System Compatibility 20Nov2020.pdf",
+      "DuraFlex Software Databook and Design Guide R3.1.1_V1.00_09Jun2020.pdf",
+      "DuraFlex System Requirements _ Xitron Support.pdf"
+    ],
+    "feedback_type": "positive"
+  }
+]

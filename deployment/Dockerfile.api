@@ -12,7 +12,12 @@ RUN apt-get update && apt-get install -y \
     g++ \
     curl \
     gosu \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Prisma CLI required for generating the Python client
+RUN npm install -g prisma
 
 # Upgrade pip first (with retry logic)
 RUN pip install --upgrade pip || \
@@ -54,7 +59,28 @@ RUN chmod +x /docker-entrypoint.sh
 
 # Now copy application code (this is the frequently changing part)
 # By doing this last, code changes won't invalidate the cache for dependencies, directories, and user setup above
+# Copy application code and generate Prisma client
 COPY . .
+
+# Install Prisma CLI and generate Python client during build
+RUN npm install -g prisma && \
+    python -m prisma generate && \
+    python - <<'PY' \
+import pathlib, shutil, prisma
+src = pathlib.Path('/app/prisma/generated')
+dst = pathlib.Path(prisma.__file__).parent
+for item in src.iterdir():
+    target = dst / item.name
+    if target.exists():
+        if target.is_file() or target.is_symlink():
+            target.unlink()
+        else:
+            shutil.rmtree(target)
+    if item.is_dir():
+        shutil.copytree(item, target)
+    else:
+        shutil.copy2(item, target)
+PY
 
 # Set ownership after copying code
 RUN chown -R app:app /app
