@@ -116,7 +116,7 @@ venv\Scripts\activate
 source venv/bin/activate
 
 # Install dependencies (first time)
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # Run application
 streamlit run app.py
@@ -141,7 +141,7 @@ Access at: **http://localhost:8501**
 Before deploying to your team:
 
 ### Essential
-- [ ] Run ingestion to build index: `python ingest.py`
+- [ ] Run ingestion to build index: `python -m backend.ingest`
 - [ ] Test with sample queries
 - [ ] Change default passwords in `config/users.yaml`
 - [ ] Add your technician accounts
@@ -257,7 +257,7 @@ rag_app.py/
 ├── data/                       # Your PDF documents
 ├── storage/                    # Vector index (generated)
 ├── extracted_content/          # Tables/images (generated)
-├── requirements.txt            # Updated with UI deps
+├── backend/requirements.txt     # Updated with UI deps
 ├── start.sh                    # Linux/Mac startup
 ├── start.bat                   # Windows startup
 ├── DEPLOYMENT_GUIDE.md         # Deployment docs
@@ -269,7 +269,7 @@ rag_app.py/
 
 **App won't start:**
 ```bash
-pip install --upgrade -r requirements.txt
+pip install --upgrade -r backend/requirements.txt
 ```
 
 **Can't login:**
@@ -279,7 +279,7 @@ pip install --upgrade -r requirements.txt
 
 **No results:**
 ```bash
-python ingest.py  # Build the index first
+python -m backend.ingest  # Build the index first
 ```
 
 **Tables/images not showing:**
@@ -347,7 +347,7 @@ python ingest.py  # Build the index first
 The UI is complete and ready for your team. Just run `start.bat` or `start.sh` to get started!
 
 **Remember:**
-1. Run ingestion first if you haven't: `python ingest.py`
+1. Run ingestion first if you haven't: `python -m backend.ingest`
 2. Change default passwords before team deployment
 3. Review DEPLOYMENT_GUIDE.md for production setup
 

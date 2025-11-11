@@ -7,12 +7,13 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Check if Dockerfile exists
-if (-not (Test-Path "Dockerfile")) {
-    Write-Host "❌ Dockerfile not found!" -ForegroundColor Red
+$dockerfilePath = "backend/Dockerfile.backend"
+if (-not (Test-Path $dockerfilePath)) {
+    Write-Host "❌ backend/Dockerfile.backend not found!" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "✅ Dockerfile found" -ForegroundColor Green
+Write-Host "✅ backend/Dockerfile.backend found" -ForegroundColor Green
 Write-Host ""
 
 # Basic syntax checks
@@ -20,8 +21,8 @@ Write-Host "Running basic syntax checks..." -ForegroundColor Yellow
 $errors = @()
 $warnings = @()
 
-$content = Get-Content "Dockerfile" -Raw
-$lines = Get-Content "Dockerfile"
+$content = Get-Content $dockerfilePath -Raw
+$lines = Get-Content $dockerfilePath
 
 # Check 1: Verify BuildKit syntax declaration
 if ($lines[0] -notmatch "^# syntax=docker/dockerfile:") {

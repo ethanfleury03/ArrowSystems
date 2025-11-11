@@ -3,13 +3,17 @@ services:
   backend:
     build:
       context: .
-      dockerfile: deployment/Dockerfile.api
+      dockerfile: backend/Dockerfile.backend
     container_name: rag-backend
     ports:
       - "8000:8000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - SQLITE_DB_PATH=/app/database.sqlite
+      - SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-admin@example.com}
+      - SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD:-admin123}
+      - SEED_TECH_EMAIL=${SEED_TECH_EMAIL:-}
+      - SEED_TECH_PASSWORD=${SEED_TECH_PASSWORD:-}
       - HF_HOME=/app/.cache/huggingface
     volumes:
       - ./latest_model:/app/latest_model:ro
@@ -17,7 +21,7 @@ services:
       - ./logs:/app/logs
       - ./storage:/app/storage
       - hf_cache:/app/.cache/huggingface
-      - ./database.sqlite:/app/database.sqlite
+      - ./backend/database.sqlite:/app/database.sqlite
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

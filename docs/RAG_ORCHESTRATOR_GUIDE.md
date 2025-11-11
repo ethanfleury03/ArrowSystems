@@ -155,7 +155,7 @@ SOURCE SUMMARY:
 
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # Download spaCy model (optional, for advanced NLP)
 python -m spacy download en_core_web_sm
@@ -583,7 +583,7 @@ self.acronym_map.update({
 
 **Solution:**
 - Ensure documents are in `data/` folder
-- Rebuild index with `python ingest.py`
+- Rebuild index with `python -m backend.ingest`
 - Check BM25 initialization logs
 
 ### Issue: Slow query processing

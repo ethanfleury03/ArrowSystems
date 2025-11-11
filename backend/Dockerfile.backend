@@ -46,8 +46,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         build-essential \
         && rm -rf /var/lib/apt/lists/*
 
-# Copy only requirements first for better layer caching
-COPY requirements.txt .
+# Copy only backend requirements first for better layer caching
+COPY backend/requirements.txt ./requirements.txt
 
 # Install Python dependencies with BuildKit cache mount
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -84,18 +84,80 @@ RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/hugg
 COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 
+# Set working directory for app code
+WORKDIR /app
+
 # Create startup script (updated for runtime model downloads)
-RUN printf '#!/bin/bash\nset -e\n\n# Load .env file if it exists\nif [ -f ".env" ]; then\n    echo "📋 Loading environment variables from .env file..."\n    set -a\n    while IFS= read -r line || [ -n "$line" ]; do\n        if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then\n            continue\n        fi\n        export "$(echo "$line" | tr -d '\r')"\n    done < .env\n    set +a\n    echo "✅ Environment variables loaded"\nfi\n\necho "=========================================="\nif [ "$BUILD_ENV" = "development" ]; then\n    echo "🔧 DuraFlex Technical Assistant (DEV)"\nelse\n    echo "🔧 DuraFlex Technical Assistant"\nfi\necho "=========================================="\necho ""\necho "📥 Models will download automatically on first use if not cached..."\necho ""\n\n# Check if index exists\nif [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then\n    echo "✅ RAG index found in latest_model/"\n    echo "   📊 Indexed chunks: $(python -c 'import json; print(len(json.load(open("latest_model/docstore.json"))["docstore/data"]))' 2>/dev/null || echo 'unknown')"\n    echo ""\nelse\n    echo "⚠️  RAG Index Not Found! Running ingestion..."\n    python ingest.py\n    echo "✅ Ingestion complete!"\nfi\n\necho "🚀 Starting FastAPI backend server..."\necho ""\necho "API will be available at: http://localhost:8000"\necho "API docs available at: http://localhost:8000/docs"\necho ""\necho "⚠️  Note: This container runs the backend API only."\necho "   Use docker-compose.yml to run both backend and frontend together."\necho ""\n\n# Start FastAPI with environment-specific settings\nif [ "$BUILD_ENV" = "development" ]; then\n    exec python api.py --host 0.0.0.0 --port 8000 --reload\nelse\n    exec python api.py --host 0.0.0.0 --port 8000\nfi\n' > /app/start.sh && chmod +x /app/start.sh
+RUN cat <<'EOF' > /app/start.sh
+#!/bin/bash
+set -e
+
+# Load .env file if it exists
+if [ -f ".env" ]; then
+    echo "📋 Loading environment variables from .env file..."
+    set -a
+    while IFS= read -r line || [ -n "$line" ]; do
+        cleaned_line=$(echo "$line" | tr -d "\r")
+        if [[ -z "$cleaned_line" || "$cleaned_line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+        if echo "$cleaned_line" | grep -q "="; then
+            export "$cleaned_line"
+        fi
+    done < .env
+    set +a
+    echo "✅ Environment variables loaded"
+fi
+
+echo "=========================================="
+if [ "$BUILD_ENV" = "development" ]; then
+    echo "🔧 DuraFlex Technical Assistant (DEV)"
+else
+    echo "🔧 DuraFlex Technical Assistant"
+fi
+echo "=========================================="
+echo ""
+echo "📥 Models will download automatically on first use if not cached..."
+echo ""
+
+# Check if index exists
+if [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then
+    echo "✅ RAG index found in latest_model/"
+    chunks=$(python -c "import json; print(len(json.load(open('latest_model/docstore.json'))['docstore/data']))" 2>/dev/null || echo "unknown")
+    echo "   📊 Indexed chunks: ${chunks}"
+    echo ""
+else
+    echo "⚠️  RAG Index Not Found! Running ingestion..."
+    python -m backend.ingest
+    echo "✅ Ingestion complete!"
+fi
+
+echo "🚀 Starting FastAPI backend server..."
+echo ""
+echo "API will be available at: http://localhost:8000"
+echo "API docs available at: http://localhost:8000/docs"
+echo ""
+echo "⚠️  Note: This container runs the backend API only."
+echo "   Use docker-compose.yml to run both backend and frontend together."
+echo ""
+
+# Start FastAPI with environment-specific settings
+if [ "$BUILD_ENV" = "development" ]; then
+    exec python -m backend.api --host 0.0.0.0 --port 8000 --reload
+else
+    exec python -m backend.api --host 0.0.0.0 --port 8000
+fi
+EOF
+RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
 
 # Create health check script
-RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && chmod +x /app/healthcheck.sh
+RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && sed -i 's/\r$//' /app/healthcheck.sh && chmod +x /app/healthcheck.sh
 
 # Copy application code (this is the frequently changing part)
 COPY . .
 
 # Ensure local SQLite database file exists for persistence
 RUN touch /app/database.sqlite
-
 
 # Set ownership and permissions
 RUN chown -R appuser:appuser /app && \
@@ -111,3 +173,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
     CMD /app/healthcheck.sh || exit 1
 
 CMD ["/bin/bash", "/app/start.sh"]
+

@@ -25,7 +25,7 @@ Successfully extracted core RAG logic into a reusable module and created a produ
 - **`start_api.sh`** - Startup script with environment checks
 
 ### Dependencies
-- **`requirements.txt`** - Updated with FastAPI, Uvicorn, and Pydantic
+- **`backend/requirements.txt`** - Updated with FastAPI, Uvicorn, and Pydantic
 
 ## 🔧 Architecture Changes
 
@@ -121,16 +121,16 @@ docker-compose -f docker-compose.api.yml logs -f
 ### Option 2: Direct Python
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # Start API server
-python api.py --host 0.0.0.0 --port 8000
+python -m backend.api --host 0.0.0.0 --port 8000
 ```
 
 ### Option 3: Development Mode
 ```bash
 # Auto-reload for development
-python api.py --reload
+python -m backend.api --reload
 ```
 
 ## 🔄 Backward Compatibility
@@ -152,7 +152,7 @@ streamlit run app.py
 ### Test FastAPI Backend
 ```bash
 # Start the API server
-python api.py
+python -m backend.api
 
 # Test the API
 curl -X POST "http://localhost:8000/query" \

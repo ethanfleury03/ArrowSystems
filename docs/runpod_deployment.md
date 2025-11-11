@@ -6,7 +6,7 @@ This guide explains how to deploy your RAG app to RunPod Serverless.
 
 - `handler.py` - Main entrypoint for RunPod Serverless
 - `storage/` - Directory containing the vector database (created by `ingest.py`)
-- `requirements.txt` - Python dependencies
+- `backend/requirements.txt` - Python dependencies
 - `test_handler.py` - Local testing script
 
 ## Deployment Steps
@@ -15,7 +15,7 @@ This guide explains how to deploy your RAG app to RunPod Serverless.
 
 Ensure you have run `ingest.py` to create the vector database:
 ```bash
-python ingest.py
+python -m backend.ingest
 ```
 
 This creates the `storage/` directory with your vector index.
@@ -25,7 +25,7 @@ This creates the `storage/` directory with your vector index.
 Upload these files to your RunPod Serverless environment:
 - `handler.py` (main entrypoint)
 - `storage/` directory (vector database)
-- `requirements.txt`
+- `backend/requirements.txt`
 
 ### 3. Configure RunPod Serverless
 
@@ -81,7 +81,7 @@ This will run various test cases to ensure the handler works correctly.
 ### Common Issues
 
 1. **"Storage directory not found"**
-   - Run `python ingest.py` to create the vector database
+   - Run `python -m backend.ingest` to create the vector database
 
 2. **"Model download failed"**
    - Ensure internet connection for initial model download

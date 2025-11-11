@@ -68,7 +68,7 @@ ANTHROPIC_API_KEY=your-api-key-here
 
 3. **Run ingestion**:
    ```bash
-   python ingest.py
+   python -m backend.ingest
    ```
 
 ### Disable Claude Rewriting

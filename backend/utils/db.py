@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from sqlalchemy import (
@@ -20,8 +21,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Session, declarative_base, relationship, scoped_session, sessionmaker
 
-DEFAULT_DB_PATH = os.getenv("SQLITE_DB_PATH", "./database.sqlite")
-DATABASE_URL = f"sqlite:///{DEFAULT_DB_PATH.lstrip('./') if DEFAULT_DB_PATH.startswith('./') else DEFAULT_DB_PATH}"
+_backend_dir = Path(__file__).resolve().parent.parent
+_env_db_path = os.getenv("SQLITE_DB_PATH")
+if _env_db_path:
+    DEFAULT_DB_PATH = str(Path(_env_db_path).resolve())
+else:
+    DEFAULT_DB_PATH = str((_backend_dir / "database.sqlite").resolve())
+
+DATABASE_URL = f"sqlite:///{DEFAULT_DB_PATH}"
 
 engine = create_engine(
     DATABASE_URL,

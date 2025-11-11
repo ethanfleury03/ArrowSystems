@@ -104,7 +104,7 @@ export function ChunkViewerTab() {
       
       toast({
         title: 'Info',
-        description: 'Chunk deletion requires re-indexing. Please remove the source document and re-run ingest.py',
+        description: 'Chunk deletion requires re-indexing. Please remove the source document and re-run python -m backend.ingest',
       });
       
       fetchChunks();

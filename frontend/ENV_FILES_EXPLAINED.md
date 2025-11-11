@@ -26,7 +26,7 @@ SQLITE_DB_PATH=./database.sqlite
 # Session secret for frontend auth cookies (generate a random 32+ char string)
 SESSION_SECRET=your-super-secret-random-string-at-least-32-characters-long-change-this
 
-# Default admin account (optional seed on backend start)
+# Seed accounts (backend will create them on first boot if missing)
 SEED_ADMIN_EMAIL=admin@example.com
 SEED_ADMIN_PASSWORD=admin123
 
@@ -45,6 +45,10 @@ In `docker-compose.yml`, you'll see references such as:
 environment:
   - SQLITE_DB_PATH=/app/database.sqlite
   - SESSION_SECRET=${SESSION_SECRET}
+  - SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-admin@example.com}
+  - SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD:-admin123}
+  - SEED_TECH_EMAIL=${SEED_TECH_EMAIL:-}
+  - SEED_TECH_PASSWORD=${SEED_TECH_PASSWORD:-}
   - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 ```
 
