@@ -396,45 +396,36 @@ fi
 
 echo ""
 
-# Check database setup (PostgreSQL or SQLite)
-echo "🗄️  Checking database setup..."
+# Check database setup (SQLite)
+echo "🗄️  Checking SQLite database setup..."
 echo ""
 
-# Try to initialize database (will auto-detect PostgreSQL or SQLite)
-if python -c "from utils.postgres_manager import PostgresManager; db = PostgresManager(); db_type = getattr(db, 'db_type', None); exit(0 if (db.connection_pool or db.sqlite_conn) else 1)" 2>/dev/null; then
-    # Get database type
-    DB_TYPE=$(python -c "from utils.postgres_manager import PostgresManager; db = PostgresManager(); print(getattr(db, 'db_type', 'unknown'))" 2>/dev/null || echo "unknown")
-    
-    if [ "$DB_TYPE" = "postgres" ]; then
-        echo "  ✅ PostgreSQL connection successful"
-    elif [ "$DB_TYPE" = "sqlite" ]; then
-        echo "  ✅ SQLite database initialized (local development)"
-    else
-        echo "  ✅ Database connection established"
-    fi
-    
-    # Check if tables exist, create if needed
-    echo "  🔄 Checking database tables..."
-    if python -c "from utils.postgres_manager import PostgresManager; db = PostgresManager(); db.create_tables()" 2>/dev/null; then
-        echo "  ✅ Database tables ready"
-    else
-        echo "  ⚠️  Failed to create/verify tables"
-        echo "     Run: python scripts/setup_postgres.py"
-    fi
+# Ensure SQLite file exists and tables are created
+if python - <<'PY'
+import os
+from utils.db import init_db, DEFAULT_DB_PATH
+
+db_path = os.getenv("SQLITE_DB_PATH", DEFAULT_DB_PATH)
+os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+
+# Ensure empty file exists before SQLAlchemy initializes
+if not os.path.exists(db_path):
+    open(db_path, "a").close()
+
+init_db()
+print(db_path)
+PY
+then
+    DB_PATH=$(python - <<'PY'
+import os
+from utils.db import DEFAULT_DB_PATH
+print(os.getenv("SQLITE_DB_PATH", DEFAULT_DB_PATH))
+PY
+)
+    echo "  ✅ SQLite database ready at ${DB_PATH}"
 else
-    echo "  ⚠️  Database initialization failed"
-    echo ""
-    echo "  Database options:"
-    echo "  1. SQLite (recommended for local development):"
-    echo "     - No setup required - will create rag_app.db automatically"
-    echo "     - Set SQLITE_DB_PATH to customize location (optional)"
-    echo ""
-    echo "  2. PostgreSQL (for production):"
-    echo "     - Set environment variables:"
-    echo "       POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB,"
-    echo "       POSTGRES_USER, POSTGRES_PASSWORD"
-    echo ""
-    echo "  The app will automatically use SQLite if PostgreSQL is not available."
+    echo "  ❌ Failed to initialize SQLite database"
+    echo "     Check write permissions for ${SQLITE_DB_PATH:-./database.sqlite}"
 fi
 
 echo ""

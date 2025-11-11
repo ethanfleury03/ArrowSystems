@@ -1,8 +1,8 @@
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
-import bcrypt from 'bcrypt';
-import { prisma } from './prisma';
 import { unsealData, sealData } from 'iron-session';
+
+const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export interface SessionData {
   userId?: string;
@@ -23,15 +23,6 @@ export const sessionOptions = {
     maxAge: 60 * 60 * 24 * 7, // 7 days
   },
 };
-
-// Password hashing
-export async function hashPassword(plainPassword: string): Promise<string> {
-  return bcrypt.hash(plainPassword, 10);
-}
-
-export async function verifyPassword(plainPassword: string, hash: string): Promise<boolean> {
-  return bcrypt.compare(plainPassword, hash);
-}
 
 // Session helpers for Next.js App Router
 export async function getSession(req?: NextRequest, res?: NextResponse): Promise<SessionData> {
@@ -104,16 +95,14 @@ export async function getUserFromSession() {
   }
 
   try {
-    const user = await prisma.user.findUnique({
-      where: { id: session.userId },
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        createdAt: true,
-      },
+    const response = await fetch(`${BACKEND_URL}/auth/users/${session.userId}`, {
+      cache: 'no-store',
     });
-    return user;
+    if (!response.ok) {
+      return null;
+    }
+    const data = await response.json();
+    return data;
   } catch (error) {
     console.error('Error fetching user from session:', error);
     return null;

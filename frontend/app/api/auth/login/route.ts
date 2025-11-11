@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
-import { verifyPassword, setLoginSession } from '@/lib/auth';
+import { setLoginSession } from '@/lib/auth';
+
+const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export async function POST(request: NextRequest) {
   try {
@@ -15,28 +16,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Find user by email
-    const user = await prisma.user.findUnique({
-      where: { email },
+    // Delegate authentication to backend
+    const backendResponse = await fetch(`${BACKEND_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
     });
 
-    if (!user) {
-      console.error(`Login failed: User not found for email: ${email}`);
+    if (!backendResponse.ok) {
+      const detail = await backendResponse.json().catch(() => null);
+      console.error(`Login failed for ${email}:`, detail);
       return NextResponse.json(
-        { error: 'Invalid email or password' },
-        { status: 401 }
+        { error: detail?.detail || 'Invalid email or password' },
+        { status: backendResponse.status === 401 ? 401 : 500 }
       );
     }
 
-    // Verify password
-    const isValid = await verifyPassword(password, user.passwordHash);
-    if (!isValid) {
-      console.error(`Login failed: Invalid password for user: ${email}`);
-      return NextResponse.json(
-        { error: 'Invalid email or password' },
-        { status: 401 }
-      );
-    }
+    const { user } = await backendResponse.json() as { user: { id: string; role: string } };
 
     // Create response and set session
     const response = NextResponse.json(

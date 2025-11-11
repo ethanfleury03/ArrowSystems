@@ -27,11 +27,10 @@ import uvicorn
 
 from rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from orchestrator import StructuredResponse, QueryIntent
-from utils.postgres_manager import PrismaManager
+from utils.database_manager import DatabaseManager
 from utils.query_summarizer import QuerySummarizer
 from utils.feedback_manager import FeedbackManager
 from utils.saved_response_manager import SavedResponseManager
-from db.prisma_client import get_prisma
 
 # Configure logging
 logging.basicConfig(
@@ -50,7 +49,6 @@ db_manager = None
 query_summarizer = None  # Query summarization utility
 feedback_manager = None  # Local JSON feedback store
 saved_response_manager = None  # Local saved response store
-prisma_client = None
 
 
 # =============================================================================
@@ -297,7 +295,6 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events.
     """
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
-    global prisma_client
     
     # Startup
     logger.info("🚀 Starting FastAPI backend...")
@@ -312,12 +309,10 @@ async def lifespan(app: FastAPI):
         feedback_manager = None
         logger.warning(f"⚠️ Feedback manager initialization failed: {e}")
 
-    prisma_client = get_prisma()
-    await prisma_client.connect()
-    logger.info("✅ Prisma connected to Postgres")
-
-    db_manager = PrismaManager(prisma_client)
-    saved_response_manager = SavedResponseManager(prisma_client)
+    db_manager = DatabaseManager()
+    saved_response_manager = SavedResponseManager(db_manager)
+    await db_manager.seed_default_users()
+    logger.info("✅ SQLite database initialized at ./database.sqlite")
     
     # Initialize RAG pipeline
     try:
@@ -381,9 +376,6 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("🛑 Shutting down FastAPI backend...")
-    if prisma_client:
-        await prisma_client.disconnect()
-        logger.info("ℹ️ Prisma disconnected")
 
 
 # Create FastAPI app with lifespan
@@ -571,6 +563,24 @@ class SearchSandboxResponse(BaseModel):
     total_chunks: int
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    name: Optional[str] = None
+    role: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class LoginResponse(BaseModel):
+    user: UserResponse
+
+
 # API Endpoints
 @app.get("/", response_model=Dict[str, str])
 async def root():
@@ -594,6 +604,29 @@ async def health_check():
         database_connected=db_manager is not None,
         uptime_seconds=time.time() - app.state.start_time if hasattr(app.state, 'start_time') else 0
     )
+
+
+@app.post("/auth/login", response_model=LoginResponse)
+async def auth_login(request: LoginRequest):
+    if not db_manager:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    user = await db_manager.authenticate_user(request.email, request.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    return {"user": user}
+
+
+@app.get("/auth/users/{user_id}", response_model=UserResponse)
+async def auth_get_user(user_id: str):
+    if not db_manager:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    if not user_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid user id")
+    user = await db_manager.get_user_by_id(int(user_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
 
 
 @app.post("/summarize-query")

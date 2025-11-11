@@ -24,12 +24,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         curl \
         git \
         libgomp1 \
-        nodejs \
-        npm \
         && rm -rf /var/lib/apt/lists/*
-
-# Install Prisma CLIs required for generating the Python client
-RUN npm install -g prisma prisma-client-py
 
 # Create non-root user early
 RUN useradd -m -u 1000 appuser
@@ -86,7 +81,6 @@ ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
 RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/huggingface
 
 # Copy Python dependencies from dependencies stage (no build tools)
-# Only copy installed packages, not build tools
 COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 
@@ -99,25 +93,9 @@ RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&
 # Copy application code (this is the frequently changing part)
 COPY . .
 
-# Install Prisma CLI and generate Python client during build
-RUN npm install -g prisma && \
-    python -m prisma generate && \
-    python - <<'PY' \
-import pathlib, shutil, prisma, os
-src = pathlib.Path('/app/prisma/generated')
-dst = pathlib.Path(prisma.__file__).parent
-for item in src.iterdir():
-    target = dst / item.name
-    if target.exists():
-        if target.is_file() or target.is_symlink():
-            target.unlink()
-        else:
-            shutil.rmtree(target)
-    if item.is_dir():
-        shutil.copytree(item, target)
-    else:
-        shutil.copy2(item, target)
-PY
+# Ensure local SQLite database file exists for persistence
+RUN touch /app/database.sqlite
+
 
 # Set ownership and permissions
 RUN chown -R appuser:appuser /app && \

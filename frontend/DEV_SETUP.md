@@ -4,10 +4,10 @@
 
 The backend and database run in Docker, but you can run the frontend locally for instant hot-reload:
 
-### Step 1: Start Docker Services (Backend + Database)
+### Step 1: Start the Backend Service
 ```powershell
 # From project root
-docker compose up -d backend postgres
+docker compose up -d backend
 ```
 
 ### Step 2: Run Frontend Locally
@@ -22,10 +22,7 @@ The frontend will be available at `http://localhost:3000` with **hot-reload enab
 ### Step 3: Create `.env.local` file
 Create `frontend/.env.local` with:
 ```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ragdb?schema=public
 SESSION_SECRET=your-secret-key-here
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=admin123
 BACKEND_URL=http://localhost:8000
 ```
 

@@ -9,23 +9,13 @@ services:
       - "8000:8000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      # PostgreSQL configuration (supports both POSTGRES_* and DB_* naming)
-      - POSTGRES_HOST=${POSTGRES_HOST:-${DB_HOST:-localhost}}
-      - POSTGRES_PORT=${POSTGRES_PORT:-${DB_PORT:-5432}}
-      - POSTGRES_USER=${POSTGRES_USER:-${DB_USER:-postgres}}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-${DB_PASSWORD:-password}}
-      - POSTGRES_DB=${POSTGRES_DB:-${DB_NAME:-rag_app}}
-      - DB_HOST=${DB_HOST:-${POSTGRES_HOST:-localhost}}
-      - DB_PORT=${DB_PORT:-${POSTGRES_PORT:-5432}}
-      - DB_USER=${DB_USER:-${POSTGRES_USER:-postgres}}
-      - DB_PASSWORD=${DB_PASSWORD:-${POSTGRES_PASSWORD:-password}}
-      - DB_NAME=${DB_NAME:-${POSTGRES_DB:-rag_app}}
-      - CLOUD_SQL_CONNECTION_NAME=${CLOUD_SQL_CONNECTION_NAME}
+      - SQLITE_DB_PATH=/app/database.sqlite
     volumes:
       # Mount the latest_model directory if it exists locally
       - ./latest_model:/app/latest_model:ro
       # Mount logs directory for persistence
       - ./logs:/app/logs
+      - ./database.sqlite:/app/database.sqlite
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
