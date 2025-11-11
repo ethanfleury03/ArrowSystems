@@ -1,7 +1,7 @@
 version: '3.8'
 
 # Production Docker Compose configuration
-# Use this for production deployments with external PostgreSQL
+# Uses the backend FastAPI service for persistence (SQLite)
 
 services:
   frontend:
@@ -11,21 +11,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Database - MUST be set to your production PostgreSQL URL
-      DATABASE_URL: ${DATABASE_URL}
-      
       # Session Secret - MUST be set (generate a secure random string)
       SESSION_SECRET: ${SESSION_SECRET}
-      
-      # Admin Account - MUST be set for production
-      ADMIN_EMAIL: ${ADMIN_EMAIL}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      
       # Node Environment
       NODE_ENV: production
+      # Backend API URL
+      BACKEND_URL: ${BACKEND_URL}
     restart: unless-stopped
-    # Remove depends_on if using external PostgreSQL
-    # depends_on:
-    #   postgres:
-    #     condition: service_healthy
 

@@ -32,12 +32,10 @@ anthropic==0.71.0
 openai>=1.108.1,<2.0
 
 # -----------------------------
-# Database (PostgreSQL for Google Cloud SQL)
+# Database (SQLite via SQLAlchemy)
 # -----------------------------
-psycopg2-binary==2.9.9
-sqlalchemy==2.0.25
-prisma==0.13.0
 bcrypt==4.2.0
+sqlalchemy==2.0.25
 
 # -----------------------------
 # FastAPI Backend

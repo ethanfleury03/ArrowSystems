@@ -20,36 +20,35 @@ This is the **ONLY** file that Docker Compose reads. The `docker-compose.yml` fi
 Create or edit the **root `.env` file** (`C:\Users\ethan\ArrowSystems\.env`) with:
 
 ```env
-# Database connection (for frontend)
-DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ragdb?schema=public
+# Optional: override the path to the SQLite database file used by the backend
+SQLITE_DB_PATH=./database.sqlite
 
-# Session secret (generate a random 32+ character string)
+# Session secret for frontend auth cookies (generate a random 32+ char string)
 SESSION_SECRET=your-super-secret-random-string-at-least-32-characters-long-change-this
 
-# Admin account credentials (used by seed script)
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=admin123
+# Default admin account (optional seed on backend start)
+SEED_ADMIN_EMAIL=admin@example.com
+SEED_ADMIN_PASSWORD=admin123
+
+# Optional technician seed user
+SEED_TECH_EMAIL=tech@example.com
+SEED_TECH_PASSWORD=tech123
 
 # Backend API key (if needed)
 ANTHROPIC_API_KEY=your-api-key-here
-
-# PostgreSQL settings (optional, defaults are fine)
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_DB=ragdb
 ```
 
 ## How Docker Compose Uses It
 
-In `docker-compose.yml`, you'll see:
+In `docker-compose.yml`, you'll see references such as:
 ```yaml
 environment:
-  - DATABASE_URL=${DATABASE_URL:-default-value}
+  - SQLITE_DB_PATH=/app/database.sqlite
+  - SESSION_SECRET=${SESSION_SECRET}
+  - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 ```
 
-This means:
-- Read `DATABASE_URL` from the root `.env` file
-- If not found, use the default value after `:-`
+These pull values from the root `.env` file so the containers share the same configuration.
 
 ## For Local Development (Without Docker)
 
@@ -65,6 +64,7 @@ But since you're using Docker, **only the root `.env` matters**.
 1. Create/edit `C:\Users\ethan\ArrowSystems\.env`
 2. Add the variables above
 3. Restart Docker: `docker compose down && docker compose up --build`
+
 
 
 

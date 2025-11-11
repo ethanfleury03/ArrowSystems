@@ -1,33 +1,15 @@
-"""
-Saved Response Manager backed by Prisma (PostgreSQL via Neon)
-"""
+from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from prisma import Prisma
-from prisma.enums import UserRole
+from utils.database_manager import DatabaseManager
 
 
 class SavedResponseManager:
-    """Manages saved (bookmarked) responses using Prisma."""
+    """Wrapper to manage saved responses using the DatabaseManager."""
 
-    def __init__(self, client: Prisma):
-        self.client = client
-
-    async def _ensure_user(self, email: str) -> str:
-        if not email:
-            email = "api_user"
-        user = await self.client.user.upsert(
-            where={"email": email},
-            update={},
-            create={
-                "email": email,
-                "name": email,
-                "role": UserRole.TECHNICIAN,
-                "passwordHash": "",
-            },
-        )
-        return user.id
+    def __init__(self, db_manager: DatabaseManager):
+        self._db = db_manager
 
     async def save_response(
         self,
@@ -36,72 +18,18 @@ class SavedResponseManager:
         user: str,
         sources: Optional[List[str]] = None,
     ) -> bool:
-        user_id = await self._ensure_user(user)
-        await self.client.savedresponse.upsert(
-            where={
-                "userId_query": {
-                    "userId": user_id,
-                    "query": query.strip(),
-                }
-            },
-            update={
-                "answer": answer,
-                "sources": sources or [],
-            },
-            create={
-                "userId": user_id,
-                "query": query.strip(),
-                "answer": answer,
-                "sources": sources or [],
-            },
+        return await self._db.upsert_saved_response(
+            query_text=query,
+            answer_text=answer,
+            user=user,
+            sources=sources or [],
         )
-        return True
 
     async def remove_response(self, query: str, user: str) -> bool:
-        user_id = await self._ensure_user(user)
-        result = await self.client.savedresponse.delete_many(
-            where={
-                "userId": user_id,
-                "query": query.strip(),
-            }
-        )
-        return result.count > 0
+        return await self._db.remove_saved_response(query=query, user=user)
 
     async def list_responses(self, user: Optional[str] = None) -> List[Dict[str, Any]]:
-        where_clause = {}
-        if user:
-            user_record = await self.client.user.find_unique(where={"email": user})
-            if not user_record:
-                return []
-            where_clause["userId"] = user_record.id
-
-        records = await self.client.savedresponse.find_many(
-            where=where_clause or None,
-            order={"updatedAt": "desc"},
-        )
-
-        return [
-            {
-                "id": saved.id,
-                "query": saved.query,
-                "answer": saved.answer,
-                "sources": saved.sources or [],
-                "created_at": saved.createdAt.isoformat(),
-                "last_used": saved.updatedAt.isoformat(),
-                "helpful_count": 1,
-                "unhelpful_count": 0,
-            }
-            for saved in records
-        ]
+        return await self._db.list_saved_responses(user=user)
 
     async def is_saved(self, query: str, user: str) -> bool:
-        user_record = await self.client.user.find_unique(where={"email": user})
-        if not user_record:
-            return False
-        record = await self.client.savedresponse.find_first(
-            where={
-                "userId": user_record.id,
-                "query": query.strip(),
-            }
-        )
-        return record is not None
+        return await self._db.is_saved(query=query, user=user)

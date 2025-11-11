@@ -9,18 +9,7 @@ services:
       - "8000:8000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # PostgreSQL configuration (supports both POSTGRES_* and DB_* naming)
-      - POSTGRES_HOST=${POSTGRES_HOST:-${DB_HOST:-localhost}}
-      - POSTGRES_PORT=${POSTGRES_PORT:-${DB_PORT:-5432}}
-      - POSTGRES_USER=${POSTGRES_USER:-${DB_USER:-postgres}}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-${DB_PASSWORD:-password}}
-      - POSTGRES_DB=${POSTGRES_DB:-${DB_NAME:-rag_app}}
-      - DB_HOST=${DB_HOST:-${POSTGRES_HOST:-localhost}}
-      - DB_PORT=${DB_PORT:-${POSTGRES_PORT:-5432}}
-      - DB_USER=${DB_USER:-${POSTGRES_USER:-postgres}}
-      - DB_PASSWORD=${DB_PASSWORD:-${POSTGRES_PASSWORD:-password}}
-      - DB_NAME=${DB_NAME:-${POSTGRES_DB:-rag_app}}
-      - CLOUD_SQL_CONNECTION_NAME=${CLOUD_SQL_CONNECTION_NAME:-}
+      - SQLITE_DB_PATH=/app/database.sqlite
       - HF_HOME=/app/.cache/huggingface
     volumes:
       - ./latest_model:/app/latest_model:ro
@@ -28,6 +17,7 @@ services:
       - ./logs:/app/logs
       - ./storage:/app/storage
       - hf_cache:/app/.cache/huggingface
+      - ./database.sqlite:/app/database.sqlite
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -47,8 +37,6 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Database - Use PostgreSQL
-      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/ragdb?schema=public}
       # Session Secret - MUST be set in production
       - SESSION_SECRET=${SESSION_SECRET:-change-this-to-a-random-string-at-least-32-characters-long}
       # Admin Account - Set these for initial admin user
@@ -61,29 +49,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - rag-network
-
-  # PostgreSQL Database for Frontend
-  postgres:
-    image: postgres:16-alpine
-    container_name: rag-postgres
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
-      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     restart: unless-stopped
     networks:
       - rag-network
@@ -95,6 +60,3 @@ networks:
 volumes:
   hf_cache:
     driver: local
-  postgres_data:
-    driver: local
-
