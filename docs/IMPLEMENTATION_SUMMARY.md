@@ -107,7 +107,7 @@ Interactive command-line interface with:
 
 ---
 
-### 3. **Updated Dependencies** (`requirements.txt`)
+### 3. **Updated Dependencies** (`backend/requirements.txt`)
 
 Added critical packages:
 - `rank-bm25`: BM25 algorithm implementation
@@ -459,7 +459,7 @@ Every claim is explicitly cited with:
 
 ### Modified
 - [x] `query.py` - Enhanced with Elite interface
-- [x] `requirements.txt` - Added BM25 and NLP packages
+- [x] `backend/requirements.txt` - Added BM25 and NLP packages
 - [x] `README.md` - Professional project overview
 
 ### Preserved (Unchanged)
@@ -474,7 +474,7 @@ Every claim is explicitly cited with:
 
 ### 1. Install Dependencies
 ```bash
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 ```
 
 ### 2. Test the System

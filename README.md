@@ -42,6 +42,34 @@ Complete documentation has been organized in the `docs/` folder:
 
 ---
 
+## 🗂️ Project Layout
+
+```
+ArrowSystems/
+├─ backend/          # FastAPI backend (Python, SQLite, ingestion, utils, etc.)
+│  ├─ api.py
+│  ├─ ingest.py
+│  ├─ migrate_data.py
+│  ├─ database.sqlite       # created automatically on first run (or mounted)
+│  ├─ utils/
+│  └─ ...
+├─ frontend/         # Next.js frontend
+│  ├─ app/
+│  ├─ components/
+│  └─ ...
+├─ backend/          # FastAPI backend, ingestion pipeline, utilities
+├─ backend/Dockerfile.backend
+├─ backend/requirements.txt
+├─ docker-compose.yml
+└─ README.md
+```
+
+The backend uses SQLite managed by SQLAlchemy. The default database lives at
+`backend/database.sqlite`; Docker automatically mounts/creates this file, and all
+backend entrypoints now run as modules (for example `python -m backend.api`).
+
+---
+
 ## 🚀 Quick Start
 
 ### Web Interface (Recommended)
@@ -93,7 +121,7 @@ chmod +x start_mock.sh
 
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # (Optional) Download spaCy model for advanced NLP
 python -m spacy download en_core_web_sm
@@ -117,7 +145,7 @@ git clone https://github.com/yourusername/rag_app.py
 cd rag_app.py
 
 # 2. Build index (5-10 minutes on A100)
-python ingest.py
+python -m backend.ingest
 
 # 3. Push to git
 git add latest_model/
@@ -171,7 +199,7 @@ streamlit run app.py
 
 ```bash
 # Build vector index from PDF documents
-python ingest.py
+python -m backend.ingest
 
 # For two-pod workflow, push to git after ingestion
 git add latest_model/
@@ -346,31 +374,29 @@ Automatically adapts chunk count based on relevance:
 
 ```
 rag_app.py/
-├── orchestrator.py              # Core RAG orchestration engine
-│   ├── RAGOrchestrator          # Main orchestrator
-│   ├── IntentClassifier         # Query intent detection
-│   ├── QueryRewriter            # Query enhancement
-│   ├── HybridRetriever          # Dense + BM25 fusion
-│   └── ResponseGenerator        # Structured response builder
+├── backend/
+│   ├── api.py                  # FastAPI application entrypoint
+│   ├── ingest.py               # Document ingestion & index builder
+│   ├── migrate_data.py         # Migration utilities
+│   ├── orchestrator.py         # Core RAG orchestration engine
+│   ├── query.py                # CLI interface & API helpers
+│   └── utils/                  # Database + metadata helpers
 │
-├── query.py                     # CLI interface & API
-│   ├── EliteRAGQuery            # High-level query interface
-│   └── TechnicalRAGQuery        # Legacy compatibility
+├── backend/Dockerfile.backend  # Local/dev backend image
+├── backend/requirements.txt    # Backend Python dependencies
 │
-├── ingest.py                    # Document ingestion & indexing
-│   ├── TechnicalRAGPipeline     # Ingestion pipeline
-│   ├── NonTextExtractor         # Table/image extraction
-│   └── build_index()            # Index builder
+├── config.yaml                 # Root configuration (legacy CLI)
+├── config/                     # YAML app + user config
 │
-├── config.yaml                  # Configuration file
-├── requirements.txt             # Python dependencies
+├── data/                       # PDF documents (24 DuraFlex manuals)
+├── latest_model/               # Vector index storage
+├── logs/                       # Persisted logs
+├── storage/                    # Legacy index storage
 │
-├── data/                        # PDF documents (24 DuraFlex manuals)
-├── storage/                     # Vector index storage
-│
-├── RAG_ORCHESTRATOR_GUIDE.md   # Complete documentation
-├── QUICK_REFERENCE.md           # Quick reference card
-└── README.md                    # This file
+├── docs/                       # Detailed architecture + guides
+├── docker-compose.yml          # Backend + frontend stack
+├── frontend/                   # Next.js admin UI
+└── README.md                   # This file
 ```
 
 ---
@@ -541,7 +567,7 @@ response = rag.query(query, alpha=0.7)
 
 ```bash
 # Rebuild index
-python ingest.py
+python -m backend.ingest
 
 # Check data directory
 ls data/*.pdf

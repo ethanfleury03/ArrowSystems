@@ -25,12 +25,13 @@ from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
-from rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
-from orchestrator import StructuredResponse, QueryIntent
-from utils.database_manager import DatabaseManager
-from utils.query_summarizer import QuerySummarizer
-from utils.feedback_manager import FeedbackManager
-from utils.saved_response_manager import SavedResponseManager
+from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
+from .orchestrator import StructuredResponse, QueryIntent
+from .utils.database_manager import DatabaseManager
+from .utils.db import DEFAULT_DB_PATH
+from .utils.query_summarizer import QuerySummarizer
+from .utils.feedback_manager import FeedbackManager
+from .utils.saved_response_manager import SavedResponseManager
 
 # Configure logging
 logging.basicConfig(
@@ -312,7 +313,7 @@ async def lifespan(app: FastAPI):
     db_manager = DatabaseManager()
     saved_response_manager = SavedResponseManager(db_manager)
     await db_manager.seed_default_users()
-    logger.info("✅ SQLite database initialized at ./database.sqlite")
+    logger.info("✅ SQLite database initialized at %s", DEFAULT_DB_PATH)
     
     # Initialize RAG pipeline
     try:
@@ -334,7 +335,7 @@ async def lifespan(app: FastAPI):
         
         if not storage_path:
             raise FileNotFoundError(
-                "Index not found. Please run 'python ingest.py' first, "
+                "Index not found. Please run 'python -m backend.ingest' first, "
                 "or ensure the latest_model directory exists. "
                 f"Checked paths: {possible_paths}"
             )
@@ -1901,7 +1902,7 @@ async def delete_chunk(chunk_id: str):
     
     return {
         "status": "info",
-        "message": "Chunk deletion requires re-indexing. Please remove the source document and re-run ingest.py"
+        "message": "Chunk deletion requires re-indexing. Please remove the source document and re-run python -m backend.ingest"
     }
 
 
@@ -2067,7 +2068,7 @@ def main():
     args = parser.parse_args()
     
     uvicorn.run(
-        "api:app",
+        "backend.api:app",
         host=args.host,
         port=args.port,
         reload=args.reload,

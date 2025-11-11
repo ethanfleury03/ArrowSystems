@@ -277,14 +277,14 @@ if python -c "import torch" 2>/dev/null; then
     echo "🔍 PyTorch Detection:"
     echo "   ✅ PyTorch $TORCH_VERSION already installed"
     echo "   ✅ CUDA available: $CUDA_AVAILABLE"
-    echo "   ⚡ Will skip torch in requirements.txt (saves ~2.2GB + 5 min)"
+    echo "   ⚡ Will skip torch in backend/requirements.txt (saves ~2.2GB + 5 min)"
     echo ""
     SKIP_TORCH=true
 fi
 
 # Install missing dependencies with smart handling
 if [ "$MISSING_CORE" = true ]; then
-    echo "📥 Installing all dependencies from requirements.txt..."
+    echo "📥 Installing all dependencies from backend/requirements.txt..."
     echo "   This may take a few minutes..."
     echo ""
     
@@ -292,10 +292,10 @@ if [ "$MISSING_CORE" = true ]; then
     
     if [ "$SKIP_TORCH" = true ]; then
         # Create temporary requirements without torch
-        grep -vE "^torch[>=<]|^torchvision" requirements.txt > /tmp/requirements_no_torch.txt
+        grep -vE "^torch[>=<]|^torchvision" backend/requirements.txt > /tmp/requirements_no_torch.txt
         REQUIREMENTS_FILE="/tmp/requirements_no_torch.txt"
     else
-        REQUIREMENTS_FILE="requirements.txt"
+        REQUIREMENTS_FILE="backend/requirements.txt"
     fi
     
     # Pre-install blinker to avoid distutils conflict (common on RunPod/system Python)
@@ -318,7 +318,7 @@ if [ "$MISSING_CORE" = true ]; then
     echo "✅ All dependencies installed"
     echo ""
 elif [ "$MISSING_UI" = true ]; then
-    echo "📥 Installing all dependencies from requirements.txt..."
+    echo "📥 Installing all dependencies from backend/requirements.txt..."
     echo "   This will show progress so you can see what's happening..."
     echo ""
     
@@ -326,10 +326,10 @@ elif [ "$MISSING_UI" = true ]; then
     
     if [ "$SKIP_TORCH" = true ]; then
         # Use filtered requirements without torch
-        grep -vE "^torch[>=<]|^torchvision" requirements.txt > /tmp/requirements_no_torch.txt
+        grep -vE "^torch[>=<]|^torchvision" backend/requirements.txt > /tmp/requirements_no_torch.txt
         REQUIREMENTS_FILE="/tmp/requirements_no_torch.txt"
     else
-        REQUIREMENTS_FILE="requirements.txt"
+        REQUIREMENTS_FILE="backend/requirements.txt"
     fi
     
     # Pre-install blinker to avoid distutils conflict (common on RunPod/system Python)
@@ -403,7 +403,7 @@ echo ""
 # Ensure SQLite file exists and tables are created
 if python - <<'PY'
 import os
-from utils.db import init_db, DEFAULT_DB_PATH
+from backend.utils.db import init_db, DEFAULT_DB_PATH
 
 db_path = os.getenv("SQLITE_DB_PATH", DEFAULT_DB_PATH)
 os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
@@ -418,14 +418,14 @@ PY
 then
     DB_PATH=$(python - <<'PY'
 import os
-from utils.db import DEFAULT_DB_PATH
+from backend.utils.db import DEFAULT_DB_PATH
 print(os.getenv("SQLITE_DB_PATH", DEFAULT_DB_PATH))
 PY
 )
     echo "  ✅ SQLite database ready at ${DB_PATH}"
 else
     echo "  ❌ Failed to initialize SQLite database"
-    echo "     Check write permissions for ${SQLITE_DB_PATH:-./database.sqlite}"
+    echo "     Check write permissions for ${SQLITE_DB_PATH:-./backend/database.sqlite}"
 fi
 
 echo ""
@@ -491,19 +491,19 @@ else
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 echo ""
                 echo "🔄 Running ingestion..."
-                python ingest.py
+                python -m backend.ingest
                 echo ""
                 echo "✅ Ingestion complete!"
                 echo ""
             else
                 echo ""
                 echo "⚠️  Skipping ingestion - queries will fail without index"
-                echo "   Run manually later: python ingest.py"
+                echo "   Run manually later: python -m backend.ingest"
                 echo ""
             fi
         else
             echo "⚠️  No PDF files found in data/ folder"
-            echo "   Add PDFs to data/ and run: python ingest.py"
+            echo "   Add PDFs to data/ and run: python -m backend.ingest"
             echo ""
         fi
     else
@@ -513,14 +513,14 @@ else
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             echo ""
             echo "🔄 Running ingestion..."
-            python ingest.py
+            python -m backend.ingest
             echo ""
             echo "✅ Ingestion complete!"
             echo ""
         else
             echo ""
             echo "⚠️  Starting without index - queries will fail"
-            echo "   Run ingestion later: python ingest.py"
+            echo "   Run ingestion later: python -m backend.ingest"
             echo ""
         fi
     fi
@@ -590,7 +590,7 @@ echo ""
 # Precompile Python files for faster startup (saves 1-2 seconds)
 if [ "$IS_RUNPOD" = true ]; then
     echo "⚡ Precompiling Python files..."
-    python -m compileall app.py components/ utils/ -q 2>/dev/null || true
+    python -m compileall backend -q 2>/dev/null || true
     echo ""
 fi
 

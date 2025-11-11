@@ -13,7 +13,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 import os
 import logging
 from typing import List, Optional, Dict, Any
-from rag_pipeline import RAGPipeline, StructuredResponse
+from .rag_pipeline import RAGPipeline, StructuredResponse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

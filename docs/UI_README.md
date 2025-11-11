@@ -59,7 +59,7 @@ Professional web interface for the DuraFlex Technical Knowledge System.
 
 ### 1. Install Dependencies
 ```bash
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 ```
 
 ### 2. Configure Users
@@ -146,7 +146,7 @@ new_username:
 1. Add PDFs to `data/` directory
 2. Run ingestion:
 ```bash
-python ingest.py
+python -m backend.ingest
 ```
 3. Restart application to load new index
 
@@ -238,7 +238,7 @@ app.py (Main Entry Point)
 
 ### "No results found"
 - Check if index is built (`storage/` directory exists)
-- Run `python ingest.py` to build index
+- Run `python -m backend.ingest` to build index
 - Verify documents in `data/` directory
 
 ### "Slow queries"
@@ -285,13 +285,13 @@ app.py (Main Entry Point)
 
 ### Updating Dependencies
 ```bash
-pip install --upgrade -r requirements.txt
+pip install --upgrade -r backend/requirements.txt
 ```
 
 ### Updating Application
 ```bash
 git pull
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 streamlit run app.py
 ```
 

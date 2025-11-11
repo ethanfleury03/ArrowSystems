@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 import os
 import logging
 from typing import List, Optional, Dict, Any
-from orchestrator import RAGOrchestrator, StructuredResponse
+from .orchestrator import RAGOrchestrator, StructuredResponse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

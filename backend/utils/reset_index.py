@@ -21,8 +21,8 @@ def reset_index(confirm=True, verbose=True):
     """
     
     # Determine project root (go up from utils/ to project root)
-    script_dir = Path(__file__).parent  # utils/
-    project_root = script_dir.parent     # project root
+    script_dir = Path(__file__).parent        # backend/utils
+    project_root = script_dir.parent.parent   # repository root
     
     # Change to project root for consistent path resolution
     original_dir = os.getcwd()
@@ -60,7 +60,7 @@ def reset_index(confirm=True, verbose=True):
                 print(f"   • {path}/ ({size})")
         
         print("\n⚠️  WARNING: This action cannot be undone!")
-        print("   You will need to run 'python ingest.py' again to rebuild.")
+        print("   You will need to run 'python -m backend.ingest' again to rebuild.")
         print("")
     
     # Confirmation
@@ -112,7 +112,7 @@ def reset_index(confirm=True, verbose=True):
                 print(f"   • {item}/")
             print("")
             print("📝 Next steps:")
-            print("   1. Run: python ingest.py")
+            print("   1. Run: python -m backend.ingest")
             print("   2. Wait for ingestion to complete (~10-30 minutes)")
             print("   3. Start app: streamlit run app.py")
         else:
@@ -161,7 +161,7 @@ Examples:
   python utils/reset_index.py --force --quiet  # Silent deletion
 
 After resetting:
-  python ingest.py                         # Rebuild the index
+  python -m backend.ingest                 # Rebuild the index
         """
     )
     

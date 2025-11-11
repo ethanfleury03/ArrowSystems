@@ -14,7 +14,7 @@ fi
 
 # Check if index exists in multiple locations
 if [ ! -d "latest_model" ] && [ ! -d "../latest_model" ] && [ ! -d "/workspace/latest_model" ] && [ ! -d "/workspace/ArrowSystems/latest_model" ]; then
-    echo "❌ Error: Index not found. Please run 'python ingest.py' first."
+    echo "❌ Error: Index not found. Please run 'python -m backend.ingest' first."
     echo "   Or ensure the latest_model directory exists."
     exit 1
 fi
@@ -22,7 +22,7 @@ fi
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
-# Change to project root directory (where api.py is located)
+# Change to project root directory (backend package root)
 cd "$(dirname "$0")/.."
 
 # Set environment variables
@@ -37,8 +37,8 @@ echo ""
 # Run with appropriate settings based on environment
 if [ "$ENVIRONMENT" = "development" ]; then
     echo "🔧 Running in development mode with auto-reload..."
-    python api.py --host 0.0.0.0 --port 8000 --reload
+    python -m backend.api --host 0.0.0.0 --port 8000 --reload
 else
     echo "🏭 Running in production mode..."
-    python api.py --host 0.0.0.0 --port 8000 --workers 2
+    python -m backend.api --host 0.0.0.0 --port 8000 --workers 2
 fi

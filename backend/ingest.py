@@ -900,9 +900,16 @@ class SmartChunkSplitter:
 class NonTextExtractor:
     """Extract and process non-text content from documents."""
     
-    def __init__(self, output_dir="/workspace/extracted_content"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
+    def __init__(self, output_dir: Optional[str] = None):
+        override_dir = os.getenv("EXTRACTED_CONTENT_DIR")
+        if override_dir:
+            target_dir = Path(override_dir)
+        elif output_dir:
+            target_dir = Path(output_dir)
+        else:
+            target_dir = Path(__file__).resolve().parent.parent / "extracted_content"
+        self.output_dir = target_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
     def extract_tables_from_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract tables from PDF using PyMuPDF."""

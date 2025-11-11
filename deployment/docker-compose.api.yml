@@ -15,7 +15,7 @@ services:
       - ./latest_model:/app/latest_model:ro
       # Mount logs directory for persistence
       - ./logs:/app/logs
-      - ./database.sqlite:/app/database.sqlite
+      - ./backend/database.sqlite:/app/database.sqlite
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

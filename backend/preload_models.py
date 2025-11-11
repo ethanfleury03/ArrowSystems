@@ -9,6 +9,7 @@ import sys
 import torch
 import glob
 
+
 def main():
     os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER', '0')
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -19,7 +20,7 @@ def main():
     cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
     if not cache_dir.endswith('hub'):
         cache_dir = os.path.join(cache_dir, 'hub')
-    
+
     os.makedirs(cache_dir, exist_ok=True)
     print(f'📂 Cache directory: {cache_dir}')
     sys.stdout.flush()
@@ -29,6 +30,7 @@ def main():
     sys.stdout.flush()
     try:
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
         embed_model = HuggingFaceEmbedding(
             model_name='BAAI/bge-large-en-v1.5',
             cache_folder=cache_dir,
@@ -50,6 +52,7 @@ def main():
     sys.stdout.flush()
     try:
         from sentence_transformers import CrossEncoder
+
         reranker = CrossEncoder(
             'BAAI/bge-reranker-large',
             cache_folder=cache_dir,
@@ -70,9 +73,9 @@ def main():
     sys.stdout.flush()
     cache_files = glob.glob(os.path.join(cache_dir, '**', '*.bin'), recursive=True) + \
                   glob.glob(os.path.join(cache_dir, '**', '*.safetensors'), recursive=True)
-    
+
     if cache_files:
-        total_size = sum(os.path.getsize(f) for f in cache_files if os.path.exists(f)) / (1024*1024*1024)
+        total_size = sum(os.path.getsize(f) for f in cache_files if os.path.exists(f)) / (1024 * 1024 * 1024)
         print(f'✅ Verified {len(cache_files)} model files cached')
         print(f'   Total cache size: {total_size:.2f} GB')
         sys.stdout.flush()
@@ -83,6 +86,7 @@ def main():
 
     print('✅ All models preloaded and verified successfully!')
     return 0
+
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -209,7 +209,7 @@ response = rag.query(query, alpha=0.3)  # or 0.7
 ### Missing expected sources
 ```bash
 # Rebuild index
-python ingest.py
+python -m backend.ingest
 ```
 
 ### Slow processing
@@ -231,7 +231,7 @@ orchestrator.reranker = None
 ├── query.py                 # CLI interface
 ├── ingest.py                # Document ingestion
 ├── config.yaml              # Configuration
-├── requirements.txt         # Dependencies
+├── backend/requirements.txt # Dependencies
 ├── RAG_ORCHESTRATOR_GUIDE.md  # Full documentation
 └── QUICK_REFERENCE.md       # This file
 ```

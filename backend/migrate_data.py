@@ -3,7 +3,7 @@ One-time migration script to move data from a Postgres (Neon) database
 into the new local SQLite database used by the FastAPI backend.
 
 Usage:
-    python migrate_data.py
+    python -m backend.migrate_data
 
 Environment variables (optional):
     NEON_DATABASE_URL       Full Postgres connection string.
@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - optional dependency
     psycopg2 = None
     RealDictCursor = None
 
-from utils.db import init_db, SessionLocal, User, QueryHistory, Feedback, SavedResponse
+from .utils.db import init_db, SessionLocal, User, QueryHistory, Feedback, SavedResponse
 
 
 def _connect_postgres():

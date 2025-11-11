@@ -767,7 +767,7 @@ class HybridRetriever:
         
         # Import document metadata checker
         try:
-            from utils.document_metadata import is_document_active
+            from .utils.document_metadata import is_document_active
         except ImportError:
             # Fallback if metadata module not available
             def is_document_active(filename: str) -> bool:
@@ -854,7 +854,7 @@ class HybridRetriever:
         try:
             # Import document metadata checker
             try:
-                from utils.document_metadata import is_document_active
+                from .utils.document_metadata import is_document_active
             except ImportError:
                 # Fallback if metadata module not available
                 def is_document_active(filename: str) -> bool:
@@ -951,7 +951,7 @@ class HybridRetriever:
             
             # Import document metadata checker
             try:
-                from utils.document_metadata import is_document_active
+                from .utils.document_metadata import is_document_active
             except ImportError:
                 def is_document_active(filename: str) -> bool:
                     return True
@@ -2922,7 +2922,7 @@ class RAGOrchestrator:
             if not os.path.exists(path):
                 logger.warning(f"Glossary file not found at {path}")
                 return
-            from glossary_loader import load_glossary_any
+            from .glossary_loader import load_glossary_any
             nodes = load_glossary_any(path)
             if not nodes:
                 logger.warning("No glossary entries loaded")
@@ -3046,7 +3046,7 @@ class RAGOrchestrator:
         if not os.path.exists(storage_dir):
             raise FileNotFoundError(
                 f"Index not found at {storage_dir}. "
-                f"Run 'python ingest.py' to build the index first, "
+                f"Run 'python -m backend.ingest' to build the index first, "
                 f"or pull from git if using pre-built index."
             )
         

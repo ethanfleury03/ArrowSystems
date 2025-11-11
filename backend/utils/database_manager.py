@@ -10,8 +10,8 @@ import os
 
 import bcrypt
 
-from utils.db import SessionLocal, User, QueryHistory, Feedback, SavedResponse, init_db
-from utils.db import run_sync
+from .db import SessionLocal, User, QueryHistory, Feedback, SavedResponse, init_db
+from .db import run_sync
 
 logger = logging.getLogger(__name__)
 

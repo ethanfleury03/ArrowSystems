@@ -34,7 +34,7 @@ $env:DOCKER_BUILDKIT = "1"
 docker build `
     --build-arg BUILD_ENV=production `
     -t rag-app:local `
-    -f Dockerfile `
+    -f backend/Dockerfile.backend `
     .
 
 if ($LASTEXITCODE -eq 0) {

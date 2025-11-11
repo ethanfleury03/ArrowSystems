@@ -12,14 +12,14 @@ from typing import Dict, Any, Optional, Tuple
 from llama_index.core import Document, VectorStoreIndex, load_index_from_storage, StorageContext
 from llama_index.core.schema import TextNode
 
-from ingest import (
+from ..ingest import (
     DocumentLoader,
     TextPreprocessor,
     SmartChunkSplitter,
     ClaudeSemanticRewriter,
     NonTextExtractor
 )
-from utils.query_summarizer import QuerySummarizer
+from .query_summarizer import QuerySummarizer
 
 logger = logging.getLogger(__name__)
 
