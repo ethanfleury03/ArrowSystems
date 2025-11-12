@@ -44,6 +44,7 @@ fastapi==0.120.0
 python-multipart
 uvicorn[standard]==0.38.0
 pydantic==2.12.3
+email-validator==2.2.0
 
 # -----------------------------
 # Document Processing
@@ -55,6 +56,7 @@ openpyxl==3.1.5
 python-docx==1.2.0
 python-dotenv==1.1.1
 Pillow==11.3.0
+PyJWT==2.9.0
 
 # -----------------------------
 # Utilities
