@@ -1,12 +1,13 @@
 "use client"
 
-import { Settings, FileText, History, Menu, LogOut, User, Bookmark, Search, MessageSquare, Clock, Download, Trash2, Database, Server, CheckCircle2, XCircle, Info } from "lucide-react"
+import { Settings, FileText, History, Menu, LogOut, User, Bookmark, Search, MessageSquare, Clock, Download, Trash2, Database, Server, CheckCircle2, XCircle, Info, Shield } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
+import { useRouter, usePathname } from "next/navigation"
 import { getChatHistory, ChatHistoryItem, getHealth, getSavedResponses, SavedResponse } from "@/lib/api"
 import type { Message as ChatMessage, MessageSource } from "@/types/message"
 
@@ -361,6 +362,44 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     URL.revokeObjectURL(url)
   }
 
+  const router = useRouter()
+  const pathname = usePathname()
+  const [isAdmin, setIsAdmin] = useState(false)
+  const activeRoute = useMemo(() => pathname, [pathname])
+
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem("auth_token")
+      if (!token) {
+        setIsAdmin(false)
+        return
+      }
+      const payloadBase64 = token.split(".")[1]
+      if (!payloadBase64) {
+        setIsAdmin(false)
+        return
+      }
+      const payloadJson = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"))
+      const payload = JSON.parse(payloadJson)
+      setIsAdmin(payload?.role === "ADMIN")
+    } catch (error) {
+      console.warn("Failed to parse auth token:", error)
+      setIsAdmin(false)
+    }
+  }, [])
+
+  const handleNavigateHome = () => {
+    router.push("/")
+  }
+
+  const handleNavigateAdmin = () => {
+    router.push("/admin")
+  }
+
+  const isRouteActive = (route: string) => {
+    return activeRoute === route
+  }
+
   return (
     <>
       {/* Mobile overlay */}
@@ -391,6 +430,28 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                 <p className="text-xs text-muted-foreground">john@example.com</p>
               </div>
             </div>
+            <Button
+              variant={isRouteActive("/") ? "secondary" : "ghost"}
+              size="sm"
+              className="mt-2 w-full justify-start gap-2"
+              onClick={handleNavigateHome}
+            >
+              <MessageSquare className="h-4 w-4" />
+              <span>Home</span>
+            </Button>
+
+            {isAdmin && (
+              <Button
+                variant={isRouteActive("/admin") ? "secondary" : "ghost"}
+                size="sm"
+                className="mt-1 w-full justify-start gap-2"
+                onClick={handleNavigateAdmin}
+              >
+                <Shield className="h-4 w-4" />
+                <span>Admin Dashboard</span>
+              </Button>
+            )}
+
             <Button
               variant="ghost"
               size="sm"

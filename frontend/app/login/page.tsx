@@ -8,7 +8,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { buildApiUrl } from '@/config/api';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -23,25 +22,38 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const response = await fetch(buildApiUrl('/auth/login'), {
+      const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
-        credentials: 'include',
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        setError(data.error || 'Login failed');
+        setError(data.detail || data.error || 'Login failed');
         setLoading(false);
         return;
+      }
+
+      const { user, token } = data;
+      if (!user || !token) {
+        setError('Invalid response from server');
+        setLoading(false);
+        return;
+      }
+
+      try {
+        localStorage.setItem('auth_token', token);
+        localStorage.setItem('user_profile', JSON.stringify(user));
+      } catch (storageError) {
+        console.warn('Failed to store auth token:', storageError);
       }
 
       // Redirect based on user role
       // Admins go to /admin, regular users go to main chat
       // Use window.location for full page reload to ensure middleware sees the cookie
-      const redirectPath = data.role === 'ADMIN' ? '/admin' : '/';
+      const redirectPath = user.role === 'ADMIN' ? '/admin' : '/';
       window.location.href = redirectPath;
     } catch (err) {
       setError('An error occurred. Please try again.');

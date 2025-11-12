@@ -1,18 +1,15 @@
-const REMOTE_BACKEND =
+const DEFAULT_SERVER_BACKEND = 'http://backend:8000';
+const DEFAULT_CLIENT_BACKEND = 'http://localhost:8000';
+
+const SERVER_BACKEND =
+  process.env.SERVER_BACKEND_URL ??
+  process.env.NEXT_PUBLIC_SERVER_BACKEND_URL ??
+  DEFAULT_SERVER_BACKEND;
+
+const CLIENT_BACKEND =
   process.env.NEXT_PUBLIC_API_URL ??
   process.env.REACT_APP_API_URL ??
-  'https://api.example.com';
-
-const LOCAL_BACKEND =
-  process.env.NEXT_PUBLIC_LOCAL_BACKEND_URL ??
-  process.env.REACT_APP_LOCAL_BACKEND_URL ??
-  'http://localhost:8000';
-
-const USE_LOCAL =
-  process.env.NEXT_PUBLIC_USE_LOCAL_BACKEND === 'true' ||
-  process.env.REACT_APP_USE_LOCAL_BACKEND === 'true';
-
-export const API_BASE_URL = USE_LOCAL ? LOCAL_BACKEND : REMOTE_BACKEND;
+  DEFAULT_CLIENT_BACKEND;
 
 const getRuntimeOverride = (): string | null => {
   if (typeof window === 'undefined') {
@@ -21,7 +18,7 @@ const getRuntimeOverride = (): string | null => {
 
   const useLocal = window.localStorage.getItem('useLocalBackend');
   if (useLocal === 'true') {
-    return LOCAL_BACKEND;
+    return DEFAULT_CLIENT_BACKEND;
   }
 
   const manualOverride = window.localStorage.getItem('apiBaseUrlOverride');
@@ -32,7 +29,19 @@ const getRuntimeOverride = (): string | null => {
   return null;
 };
 
-export const resolveApiBaseUrl = (): string => getRuntimeOverride() ?? API_BASE_URL;
+export const resolveInitialBaseUrl = (): string => {
+  if (typeof window === 'undefined') {
+    return SERVER_BACKEND;
+  }
+  return CLIENT_BACKEND;
+};
+
+export const resolveApiBaseUrl = (): string => {
+  if (typeof window === 'undefined') {
+    return SERVER_BACKEND;
+  }
+  return getRuntimeOverride() ?? CLIENT_BACKEND;
+};
 
 export const buildApiUrl = (path: string): string => {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;

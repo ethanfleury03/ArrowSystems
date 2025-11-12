@@ -1,13 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { API_BASE_URL, resolveApiBaseUrl } from '@/config/api';
+import { resolveApiBaseUrl, resolveInitialBaseUrl } from '@/config/api';
 
 const LOCAL_KEY = 'useLocalBackend';
 
 export function ApiToggle() {
   const [isLocal, setIsLocal] = useState(false);
-  const [activeUrl, setActiveUrl] = useState(API_BASE_URL);
+  const [activeUrl, setActiveUrl] = useState(resolveInitialBaseUrl());
 
   useEffect(() => {
     const resolvedUrl = resolveApiBaseUrl();

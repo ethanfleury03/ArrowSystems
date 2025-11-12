@@ -108,6 +108,67 @@ class DatabaseManager:
 
         return await run_sync(_create)
 
+    async def list_users(self) -> List[Dict[str, Any]]:
+        def _list() -> List[Dict[str, Any]]:
+            with SessionLocal() as session:
+                records = session.execute(select(User).order_by(User.created_at.asc())).scalars().all()
+                return [self._serialize_user(record) for record in records]
+
+        return await run_sync(_list)
+
+    async def update_user(
+        self,
+        user_id: int,
+        *,
+        email: Optional[str] = None,
+        name: Optional[str] = None,
+        password: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        def _update() -> Dict[str, Any]:
+            with SessionLocal() as session:
+                user = session.get(User, user_id)
+                if not user:
+                    raise ValueError("User not found")
+
+                if email:
+                    normalized = email.strip().lower()
+                    existing = (
+                        session.execute(
+                            select(User).where(func.lower(User.email) == normalized, User.id != user_id)
+                        ).scalars().first()
+                    )
+                    if existing:
+                        raise ValueError("Email already in use")
+                    user.email = normalized
+
+                if name is not None:
+                    user.name = name
+
+                if role:
+                    user.role = role.strip().upper()
+
+                if password:
+                    user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+                session.commit()
+                session.refresh(user)
+                return self._serialize_user(user)
+
+        return await run_sync(_update)
+
+    async def delete_user(self, user_id: int) -> bool:
+        def _delete() -> bool:
+            with SessionLocal() as session:
+                user = session.get(User, user_id)
+                if not user:
+                    return False
+                session.delete(user)
+                session.commit()
+                return True
+
+        return await run_sync(_delete)
+
     async def authenticate_user(self, email: str, password: str) -> Optional[Dict[str, Any]]:
         def _auth():
             with SessionLocal() as session:

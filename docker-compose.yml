@@ -50,6 +50,11 @@ services:
       - NODE_ENV=production
       # Backend API URL (if you have a separate backend)
       - BACKEND_URL=http://backend:8000
+      - NEXT_PUBLIC_USE_LOCAL_BACKEND=true
+      - NEXT_PUBLIC_LOCAL_BACKEND_URL=http://backend:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_SERVER_BACKEND_URL=http://backend:8000
+      - SERVER_BACKEND_URL=http://backend:8000
     depends_on:
       backend:
         condition: service_healthy

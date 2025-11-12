@@ -32,6 +32,8 @@ from .utils.db import DEFAULT_DB_PATH
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
 from .utils.saved_response_manager import SavedResponseManager
+from .security import create_access_token
+from .routes.admin_routes import create_admin_router
 
 # Configure logging
 logging.basicConfig(
@@ -50,6 +52,10 @@ db_manager = None
 query_summarizer = None  # Query summarization utility
 feedback_manager = None  # Local JSON feedback store
 saved_response_manager = None  # Local saved response store
+
+
+def get_db_manager_instance() -> Optional[DatabaseManager]:
+    return db_manager
 
 
 # =============================================================================
@@ -396,6 +402,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register admin routes
+app.include_router(create_admin_router(get_db_manager_instance))
+
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
@@ -580,6 +589,7 @@ class UserResponse(BaseModel):
 
 class LoginResponse(BaseModel):
     user: UserResponse
+    token: str
 
 
 # API Endpoints
@@ -615,7 +625,8 @@ async def auth_login(request: LoginRequest):
     user = await db_manager.authenticate_user(request.email, request.password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    return {"user": user}
+    token = create_access_token({"email": user["email"], "role": user["role"]})
+    return {"user": user, "token": token}
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
@@ -1129,7 +1140,7 @@ async def get_all_documents():
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
     try:
-        from utils.document_metadata import get_document_metadata
+        from .utils.document_metadata import get_document_metadata
         
         documents = []
         
@@ -1464,7 +1475,7 @@ async def toggle_document_status(filename: str, request: Dict[str, Any]):
         
         is_active = request.get("is_active", True)
         
-        from utils.document_metadata import set_document_active
+    from .utils.document_metadata import set_document_active
         set_document_active(filename, is_active)
         
         status = "enabled" if is_active else "disabled"
@@ -1511,7 +1522,7 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
         if not updates:
             raise HTTPException(status_code=400, detail="No valid metadata fields provided")
         
-        from utils.document_metadata import update_document_metadata
+    from .utils.document_metadata import update_document_metadata
         update_document_metadata(filename, updates)
         
         logger.info(f"Updated metadata for {filename}: {updates}")
@@ -1565,7 +1576,7 @@ async def delete_document(filename: str):
             deleted_files.append(original_path)
         
         # Delete metadata
-        from utils.document_metadata import delete_document_metadata
+    from .utils.document_metadata import delete_document_metadata
         delete_document_metadata(filename)
         
         # Remove from vector store and docstore

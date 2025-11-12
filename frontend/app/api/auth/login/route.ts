@@ -32,14 +32,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { user } = await backendResponse.json() as { user: { id: string; role: string } };
+    const { user, token } = await backendResponse.json() as { user: { id: string; role: string }; token: string };
+    if (!user || !token) {
+      return NextResponse.json(
+        { error: 'Invalid response from authentication service' },
+        { status: 502 }
+      );
+    }
 
     // Create response and set session
     const response = NextResponse.json(
-      { 
-        message: 'Login successful', 
+      {
+        message: 'Login successful',
         userId: user.id,
-        role: user.role  // Include role for frontend redirect logic
+        role: user.role,
+        user,
+        token,
       },
       { status: 200 }
     );
