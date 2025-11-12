@@ -36,6 +36,8 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   const [showSettings, setShowSettings] = useState(false)
   const [savedResponses, setSavedResponses] = useState<SavedResponse[]>([])
   const [isLoadingSaved, setIsLoadingSaved] = useState(false)
+  const [userProfile, setUserProfile] = useState<{ name?: string | null; email?: string | null; role?: string | null } | null>(null)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
   
   // Settings state
   const [querySettings, setQuerySettings] = useState<QuerySettings>({
@@ -70,33 +72,46 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     }
   }, [onNewConversationReady])
 
-  // Fetch chat history when showing history tab
+  const currentUserEmail = userProfile?.email && userProfile.email.trim() !== "" ? userProfile.email : "api_user"
+
+  useEffect(() => {
+    try {
+      const storedProfile = localStorage.getItem("user_profile")
+      if (storedProfile) {
+        const parsedProfile = JSON.parse(storedProfile)
+        setUserProfile(parsedProfile)
+      }
+    } catch (error) {
+      console.warn("Failed to read stored user profile:", error)
+    }
+  }, [])
+
   useEffect(() => {
     if (showChatHistory && chatHistory.length === 0 && !isLoadingHistory) {
-      fetchChatHistory()
+      fetchChatHistory(currentUserEmail)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showChatHistory])
+  }, [showChatHistory, currentUserEmail])
 
   // Fetch saved responses when showing saved tab
   useEffect(() => {
     if (activeTab === "saved" && !isLoadingSaved) {
-      fetchSavedResponses()
+      fetchSavedResponses(currentUserEmail)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab])
+  }, [activeTab, currentUserEmail])
 
   useEffect(() => {
-    const handler = () => fetchSavedResponses()
+    const handler = () => fetchSavedResponses(currentUserEmail)
     window.addEventListener("saved-responses:refresh", handler)
     return () => window.removeEventListener("saved-responses:refresh", handler)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [currentUserEmail])
 
-  const fetchChatHistory = async () => {
+  const fetchChatHistory = async (email: string) => {
     setIsLoadingHistory(true)
     try {
-      const response = await getChatHistory('api_user', 50)
+      const response = await getChatHistory(email, 50)
       if (response.status === 'success') {
         setChatHistory(response.history)
       }
@@ -108,10 +123,10 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     }
   }
 
-  const fetchSavedResponses = async () => {
+  const fetchSavedResponses = async (email: string) => {
     setIsLoadingSaved(true)
     try {
-      const response = await getSavedResponses(50, 1, 'api_user')  // Show responses saved by current user
+      const response = await getSavedResponses(50, 1, email)  // Show responses saved by current user
       if (response.status === 'success') {
         setSavedResponses(response.saved)
       }
@@ -240,7 +255,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     setShowChatHistory(true)
     setActiveTab("history")
     if (chatHistory.length === 0) {
-      fetchChatHistory()
+      fetchChatHistory(currentUserEmail)
     }
   }
 
@@ -274,9 +289,28 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     }
   }
 
-  const handleLogout = () => {
-    // TODO: Implement actual logout logic
-    console.log("Logging out...")
+  const handleLogout = async () => {
+    if (isLoggingOut) return
+    setIsLoggingOut(true)
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      })
+    } catch (error) {
+      console.error('Failed to log out:', error)
+    } finally {
+      try {
+        localStorage.removeItem('auth_token')
+        localStorage.removeItem('user_profile')
+      } catch (storageError) {
+        console.warn('Failed to clear auth storage:', storageError)
+      }
+      setIsLoggingOut(false)
+      setUserProfile(null)
+      setIsAdmin(false)
+      router.push('/login')
+    }
   }
 
   const handleSettingsClick = () => {
@@ -382,6 +416,16 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
       const payloadJson = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"))
       const payload = JSON.parse(payloadJson)
       setIsAdmin(payload?.role === "ADMIN")
+      if (payload?.email || payload?.role || payload?.name) {
+        setUserProfile((prev) => {
+          const existing = prev ?? {}
+          return {
+            name: existing.name ?? payload?.name ?? existing.name ?? undefined,
+            email: existing.email ?? payload?.email ?? existing.email ?? undefined,
+            role: payload?.role ?? existing.role ?? undefined,
+          }
+        })
+      }
     } catch (error) {
       console.warn("Failed to parse auth token:", error)
       setIsAdmin(false)
@@ -399,6 +443,26 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   const isRouteActive = (route: string) => {
     return activeRoute === route
   }
+
+  const displayName = useMemo(() => {
+    if (userProfile?.name && userProfile.name.trim().length > 0) {
+      return userProfile.name
+    }
+    if (userProfile?.email && userProfile.email.includes("@")) {
+      return userProfile.email.split("@")[0]
+    }
+    return "User"
+  }, [userProfile])
+
+  const displayEmail = useMemo(() => {
+    if (userProfile?.email && userProfile.email.trim().length > 0) {
+      return userProfile.email
+    }
+    if (userProfile?.name && userProfile.name.trim().length > 0) {
+      return `${userProfile.name.replace(/\s+/g, '').toLowerCase()}@example.com`
+    }
+    return "guest@example.com"
+  }, [userProfile])
 
   return (
     <>
@@ -426,8 +490,8 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                 <User className="h-5 w-5 text-primary" />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">John Doe</p>
-                <p className="text-xs text-muted-foreground">john@example.com</p>
+                <p className="text-sm font-medium truncate">{displayName}</p>
+                <p className="text-xs text-muted-foreground truncate">{displayEmail}</p>
               </div>
             </div>
             <Button
@@ -457,9 +521,10 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
               size="sm"
               className="mt-2 w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
               onClick={handleLogout}
+              disabled={isLoggingOut}
             >
               <LogOut className="h-4 w-4" />
-              Log out
+              {isLoggingOut ? "Logging out..." : "Log out"}
             </Button>
           </div>
 

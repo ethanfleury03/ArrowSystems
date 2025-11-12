@@ -3,12 +3,44 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel
 
 from ..security import decode_access_token
 from ..utils.database_manager import DatabaseManager
+
+
+class AdminUserResponse(BaseModel):
+    id: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    role: str
+    company_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_phone: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class AdminUserCreateRequest(BaseModel):
+    email: str
+    password: str
+    role: str = "TECHNICIAN"
+    name: Optional[str] = None
+    company_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_phone: Optional[str] = None
+
+
+class AdminUserUpdateRequest(BaseModel):
+    email: Optional[str] = None
+    password: Optional[str] = None
+    role: Optional[str] = None
+    name: Optional[str] = None
+    company_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_phone: Optional[str] = None
 
 
 def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager]]) -> APIRouter:
@@ -48,26 +80,6 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
         return user
 
-    class AdminUserResponse(BaseModel):
-        id: str
-        email: EmailStr
-        name: Optional[str] = None
-        role: str
-        created_at: Optional[str] = None
-        updated_at: Optional[str] = None
-
-    class CreateUserRequest(BaseModel):
-        email: EmailStr
-        password: str = Field(min_length=6)
-        role: str = Field(default="TECHNICIAN", examples=["ADMIN", "TECHNICIAN"])
-        name: Optional[str] = None
-
-    class UpdateUserRequest(BaseModel):
-        email: Optional[EmailStr] = None
-        password: Optional[str] = Field(default=None, min_length=6)
-        role: Optional[str] = Field(default=None, examples=["ADMIN", "TECHNICIAN"])
-        name: Optional[str] = None
-
     @router.get("/users", response_model=List[AdminUserResponse])
     async def list_users(
         _: Dict[str, str] = Depends(get_current_admin),
@@ -78,7 +90,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
 
     @router.post("/create_user", response_model=AdminUserResponse, status_code=status.HTTP_201_CREATED)
     async def create_user(
-        payload: CreateUserRequest,
+        payload: AdminUserCreateRequest = Body(...),
         _: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
     ):
@@ -91,13 +103,16 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             password=payload.password,
             role=payload.role,
             name=payload.name,
+            company_name=payload.company_name,
+            contact_name=payload.contact_name,
+            contact_phone=payload.contact_phone,
         )
         return created
 
     @router.put("/edit_user/{user_id}", response_model=AdminUserResponse)
     async def edit_user(
         user_id: int,
-        payload: UpdateUserRequest,
+        payload: AdminUserUpdateRequest = Body(...),
         _: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
     ):
@@ -108,6 +123,9 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 name=payload.name,
                 password=payload.password,
                 role=payload.role,
+                company_name=payload.company_name,
+                contact_name=payload.contact_name,
+                contact_phone=payload.contact_phone,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
