@@ -1,7 +1,15 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
+const disableAuth =
+  process.env.DISABLE_AUTH === 'true' ||
+  process.env.NEXT_PUBLIC_DISABLE_AUTH === 'true';
+
 export function middleware(request: NextRequest) {
+  if (disableAuth) {
+    return NextResponse.next();
+  }
+
   // Get the session cookie
   const sessionCookie = request.cookies.get('app_session');
   const pathname = request.nextUrl.pathname;
