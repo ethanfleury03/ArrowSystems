@@ -1,18 +1,12 @@
 import axios from 'axios';
-
-// Use Next.js API route as proxy (works in both dev and Docker)
-// The API route handles proxying to the backend
-const getApiBaseUrl = () => {
-  // Always use relative path to Next.js API route
-  // Next.js API route will proxy to backend
-  return '/api';
-};
+import { resolveApiBaseUrl } from '@/config/api';
 
 const apiClient = axios.create({
-  baseURL: getApiBaseUrl(),
+  baseURL: resolveApiBaseUrl(),
   headers: {
     'Content-Type': 'application/json',
   },
+  withCredentials: true,
 });
 
 export interface SourceInfo {
