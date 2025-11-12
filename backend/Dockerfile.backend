@@ -87,8 +87,14 @@ COPY --from=dependencies /usr/local/bin /usr/local/bin
 # Set working directory for app code
 WORKDIR /app
 
-# Create startup script (updated for runtime model downloads)
-RUN cat <<'EOF' > /app/start.sh
+# Create health check script
+RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && sed -i 's/\r$//' /app/healthcheck.sh && chmod +x /app/healthcheck.sh
+
+# Copy application code (this is the frequently changing part)
+COPY . .
+
+# Create backend startup script after project files are copied (avoids CRLF overwrites)
+RUN cat <<'EOF' > /app/run_backend.sh
 #!/bin/bash
 set -e
 
@@ -148,13 +154,7 @@ else
     exec python -m backend.api --host 0.0.0.0 --port 8000
 fi
 EOF
-RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
-
-# Create health check script
-RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && sed -i 's/\r$//' /app/healthcheck.sh && chmod +x /app/healthcheck.sh
-
-# Copy application code (this is the frequently changing part)
-COPY . .
+RUN sed -i 's/\r$//' /app/run_backend.sh && chmod +x /app/run_backend.sh
 
 # Ensure local SQLite database file exists for persistence
 RUN touch /app/database.sqlite
@@ -172,5 +172,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
     CMD /app/healthcheck.sh || exit 1
 
-CMD ["/bin/bash", "/app/start.sh"]
+CMD ["/bin/bash", "/app/run_backend.sh"]
 
