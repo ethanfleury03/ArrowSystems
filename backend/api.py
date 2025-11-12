@@ -1475,7 +1475,7 @@ async def toggle_document_status(filename: str, request: Dict[str, Any]):
         
         is_active = request.get("is_active", True)
         
-    from .utils.document_metadata import set_document_active
+        from .utils.document_metadata import set_document_active
         set_document_active(filename, is_active)
         
         status = "enabled" if is_active else "disabled"
@@ -1522,7 +1522,7 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
         if not updates:
             raise HTTPException(status_code=400, detail="No valid metadata fields provided")
         
-    from .utils.document_metadata import update_document_metadata
+        from .utils.document_metadata import update_document_metadata
         update_document_metadata(filename, updates)
         
         logger.info(f"Updated metadata for {filename}: {updates}")
@@ -1576,7 +1576,7 @@ async def delete_document(filename: str):
             deleted_files.append(original_path)
         
         # Delete metadata
-    from .utils.document_metadata import delete_document_metadata
+        from .utils.document_metadata import delete_document_metadata
         delete_document_metadata(filename)
         
         # Remove from vector store and docstore

@@ -54,6 +54,9 @@ class DatabaseManager:
             "email": user.email,
             "name": user.name,
             "role": user.role,
+            "company_name": user.company_name,
+            "contact_name": user.contact_name,
+            "contact_phone": user.contact_phone,
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "updated_at": user.updated_at.isoformat() if user.updated_at else None,
         }
@@ -84,6 +87,9 @@ class DatabaseManager:
         password: str,
         role: str = "technician",
         name: Optional[str] = None,
+        company_name: Optional[str] = None,
+        contact_name: Optional[str] = None,
+        contact_phone: Optional[str] = None,
     ) -> Dict[str, Any]:
         def _create():
             with SessionLocal() as session:
@@ -100,6 +106,9 @@ class DatabaseManager:
                     name=name or normalized,
                     role=(role or "technician").upper(),
                     password_hash=hashed,
+                    company_name=company_name,
+                    contact_name=contact_name,
+                    contact_phone=contact_phone,
                 )
                 session.add(user)
                 session.commit()
@@ -124,6 +133,9 @@ class DatabaseManager:
         name: Optional[str] = None,
         password: Optional[str] = None,
         role: Optional[str] = None,
+        company_name: Optional[str] = None,
+        contact_name: Optional[str] = None,
+        contact_phone: Optional[str] = None,
     ) -> Dict[str, Any]:
         def _update() -> Dict[str, Any]:
             with SessionLocal() as session:
@@ -150,6 +162,15 @@ class DatabaseManager:
 
                 if password:
                     user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+                if company_name is not None:
+                    user.company_name = company_name
+
+                if contact_name is not None:
+                    user.contact_name = contact_name
+
+                if contact_phone is not None:
+                    user.contact_phone = contact_phone
 
                 session.commit()
                 session.refresh(user)

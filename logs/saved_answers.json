@@ -30,5 +30,23 @@
       "DuraFlex System Requirements _ Xitron Support.pdf"
     ],
     "feedback_type": "positive"
+  },
+  {
+    "id": "20251112185438359117",
+    "timestamp": "2025-11-12T18:54:38.359133",
+    "user": "api_user",
+    "query": "Test",
+    "answer": "Definition: Top of Form: Electrical input signal synchronizing printing start with top of page location\n\nBased on the provided documents, \"test\" refers to various diagnostic and verification procedures performed on industrial equipment and systems. Here are the key technical definitions and applications:\n\n## Primary Test Categories\n\n**Installation Testing**: Tests are performed after equipment installation to verify proper system functionality [2][3]. These tests ensure that newly installed equipment operates according to specifications before being put into service.\n\n**Insertion Testing**: A specific diagnostic procedure where printhead insertion tests are performed at system initialization and subsequently during printing operations [6]. When this test fails, an \"INSERTION_TEST_FAILED\" error message is generated in system logs.\n\n**Manual Testing Interface**: An interactive testing environment that allows operators to perform controlled equipment operations [9]. For example, in cutting equipment, operators can access a screen-based manual testing interface to activate functions like the knife press button for blade adjustment procedures.\n\n## Test Procedures and Implementation\n\n**Fault Detection Testing**: Systems continuously monitor for problems such as out-of-ink conditions or missing hardware components [4]. When issues are detected, the system enters a FAULT state, requiring diagnostic testing to identify and resolve the underlying causes.\n\n**Status Verification Testing**: Equipment status can be tested through command-line interfaces using specific input strings [7]. For example, checking valve status returns responses like \"UltronBinaryActuatorStatus.IDLE: 1\", with expected responses dependent on driver state and physical position.\n\n**Operational Parameter Testing**: Regular testing involves monitoring critical parameters including:\n- Liquid inlet pressure (must not exceed maximum specified values)\n- Temperature ranges (within minimum and maximum thresholds)\n- Pressure drop measurements (significant increases indicate clogging)\n- Vacuum line integrity (continuous liquid leaking indicates end-of-life conditions) [10]\n\n## Testing Applications\n\nTests serve multiple purposes across different equipment types, from degassing modules that remove dissolved gas from liquids [1] to cutting systems that require precise blade positioning and depth adjustment [9]. Sample preparation testing involves cutting materials into specific configurations while preserving critical identification codes [8].\n\nIn summary, testing in industrial contexts encompasses systematic verification procedures that ensure equipment functionality, diagnose faults, monitor operational parameters, and validate system performance across installation, operation, and maintenance phases.",
+    "is_helpful": false,
+    "confidence": 0.5399727319553872,
+    "intent_type": "definition",
+    "sources": [
+      "Unknown",
+      "anyCUTII User Manual_ver1.0_ENG (1).pdf",
+      "anyCUTIII User Manual_ver1.1_ENG_Ana (2).pdf",
+      "DuraFlex Software Databook and Design Guide R3.1.1_V1.00_09Jun2020.pdf",
+      "EZCut 350R Manual (1).docx.pdf"
+    ],
+    "feedback_type": "negative"
   }
 ]
