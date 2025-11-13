@@ -15,6 +15,8 @@ interface Document {
   file_type: string;
   is_active: boolean;
   machine_model?: string | null;
+  missing_machine_model?: boolean;
+  requires_admin_review?: boolean;
   category?: string | null;
   product_family?: string | null;
 }
@@ -52,6 +54,15 @@ export default function AdminDocumentsPage() {
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastType, setToastType] = useState<"success" | "error">("success");
+  
+  // Edit form state
+  const [editMachineModel, setEditMachineModel] = useState("");
+  const [editCategory, setEditCategory] = useState("");
+  const [editProductFamily, setEditProductFamily] = useState("");
+  const [editIsActive, setEditIsActive] = useState(true);
+  
+  // Allowed machine models for dropdown
+  const [allowedMachineModels, setAllowedMachineModels] = useState<string[]>([]);
 
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
 
@@ -100,6 +111,26 @@ export default function AdminDocumentsPage() {
     return String(detail);
   };
 
+  const fetchAllowedMachineModels = useCallback(
+    async (token: string) => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/admin/machine_models`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setAllowedMachineModels(Array.isArray(data.allowed_machine_models) ? data.allowed_machine_models : []);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch allowed machine models:", err);
+        // Fallback: try to get from documents response
+      }
+    },
+    [apiBaseUrl]
+  );
+
   const fetchDocuments = useCallback(
     async (token: string) => {
       setLoadingTable(true);
@@ -115,6 +146,11 @@ export default function AdminDocumentsPage() {
         }
         const data = await response.json();
         setDocuments(Array.isArray(data.documents) ? data.documents : []);
+        
+        // Also extract allowed_machine_models from response if available
+        if (data.allowed_machine_models && Array.isArray(data.allowed_machine_models)) {
+          setAllowedMachineModels(data.allowed_machine_models);
+        }
       } catch (err) {
         console.error("Failed to fetch documents:", err);
         setError(err instanceof Error ? err.message : "Unable to load documents.");
@@ -131,12 +167,13 @@ export default function AdminDocumentsPage() {
       if (token) {
         setAuthToken(token);
         fetchDocuments(token);
+        fetchAllowedMachineModels(token);
       }
     } catch (error) {
       console.warn("Failed to retrieve auth token:", error);
       setError("Unable to access authentication token.");
     }
-  }, [fetchDocuments]);
+  }, [fetchDocuments, fetchAllowedMachineModels]);
 
   const filteredDocuments = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
@@ -177,6 +214,10 @@ export default function AdminDocumentsPage() {
     setUploadFile(null);
     setUploadProgress("");
     setDeleteConfirmation("");
+    setEditMachineModel("");
+    setEditCategory("");
+    setEditProductFamily("");
+    setEditIsActive(true);
   };
 
   const closeAllModals = () => {
@@ -194,6 +235,10 @@ export default function AdminDocumentsPage() {
 
   const handleEdit = (doc: Document) => {
     setSelectedDocument(doc);
+    setEditMachineModel(doc.machine_model || "");
+    setEditCategory(doc.category || "");
+    setEditProductFamily(doc.product_family || "");
+    setEditIsActive(doc.is_active);
     setIsEditModalOpen(true);
   };
 
@@ -281,6 +326,66 @@ export default function AdminDocumentsPage() {
   };
 
 
+  const submitEdit = async () => {
+    if (!authToken || !selectedDocument) return;
+    setActionSubmitting(true);
+    try {
+      const encodedFilename = encodeURIComponent(selectedDocument.filename);
+      
+      // Update machine_model via PATCH endpoint
+      if (editMachineModel !== selectedDocument.machine_model) {
+        const machineModelResponse = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}/machine_model`, {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ machine_model: editMachineModel || null }),
+        });
+        if (!machineModelResponse.ok) {
+          const detail = await machineModelResponse.json().catch(() => null);
+          throw new Error(extractApiError(detail) || "Failed to update machine model");
+        }
+      }
+      
+      // Update other metadata via POST endpoint
+      const updates: any = {};
+      if (editCategory !== (selectedDocument.category || "")) {
+        updates.category = editCategory || null;
+      }
+      if (editProductFamily !== (selectedDocument.product_family || "")) {
+        updates.product_family = editProductFamily || null;
+      }
+      if (editIsActive !== selectedDocument.is_active) {
+        updates.is_active = editIsActive;
+      }
+      
+      if (Object.keys(updates).length > 0) {
+        const metadataResponse = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}/metadata`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(updates),
+        });
+        if (!metadataResponse.ok) {
+          const detail = await metadataResponse.json().catch(() => null);
+          throw new Error(extractApiError(detail) || "Failed to update metadata");
+        }
+      }
+      
+      showToast("✅ Document metadata updated");
+      await fetchDocuments(authToken);
+      closeAllModals();
+    } catch (err) {
+      console.error("Edit document failed:", err);
+      showToast(err instanceof Error ? err.message : "Failed to update document", "error");
+    } finally {
+      setActionSubmitting(false);
+    }
+  };
+
   const submitDelete = async () => {
     if (!authToken || !selectedDocument) return;
     if (deleteConfirmation !== "DELETE") {
@@ -330,6 +435,11 @@ export default function AdminDocumentsPage() {
             <h2 className="text-lg font-semibold">Documents</h2>
             <p className="text-xs text-muted-foreground">
               {documents.length} total document{documents.length !== 1 ? "s" : ""}
+              {documents.filter(d => d.missing_machine_model || d.requires_admin_review).length > 0 && (
+                <span className="ml-2 text-orange-600 dark:text-orange-400">
+                  • {documents.filter(d => d.missing_machine_model || d.requires_admin_review).length} need review
+                </span>
+              )}
             </p>
           </div>
           <div className="flex w-full flex-col gap-2 md:w-auto">
@@ -359,6 +469,9 @@ export default function AdminDocumentsPage() {
                   Status
                 </th>
                 <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Machine Model
+                </th>
+                <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Size
                 </th>
                 <th
@@ -383,19 +496,19 @@ export default function AdminDocumentsPage() {
             <tbody>
               {loadingTable ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-6 text-center text-muted-foreground">
                     Loading documents...
                   </td>
                 </tr>
               ) : error ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-destructive">
+                  <td colSpan={7} className="px-4 py-6 text-center text-destructive">
                     {error}
                   </td>
                 </tr>
               ) : sortedDocuments.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-6 text-center text-muted-foreground">
                     {searchTerm ? "No documents match your search." : "No documents found. Upload a document to get started."}
                   </td>
                 </tr>
@@ -433,6 +546,20 @@ export default function AdminDocumentsPage() {
                           </>
                         )}
                       </button>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-sm">
+                      {doc.missing_machine_model || !doc.machine_model ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-red-600 dark:text-red-400 font-medium">Missing</span>
+                          {doc.requires_admin_review && (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-orange-500/30 bg-orange-500/10 px-2 py-0.5 text-xs font-medium text-orange-700 dark:text-orange-400">
+                              Needs review
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">{doc.machine_model}</span>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
                       {formatFileSize(doc.size_bytes)}
@@ -528,9 +655,9 @@ export default function AdminDocumentsPage() {
       {/* Edit Metadata Modal */}
       {isEditModalOpen && selectedDocument && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-full max-w-md rounded-lg border border-border bg-background p-6 shadow-lg">
+          <div className="w-full max-w-md rounded-lg border border-border bg-background p-6 shadow-lg max-h-[90vh] overflow-y-auto">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-semibold">Document Information</h2>
+              <h2 className="text-xl font-semibold">Edit Document Metadata</h2>
               <button
                 onClick={closeAllModals}
                 className="text-muted-foreground hover:text-foreground"
@@ -549,9 +676,75 @@ export default function AdminDocumentsPage() {
                   className="w-full rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
                 />
               </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">
+                  Machine Model <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={editMachineModel}
+                  onChange={(e) => setEditMachineModel(e.target.value)}
+                  className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                  disabled={actionSubmitting}
+                >
+                  <option value="">None</option>
+                  {allowedMachineModels.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  If the automatic system guessed the wrong machine model, you can correct it here.
+                </p>
+                {selectedDocument.requires_admin_review && (
+                  <p className="mt-1 text-xs text-orange-600 dark:text-orange-400">
+                    ⚠️ This document requires admin review (machine model was not automatically detected).
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">Category</label>
+                <input
+                  type="text"
+                  value={editCategory}
+                  onChange={(e) => setEditCategory(e.target.value)}
+                  placeholder="Optional category"
+                  className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                  disabled={actionSubmitting}
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">Product Family</label>
+                <input
+                  type="text"
+                  value={editProductFamily}
+                  onChange={(e) => setEditProductFamily(e.target.value)}
+                  placeholder="Optional product family"
+                  className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                  disabled={actionSubmitting}
+                />
+              </div>
+              <div>
+                <label className="mb-2 flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editIsActive}
+                    onChange={(e) => setEditIsActive(e.target.checked)}
+                    className="rounded border-border"
+                    disabled={actionSubmitting}
+                  />
+                  <span className="text-sm font-medium">Document is active</span>
+                </label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Inactive documents will be excluded from search results.
+                </p>
+              </div>
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={closeAllModals} disabled={actionSubmitting}>
-                  Close
+                  Cancel
+                </Button>
+                <Button onClick={submitEdit} disabled={actionSubmitting}>
+                  {actionSubmitting ? "Saving..." : "Save Changes"}
                 </Button>
               </div>
             </div>

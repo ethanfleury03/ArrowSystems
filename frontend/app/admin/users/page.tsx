@@ -14,6 +14,8 @@ interface AdminUser {
   company_name?: string | null;
   contact_name?: string | null;
   contact_phone?: string | null;
+  machine_models?: string[] | null;
+  allowed_machine_models?: string[];  // Included in response for dropdown
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -32,6 +34,7 @@ interface FormState {
   companyName: string;
   contactName: string;
   companyPhone: string;
+  machineModels: string[];  // Array of selected machine models
 }
 
 const EMPTY_FORM: FormState = {
@@ -42,6 +45,7 @@ const EMPTY_FORM: FormState = {
   companyName: "",
   contactName: "",
   companyPhone: "",
+  machineModels: [],
 };
 
 const BASE_COLUMNS: { label: string; field?: SortField }[] = [
@@ -108,6 +112,9 @@ export default function AdminUsersPage() {
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastType, setToastType] = useState<"success" | "error">("success");
+  
+  // Allowed machine models for dropdown
+  const [allowedMachineModels, setAllowedMachineModels] = useState<string[]>([]);
 
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
 
@@ -156,6 +163,25 @@ export default function AdminUsersPage() {
     return String(detail);
   };
 
+  const fetchAllowedMachineModels = useCallback(
+    async (token: string) => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/admin/machine_models`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setAllowedMachineModels(Array.isArray(data.allowed_machine_models) ? data.allowed_machine_models : []);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch allowed machine models:", err);
+      }
+    },
+    [apiBaseUrl]
+  );
+
   const fetchUsers = useCallback(
     async (token: string) => {
       setLoadingTable(true);
@@ -171,6 +197,11 @@ export default function AdminUsersPage() {
         }
         const data = await response.json();
         setUsers(Array.isArray(data) ? data : []);
+        
+        // Extract allowed_machine_models from first user if available
+        if (Array.isArray(data) && data.length > 0 && data[0].allowed_machine_models) {
+          setAllowedMachineModels(data[0].allowed_machine_models);
+        }
       } catch (err) {
         console.error("Failed to fetch users:", err);
         setError(err instanceof Error ? err.message : "Unable to load users.");
@@ -187,12 +218,13 @@ export default function AdminUsersPage() {
       if (token) {
         setAuthToken(token);
         fetchUsers(token);
+        fetchAllowedMachineModels(token);
       }
     } catch (error) {
       console.warn("Failed to retrieve auth token:", error);
       setError("Unable to access authentication token.");
     }
-  }, [fetchUsers]);
+  }, [fetchUsers, fetchAllowedMachineModels]);
 
   const filteredUsers = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
@@ -339,6 +371,7 @@ export default function AdminUsersPage() {
       companyName: user.company_name ?? "",
       contactName: user.contact_name ?? user.name ?? "",
       companyPhone: user.contact_phone ?? "",
+      machineModels: Array.isArray(user.machine_models) ? user.machine_models : [],
     });
     setIsEditModalOpen(true);
   };
@@ -357,6 +390,7 @@ export default function AdminUsersPage() {
         email: formState.email,
         role: formState.role,
         password: formState.password,
+        machine_models: formState.machineModels.length > 0 ? formState.machineModels : null,
       };
       if (isCustomerRole) {
         payload.name = formState.contactName || undefined;
@@ -399,6 +433,7 @@ export default function AdminUsersPage() {
       const payload: Record<string, unknown> = {
         email: formState.email,
         role: formState.role,
+        machine_models: formState.machineModels.length > 0 ? formState.machineModels : null,
       };
       if (formState.password) {
         payload.password = formState.password;
@@ -709,6 +744,37 @@ export default function AdminUsersPage() {
                 placeholder="••••••••"
                 required={isAddModalOpen}
               />
+            </div>
+            
+            <div className="grid gap-2">
+              <label className="text-sm font-medium text-muted-foreground">Machine Models</label>
+              <div className="space-y-2">
+                <select
+                  multiple
+                  value={formState.machineModels}
+                  onChange={(e) => {
+                    const selected = Array.from(e.target.selectedOptions, option => option.value);
+                    setFormState((prev) => ({ ...prev, machineModels: selected }));
+                  }}
+                  size={Math.min(allowedMachineModels.length + 1, 6)}
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                  disabled={actionSubmitting}
+                >
+                  {allowedMachineModels.length === 0 ? (
+                    <option disabled>No machine models available</option>
+                  ) : (
+                    allowedMachineModels.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Select one or more machine models this user has access to. Hold Ctrl/Cmd to select multiple.
+                  {formState.machineModels.length > 0 && ` (${formState.machineModels.length} selected)`}
+                </p>
+              </div>
             </div>
           </div>
 

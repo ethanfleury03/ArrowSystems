@@ -81,7 +81,8 @@ class RAGPipeline:
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
         dynamic_windowing: bool = True,
-        chat_history: Optional[List[Dict[str, str]]] = None
+        chat_history: Optional[List[Dict[str, str]]] = None,
+        user_machine_models: Optional[List[str]] = None  # NEW: Machine models for document-level filtering
     ) -> StructuredResponse:
         """
         Execute RAG query with full orchestration.
@@ -92,6 +93,7 @@ class RAGPipeline:
             alpha: Hybrid search weight (0.5 = equal dense/BM25, 1.0 = dense only)
             metadata_filters: Optional metadata filters
             dynamic_windowing: Enable dynamic context windowing
+            user_machine_models: Optional list of machine models for document-level filtering
         
         Returns:
             StructuredResponse with answer, reasoning, and sources
@@ -105,7 +107,8 @@ class RAGPipeline:
             alpha=alpha,
             metadata_filters=metadata_filters,
             dynamic_windowing=dynamic_windowing,
-            chat_history=chat_history
+            chat_history=chat_history,
+            user_machine_models=user_machine_models
         )
     
     def format_response(self, response: StructuredResponse) -> str:
