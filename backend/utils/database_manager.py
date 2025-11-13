@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +50,16 @@ class DatabaseManager:
     def _serialize_user(user: User) -> Dict[str, Any]:
         if not user:
             return {}
+        # Handle machine_models - could be JSON string (SQLite) or list (PostgreSQL)
+        machine_models = user.machine_models
+        if isinstance(machine_models, str):
+            try:
+                machine_models = json.loads(machine_models) if machine_models else []
+            except (json.JSONDecodeError, TypeError):
+                machine_models = []
+        elif machine_models is None:
+            machine_models = []
+        
         return {
             "id": str(user.id),
             "email": user.email,
@@ -57,6 +68,7 @@ class DatabaseManager:
             "company_name": user.company_name,
             "contact_name": user.contact_name,
             "contact_phone": user.contact_phone,
+            "machine_models": machine_models if isinstance(machine_models, list) else [],
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "updated_at": user.updated_at.isoformat() if user.updated_at else None,
         }
@@ -90,6 +102,7 @@ class DatabaseManager:
         company_name: Optional[str] = None,
         contact_name: Optional[str] = None,
         contact_phone: Optional[str] = None,
+        machine_models: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         def _create():
             with SessionLocal() as session:
@@ -101,6 +114,8 @@ class DatabaseManager:
                     return self._serialize_user(existing)
 
                 hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                # Ensure machine_models is a list
+                machine_models_list = machine_models if machine_models is not None else []
                 user = User(
                     email=normalized,
                     name=name or normalized,
@@ -109,6 +124,7 @@ class DatabaseManager:
                     company_name=company_name,
                     contact_name=contact_name,
                     contact_phone=contact_phone,
+                    machine_models=machine_models_list,
                 )
                 session.add(user)
                 session.commit()
@@ -136,6 +152,7 @@ class DatabaseManager:
         company_name: Optional[str] = None,
         contact_name: Optional[str] = None,
         contact_phone: Optional[str] = None,
+        machine_models: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         def _update() -> Dict[str, Any]:
             with SessionLocal() as session:
@@ -172,11 +189,45 @@ class DatabaseManager:
                 if contact_phone is not None:
                     user.contact_phone = contact_phone
 
+                if machine_models is not None:
+                    # Ensure it's a list
+                    user.machine_models = machine_models if isinstance(machine_models, list) else []
+
                 session.commit()
                 session.refresh(user)
                 return self._serialize_user(user)
 
         return await run_sync(_update)
+    
+    async def get_user_machine_models(self, user_id: int) -> List[str]:
+        """
+        Get machine models for a specific user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            List of machine model strings (e.g., ["330R", "DuraFlex"])
+        """
+        def _get() -> List[str]:
+            with SessionLocal() as session:
+                user = session.get(User, user_id)
+                if not user:
+                    return []
+                
+                machine_models = user.machine_models
+                # Handle JSON string (SQLite) or list (PostgreSQL)
+                if isinstance(machine_models, str):
+                    try:
+                        machine_models = json.loads(machine_models) if machine_models else []
+                    except (json.JSONDecodeError, TypeError):
+                        machine_models = []
+                elif machine_models is None:
+                    machine_models = []
+                
+                return machine_models if isinstance(machine_models, list) else []
+        
+        return await run_sync(_get)
 
     async def delete_user(self, user_id: int) -> bool:
         def _delete() -> bool:

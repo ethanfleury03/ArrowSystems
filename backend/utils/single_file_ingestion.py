@@ -245,9 +245,13 @@ def ingest_single_file(
         # Get doc_id (use filename as doc_id)
         doc_id = file_path.name
         
-        # Update metadata with ingestion date
-        from utils.document_metadata import update_ingestion_date
-        update_ingestion_date(file_path.name)
+        # Update metadata with ingestion date and ensure machine_model is set
+        from utils.document_metadata import ensure_metadata_entry
+        meta_entry = ensure_metadata_entry(file_path.name)
+        
+        # Log if review is needed
+        if meta_entry.get("requires_admin_review"):
+            logger.warning(f"Document {file_path.name} requires admin review (missing machine_model)")
         
         return {
             "success": True,

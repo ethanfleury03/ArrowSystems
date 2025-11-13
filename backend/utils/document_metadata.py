@@ -3,18 +3,30 @@ Document Metadata Management
 
 Stores and manages document metadata including:
 - is_active flag (enable/disable)
-- machine_model
+- machine_model (MUST be from ALLOWED_MACHINE_MODELS - inferred from filename if not provided)
 - category
 - product_family
 - last_ingestion_date
+- requires_admin_review (flag for documents needing manual review)
 """
 
 import os
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
+
+try:
+    from ..config.machine_models import is_valid_machine_model, get_allowed_machine_models
+except ImportError:
+    # Fallback if config not available (shouldn't happen in production)
+    def is_valid_machine_model(model: str | None) -> bool:
+        return model is not None
+    
+    def get_allowed_machine_models() -> list[str]:
+        return []
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +66,18 @@ def get_document_metadata(filename: str) -> Dict[str, Any]:
         "machine_model": None,
         "category": None,
         "product_family": None,
-        "last_ingestion_date": None
+        "last_ingestion_date": None,
+        "requires_admin_review": False
     })
 
 
 def update_document_metadata(filename: str, updates: Dict[str, Any]):
-    """Update metadata for a specific document."""
+    """
+    Update metadata for a specific document.
+    
+    Validates that machine_model (if provided) is in ALLOWED_MACHINE_MODELS.
+    If invalid, sets machine_model to None and requires_admin_review to True.
+    """
     metadata = load_metadata()
     
     if filename not in metadata:
@@ -68,13 +86,36 @@ def update_document_metadata(filename: str, updates: Dict[str, Any]):
             "machine_model": None,
             "category": None,
             "product_family": None,
-            "last_ingestion_date": None
+            "last_ingestion_date": None,
+            "requires_admin_review": False
         }
+    
+    # Validate and update machine_model if provided
+    if "machine_model" in updates:
+        machine_model = updates["machine_model"]
+        
+        # Normalize: empty string becomes None
+        if machine_model == "":
+            machine_model = None
+        
+        # Validate: must be None or in allowed list
+        if machine_model is not None and not is_valid_machine_model(machine_model):
+            logger.warning(f"Invalid machine_model '{machine_model}' for {filename} - not in allowed list. Setting to None and marking for review.")
+            machine_model = None
+            updates["requires_admin_review"] = True
+        
+        # If valid machine_model is set, clear requires_admin_review
+        if machine_model is not None and is_valid_machine_model(machine_model):
+            metadata[filename]["requires_admin_review"] = False
+        elif machine_model is None:
+            # If setting to None, mark for review
+            updates["requires_admin_review"] = True
+        
+        updates["machine_model"] = machine_model
     
     # Update fields
     for key, value in updates.items():
-        if key in metadata[filename]:
-            metadata[filename][key] = value
+        metadata[filename][key] = value
     
     save_metadata(metadata)
 
@@ -103,4 +144,139 @@ def is_document_active(filename: str) -> bool:
     """Check if document is active."""
     doc_meta = get_document_metadata(filename)
     return doc_meta.get("is_active", True)  # Default to active if not set
+
+
+def infer_machine_model_from_filename(filename: str) -> Optional[str]:
+    """
+    Infer machine model from filename using pattern matching.
+    ONLY returns values that are in ALLOWED_MACHINE_MODELS.
+    
+    Examples:
+        "330R_Manual.pdf" -> "330R" (if in allowed list)
+        "DuraFlex_ServiceGuide.pdf" -> "DuraFlex" (if in allowed list)
+    
+    Returns:
+        Inferred machine model string from ALLOWED_MACHINE_MODELS, or None if inference fails or not in allowed list
+    """
+    # Get allowed models list
+    allowed_models = get_allowed_machine_models()
+    if not allowed_models:
+        # If no allowed models configured, can't infer anything
+        return None
+    
+    # Remove file extension
+    name_without_ext = Path(filename).stem
+    name_lower = name_without_ext.lower()
+    
+    # Check if any allowed model appears in the filename (case-insensitive)
+    for model in allowed_models:
+        model_lower = model.lower()
+        # Check if model appears as a word boundary match (at start, before underscore, or standalone)
+        # Pattern: model at start, or model before underscore/dash/space
+        patterns = [
+            r'^' + re.escape(model_lower) + r'(?:[_-]|$)',  # At start
+            r'(?:[_-])' + re.escape(model_lower) + r'(?:[_-]|$)',  # After separator
+            r'\b' + re.escape(model_lower) + r'\b',  # Word boundary
+        ]
+        for pattern in patterns:
+            if re.search(pattern, name_lower):
+                return model  # Return the original case from allowed list
+    
+    # Also check if the first token before underscore matches an allowed model
+    match = re.match(r'^([A-Za-z0-9]+?)(?:_|$)', name_without_ext)
+    if match:
+        candidate = match.group(1)
+        # Check if candidate (case-insensitive) matches any allowed model
+        for model in allowed_models:
+            if candidate.lower() == model.lower():
+                return model  # Return original case from allowed list
+    
+    return None
+
+
+def require_machine_model(filename: str) -> bool:
+    """
+    Returns True if metadata exists and machine_model is not None.
+    
+    Args:
+        filename: Document filename
+        
+    Returns:
+        True if machine_model is set (not None), False otherwise
+    """
+    doc_meta = get_document_metadata(filename)
+    return doc_meta.get("machine_model") is not None
+
+
+def ensure_metadata_entry(filename: str, machine_model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Ensure a metadata entry exists for a document with all required fields.
+    If machine_model is not provided, attempts automatic inference.
+    
+    Validates that machine_model is in ALLOWED_MACHINE_MODELS.
+    
+    Args:
+        filename: Document filename
+        machine_model: Optional machine model (must be in ALLOWED_MACHINE_MODELS if provided)
+        
+    Returns:
+        Dictionary with metadata entry (including requires_admin_review flag)
+    """
+    metadata = load_metadata()
+    
+    # Validate provided machine_model
+    if machine_model is not None and not is_valid_machine_model(machine_model):
+        logger.warning(f"Invalid machine_model '{machine_model}' for {filename} - not in allowed list. Attempting inference.")
+        machine_model = None
+    
+    if filename not in metadata:
+        # Attempt to infer machine_model if not provided
+        inferred_model = machine_model
+        requires_review = False
+        
+        if not inferred_model:
+            inferred_model = infer_machine_model_from_filename(filename)
+            if not inferred_model or not is_valid_machine_model(inferred_model):
+                requires_review = True
+                inferred_model = None
+                logger.warning(f"Could not infer valid machine_model for {filename}, marking for admin review")
+        
+        metadata[filename] = {
+            "is_active": True,
+            "machine_model": inferred_model,
+            "category": None,
+            "product_family": None,
+            "last_ingestion_date": datetime.now().isoformat(),
+            "requires_admin_review": requires_review
+        }
+        save_metadata(metadata)
+    else:
+        # Update ingestion date if entry exists
+        metadata[filename]["last_ingestion_date"] = datetime.now().isoformat()
+        
+        # If machine_model was provided and differs, update it (with validation)
+        if machine_model is not None:
+            if is_valid_machine_model(machine_model):
+                metadata[filename]["machine_model"] = machine_model
+                metadata[filename]["requires_admin_review"] = False
+            else:
+                logger.warning(f"Invalid machine_model '{machine_model}' for {filename} - keeping existing value")
+        
+        # Ensure requires_admin_review field exists and current machine_model is valid
+        if "requires_admin_review" not in metadata[filename]:
+            current_model = metadata[filename].get("machine_model")
+            metadata[filename]["requires_admin_review"] = (
+                current_model is None or not is_valid_machine_model(current_model)
+            )
+        else:
+            # Validate existing machine_model - if invalid, mark for review
+            current_model = metadata[filename].get("machine_model")
+            if current_model is not None and not is_valid_machine_model(current_model):
+                logger.warning(f"Existing invalid machine_model '{current_model}' for {filename} - marking for review")
+                metadata[filename]["machine_model"] = None
+                metadata[filename]["requires_admin_review"] = True
+        
+        save_metadata(metadata)
+    
+    return metadata[filename]
 

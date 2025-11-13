@@ -1004,13 +1004,89 @@ class HybridRetriever:
             logger.warning(f"Filename search failed: {e}")
             return []
     
+    def _get_allowed_filenames(self, user_machine_models: Optional[List[str]] = None) -> Optional[set]:
+        """
+        Build set of allowed filenames based on user machine models.
+        
+        Args:
+            user_machine_models: List of machine model strings (e.g., ["330R", "DuraFlex"])
+            
+        Returns:
+            Set of allowed filenames, or None if no filtering should be applied
+        """
+        if not user_machine_models or len(user_machine_models) == 0:
+            # No machine models = no filtering (fallback to full corpus)
+            return None
+        
+        try:
+            from .utils.document_metadata import get_document_metadata, load_metadata
+            
+            # Load all document metadata
+            all_metadata = load_metadata()
+            allowed_filenames = set()
+            
+            # Build allowed_filenames = all filenames where machine_model in user_machine_models
+            for filename, metadata in all_metadata.items():
+                machine_model = metadata.get("machine_model")
+                is_active = metadata.get("is_active", True)
+                
+                # Exclude inactive documents
+                if not is_active:
+                    continue
+                
+                # Exclude documents with machine_model = None
+                if machine_model is None:
+                    continue
+                
+                # Include if machine_model matches user's machine models
+                if machine_model in user_machine_models:
+                    allowed_filenames.add(filename)
+            
+            logger.info(f"🔍 Machine filtering applied — {len(allowed_filenames)} documents allowed, "
+                       f"{len(all_metadata) - len(allowed_filenames)} excluded")
+            
+            return allowed_filenames if allowed_filenames else None
+            
+        except Exception as e:
+            logger.warning(f"Failed to build allowed filenames for machine filtering: {e}")
+            return None
+    
+    def _filter_by_allowed_filenames(self, nodes: List[NodeWithScore], allowed_filenames: Optional[set]) -> List[NodeWithScore]:
+        """
+        Filter nodes to only include those from allowed filenames.
+        
+        Args:
+            nodes: List of nodes to filter
+            allowed_filenames: Set of allowed filenames (None = no filtering)
+            
+        Returns:
+            Filtered list of nodes
+        """
+        if allowed_filenames is None:
+            return nodes
+        
+        filtered = []
+        for node in nodes:
+            filename = ""
+            if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
+                if hasattr(node.node, 'metadata') and node.node.metadata:
+                    filename = node.node.metadata.get('file_name', '')
+            elif hasattr(node, 'metadata') and node.metadata:
+                filename = node.metadata.get('file_name', '')
+            
+            if filename and filename in allowed_filenames:
+                filtered.append(node)
+        
+        return filtered
+    
     def hybrid_search(
         self,
         query: str,
         top_k: int = 10,
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
-        machine_filename_patterns: Optional[List[str]] = None  # Unused but kept for API compatibility
+        machine_filename_patterns: Optional[List[str]] = None,  # Unused but kept for API compatibility
+        user_machine_models: Optional[List[str]] = None  # NEW: Machine models for document-level filtering
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search combining BM25 and dense embeddings (in parallel).
@@ -1021,10 +1097,14 @@ class HybridRetriever:
             top_k: Number of results to return
             alpha: Weight for dense search (1-alpha for BM25). 0.5 = equal weight
             metadata_filters: Optional metadata filters
+            user_machine_models: Optional list of machine models for document-level filtering
         
         Returns:
             Ranked list of nodes
         """
+        # Build allowed filenames based on user machine models (document-level pre-filtering)
+        allowed_filenames = self._get_allowed_filenames(user_machine_models)
+        
         # 🚀 FIRST: Try direct filename search for queries that look like they're asking for a specific document
         query_lower = query.lower()
         query_terms = [t for t in query_lower.split() if len(t) > 2]
@@ -1033,9 +1113,12 @@ class HybridRetriever:
         if len(query_terms) >= 2:
             filename_results = self._search_by_filename(query, top_k=top_k)
             if filename_results:
-                logger.info(f"✅ Found {len(filename_results)} documents via direct filename search - prioritizing these")
-                # Return filename matches immediately - they're highly relevant
-                return filename_results
+                # Apply machine filtering to filename results
+                filename_results = self._filter_by_allowed_filenames(filename_results, allowed_filenames)
+                if filename_results:
+                    logger.info(f"✅ Found {len(filename_results)} documents via direct filename search - prioritizing these")
+                    # Return filename matches immediately - they're highly relevant
+                    return filename_results
         
         # ⚡ PARALLEL EXECUTION: Run BM25 and dense search simultaneously
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1046,9 +1129,22 @@ class HybridRetriever:
             dense_results = dense_future.result()
             bm25_results = bm25_future.result()
             
+            # Apply machine filtering to dense and BM25 results
+            dense_results = self._filter_by_allowed_filenames(dense_results, allowed_filenames)
+            # Convert BM25 results (list of tuples) to list of nodes for filtering
+            if bm25_results:
+                bm25_nodes = [node for node, _ in bm25_results]
+                filtered_bm25_nodes = self._filter_by_allowed_filenames(bm25_nodes, allowed_filenames)
+                # Rebuild bm25_results with filtered nodes and their scores
+                filtered_bm25_results = []
+                for node, score in bm25_results:
+                    if node in filtered_bm25_nodes:
+                        filtered_bm25_results.append((node, score))
+                bm25_results = filtered_bm25_results
+            
             # Log diagnostic info
-            logger.debug(f"🔍 Dense search returned {len(dense_results)} results")
-            logger.debug(f"🔍 BM25 search returned {len(bm25_results)} results")
+            logger.debug(f"🔍 Dense search returned {len(dense_results)} results (after machine filtering)")
+            logger.debug(f"🔍 BM25 search returned {len(bm25_results)} results (after machine filtering)")
             if not dense_results and not bm25_results:
                 logger.warning(f"⚠️ Both dense and BM25 searches returned 0 results for query: {query[:100]}")
                 logger.debug(f"Index type: {type(self.index)}, BM25 initialized: {self.bm25 is not None}, corpus_nodes: {len(self.corpus_nodes)}")
@@ -1290,7 +1386,8 @@ class HybridRetriever:
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
         enable_llm_evaluation: bool = True,
-        machine_filename_patterns: Optional[List[str]] = None
+        machine_filename_patterns: Optional[List[str]] = None,
+        user_machine_models: Optional[List[str]] = None  # NEW: Machine models for document-level filtering
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search with optional LLM-based document evaluation.
@@ -1301,6 +1398,7 @@ class HybridRetriever:
             alpha: Weight for dense search (1-alpha for BM25)
             metadata_filters: Optional metadata filters
             enable_llm_evaluation: Whether to use LLM evaluation
+            user_machine_models: Optional list of machine models for document-level filtering
         
         Returns:
             Ranked list of nodes with LLM evaluation applied
@@ -1311,7 +1409,8 @@ class HybridRetriever:
             top_k=top_k * 2,  # Get more results for LLM evaluation
             alpha=alpha,
             metadata_filters=metadata_filters,
-            machine_filename_patterns=machine_filename_patterns
+            machine_filename_patterns=machine_filename_patterns,
+            user_machine_models=user_machine_models
         )
         
         # Apply LLM evaluation if enabled and evaluator is available
@@ -3130,7 +3229,8 @@ class RAGOrchestrator:
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
         dynamic_windowing: bool = True,
-        chat_history: Optional[List[Dict[str, str]]] = None
+        chat_history: Optional[List[Dict[str, str]]] = None,
+        user_machine_models: Optional[List[str]] = None  # NEW: Machine models for document-level filtering
     ) -> StructuredResponse:
         """
         Main orchestration method - handles complete RAG pipeline.
@@ -3309,7 +3409,8 @@ class RAGOrchestrator:
                         alpha=alpha,
                         metadata_filters=metadata_filters,
                         enable_llm_evaluation=self.enable_llm_evaluation,
-                        machine_filename_patterns=machine_filename_patterns
+                        machine_filename_patterns=machine_filename_patterns,
+                        user_machine_models=user_machine_models
                     )
                     
                     # Combine scores (nodes may appear multiple times)
@@ -3342,7 +3443,8 @@ class RAGOrchestrator:
                 alpha=alpha,
                 metadata_filters=metadata_filters,
                 enable_llm_evaluation=self.enable_llm_evaluation,
-                machine_filename_patterns=machine_filename_patterns
+                machine_filename_patterns=machine_filename_patterns,
+                user_machine_models=user_machine_models
             )
         
         # 🚀 NEW: Step 4 - Iterative Retrieval (if needed)
@@ -3357,6 +3459,7 @@ class RAGOrchestrator:
                     top_k=top_k // 2,  # Get fewer results for refinement
                     alpha=alpha,
                     metadata_filters=metadata_filters,
+                    user_machine_models=user_machine_models,
                     enable_llm_evaluation=self.enable_llm_evaluation,
                     machine_filename_patterns=machine_filename_patterns
                 )
@@ -3449,7 +3552,8 @@ class RAGOrchestrator:
                     query=original_query,  # Use the original query before preprocessing
                     top_k=top_k * 2,  # Get more results
                     alpha=alpha,
-                    machine_filename_patterns=machine_filename_patterns
+                    machine_filename_patterns=machine_filename_patterns,
+                    user_machine_models=user_machine_models
                 )
                 if fallback_nodes:
                     logger.info(f"✅ Fallback 1 succeeded: found {len(fallback_nodes)} results")
@@ -3475,7 +3579,8 @@ class RAGOrchestrator:
                             query=simplified_query,
                             top_k=top_k * 2,
                             alpha=alpha,
-                            machine_filename_patterns=machine_filename_patterns
+                            machine_filename_patterns=machine_filename_patterns,
+                            user_machine_models=user_machine_models
                         )
                         if fallback_nodes:
                             logger.info(f"✅ Fallback 2 succeeded: found {len(fallback_nodes)} results")
@@ -3496,7 +3601,8 @@ class RAGOrchestrator:
                             query=keyword_query,
                             top_k=top_k * 2,
                             alpha=alpha,
-                            machine_filename_patterns=machine_filename_patterns
+                            machine_filename_patterns=machine_filename_patterns,
+                            user_machine_models=user_machine_models
                         )
                         if fallback_nodes:
                             logger.info(f"✅ Fallback 3 succeeded: found {len(fallback_nodes)} results")
@@ -3517,7 +3623,8 @@ class RAGOrchestrator:
                             query=generic_query,
                             top_k=top_k * 2,
                             alpha=alpha,
-                            machine_filename_patterns=machine_filename_patterns
+                            machine_filename_patterns=machine_filename_patterns,
+                            user_machine_models=user_machine_models
                         )
                         if fallback_nodes:
                             logger.info(f"✅ Fallback 4 succeeded: found {len(fallback_nodes)} results")

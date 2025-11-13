@@ -56,6 +56,7 @@ class User(Base):
     company_name = Column(String(255))
     contact_name = Column(String(255))
     contact_phone = Column(String(50))
+    machine_models = Column(JSON, default=list)  # List of machine model strings (e.g., ["330R", "DuraFlex"])
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -142,18 +143,34 @@ def ensure_analytics_columns() -> None:
             connection.execute(text("ALTER TABLE query_history ADD COLUMN sources_json TEXT"))
 
 
-def init_db() -> None:
-    os.makedirs(os.path.dirname(DEFAULT_DB_PATH) or ".", exist_ok=True)
-    Base.metadata.create_all(bind=engine)
+def ensure_user_columns() -> None:
+    """Ensure user columns exist (SQLite-safe migration)."""
     with engine.begin() as connection:
         inspector = inspect(connection)
-        existing_columns = {column["name"] for column in inspector.get_columns("users")}
+        try:
+            existing_columns = {column["name"] for column in inspector.get_columns("users")}
+        except Exception:
+            # Table doesn't exist yet, will be created by create_all
+            return
+        
+        # Add user columns if they don't exist
         if "company_name" not in existing_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN company_name VARCHAR(255)"))
         if "contact_name" not in existing_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN contact_name VARCHAR(255)"))
         if "contact_phone" not in existing_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN contact_phone VARCHAR(50)"))
+        if "machine_models" not in existing_columns:
+            # SQLite doesn't have native JSON type, so we use TEXT and store JSON string
+            connection.execute(text("ALTER TABLE users ADD COLUMN machine_models TEXT DEFAULT '[]'"))
+
+
+def init_db() -> None:
+    os.makedirs(os.path.dirname(DEFAULT_DB_PATH) or ".", exist_ok=True)
+    Base.metadata.create_all(bind=engine)
+    
+    # Ensure user columns exist
+    ensure_user_columns()
     
     # Ensure analytics columns exist
     ensure_analytics_columns()

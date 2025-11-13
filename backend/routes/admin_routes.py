@@ -25,6 +25,7 @@ class AdminUserResponse(BaseModel):
     company_name: Optional[str] = None
     contact_name: Optional[str] = None
     contact_phone: Optional[str] = None
+    machine_models: Optional[List[str]] = None  # List of machine model strings
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -37,6 +38,7 @@ class AdminUserCreateRequest(BaseModel):
     company_name: Optional[str] = None
     contact_name: Optional[str] = None
     contact_phone: Optional[str] = None
+    machine_models: Optional[List[str]] = None  # List of machine model strings
 
 
 class AdminUserUpdateRequest(BaseModel):
@@ -47,6 +49,7 @@ class AdminUserUpdateRequest(BaseModel):
     company_name: Optional[str] = None
     contact_name: Optional[str] = None
     contact_phone: Optional[str] = None
+    machine_models: Optional[List[str]] = None  # List of machine model strings
 
 
 def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager]]) -> APIRouter:
@@ -92,7 +95,22 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         manager: DatabaseManager = Depends(get_db_manager),
     ):
         users = await manager.list_users()
-        return users
+        
+        # Include allowed_machine_models in each user response for frontend
+        try:
+            from ..config.machine_models import get_allowed_machine_models
+            allowed_models = get_allowed_machine_models()
+        except ImportError:
+            allowed_models = []
+        
+        # Add allowed_machine_models to each user response
+        users_with_allowed = []
+        for user in users:
+            user_dict = dict(user) if isinstance(user, dict) else user
+            user_dict["allowed_machine_models"] = allowed_models
+            users_with_allowed.append(user_dict)
+        
+        return users_with_allowed
 
     @router.post("/create_user", response_model=AdminUserResponse, status_code=status.HTTP_201_CREATED)
     async def create_user(
@@ -100,6 +118,20 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         _: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
     ):
+        # Validate machine_models against allowed list
+        if payload.machine_models:
+            try:
+                from ..config.machine_models import is_valid_machine_model, get_allowed_machine_models
+                invalid_models = [m for m in payload.machine_models if not is_valid_machine_model(m)]
+                if invalid_models:
+                    allowed_models = get_allowed_machine_models()
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid machine_models: {', '.join(invalid_models)}. Must be a subset of: {', '.join(allowed_models) if allowed_models else 'None'}"
+                    )
+            except ImportError:
+                pass  # Config not available, skip validation
+        
         existing = await manager.get_user_by_email(payload.email)
         if existing:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -112,6 +144,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             company_name=payload.company_name,
             contact_name=payload.contact_name,
             contact_phone=payload.contact_phone,
+            machine_models=payload.machine_models,
         )
         return created
 
@@ -122,6 +155,20 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         _: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
     ):
+        # Validate machine_models against allowed list
+        if payload.machine_models is not None:
+            try:
+                from ..config.machine_models import is_valid_machine_model, get_allowed_machine_models
+                invalid_models = [m for m in payload.machine_models if not is_valid_machine_model(m)]
+                if invalid_models:
+                    allowed_models = get_allowed_machine_models()
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid machine_models: {', '.join(invalid_models)}. Must be a subset of: {', '.join(allowed_models) if allowed_models else 'None'}"
+                    )
+            except ImportError:
+                pass  # Config not available, skip validation
+        
         try:
             updated = await manager.update_user(
                 user_id,
@@ -132,6 +179,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 company_name=payload.company_name,
                 contact_name=payload.contact_name,
                 contact_phone=payload.contact_phone,
+                machine_models=payload.machine_models,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

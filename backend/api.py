@@ -671,6 +671,7 @@ class UserResponse(BaseModel):
     email: str
     name: Optional[str] = None
     role: str
+    machine_models: Optional[List[str]] = None  # List of machine model strings
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -801,7 +802,23 @@ async def query_knowledge_base(request: QueryRequest):
         # Log incoming query
         logger.info(f"📥 Received query: {request.query[:200]}{'...' if len(request.query) > 200 else ''}")
         
-        # Execute RAG query with chat history
+        # Get user machine models for document-level filtering
+        user_machine_models = None
+        user_id = "api_user"  # Default fallback
+        if db_manager:
+            try:
+                # TODO: Get user_id from authenticated session/token when auth is fully wired
+                # For now, try to get from request if available, otherwise use "api_user"
+                # If user_id is available as integer, get machine models
+                # user_machine_models = await db_manager.get_user_machine_models(user_id) if user_id and user_id.isdigit() else None
+                
+                # If no machine models, fallback to full corpus (no filtering)
+                if not user_machine_models:
+                    logger.debug("No user machine models - using full corpus (no filtering)")
+            except Exception as e:
+                logger.debug(f"Could not get user machine models: {e} - using full corpus")
+        
+        # Execute RAG query with chat history and machine filtering
         # Note: Retrieval uses only current query, but LLM gets chat history
         # Wrap blocking RAG operation in thread pool for concurrency
         response = await run_blocking_rag_operation(
@@ -811,7 +828,8 @@ async def query_knowledge_base(request: QueryRequest):
             alpha=request.alpha,
             metadata_filters=request.metadata_filters,
             dynamic_windowing=request.dynamic_windowing,
-            chat_history=chat_history  # Pass chat history to pipeline
+            chat_history=chat_history,  # Pass chat history to pipeline
+            user_machine_models=user_machine_models  # Pass machine models for filtering
         )
         
         response_time_ms = int((time.time() - start_time) * 1000)
@@ -853,7 +871,7 @@ async def query_knowledge_base(request: QueryRequest):
             logger.warning(f"Failed to log query for analytics: {e}")
         
         # Save to database if available
-        user_id = "api_user"  # TODO: replace with authenticated user when auth is wired
+        # user_id already set above (or defaults to "api_user")
 
         if db_manager:
             try:
@@ -1255,6 +1273,32 @@ async def get_session_history(session_id: str):
 # Admin API Endpoints
 # =============================================================================
 
+@app.get("/admin/machine_models")
+async def get_allowed_machine_models_endpoint():
+    """
+    Get the list of allowed machine models.
+    Used by frontend to build dropdown selectors.
+    """
+    try:
+        from .config.machine_models import get_allowed_machine_models
+        allowed_models = get_allowed_machine_models()
+        return {
+            "allowed_machine_models": allowed_models,
+            "total": len(allowed_models)
+        }
+    except ImportError:
+        return {
+            "allowed_machine_models": [],
+            "total": 0
+        }
+
+
+# TODO: Implement machine models management page endpoint
+# This is a placeholder for future implementation of CRUD operations for machine models
+# The actual list is currently managed in backend/config/machine_models.py
+# Future endpoint: GET/POST/PUT/DELETE /admin/machine_models/manage
+
+
 @app.get("/admin/documents")
 async def get_all_documents():
     """
@@ -1381,6 +1425,7 @@ async def get_all_documents():
                 
                 # Get metadata from document_metadata.json
                 doc_metadata = get_document_metadata(filename)
+                machine_model = doc_metadata.get("machine_model")
                 
                 documents.append({
                     "filename": filename,
@@ -1391,7 +1436,9 @@ async def get_all_documents():
                     "file_path": file_path,
                     "file_type": file_type,
                     "is_active": doc_metadata.get("is_active", True),
-                    "machine_model": doc_metadata.get("machine_model"),
+                    "machine_model": machine_model,
+                    "missing_machine_model": machine_model is None,
+                    "requires_admin_review": doc_metadata.get("requires_admin_review", False),
                     "category": doc_metadata.get("category"),
                     "product_family": doc_metadata.get("product_family")
                 })
@@ -1407,7 +1454,18 @@ async def get_all_documents():
                 seen.add(doc['filename'])
                 unique_docs.append(doc)
         
-        return {"documents": unique_docs, "total": len(unique_docs)}
+        # Include allowed machine models in response for frontend dropdown
+        try:
+            from .config.machine_models import get_allowed_machine_models
+            allowed_machine_models = get_allowed_machine_models()
+        except ImportError:
+            allowed_machine_models = []
+        
+        return {
+            "documents": unique_docs,
+            "total": len(unique_docs),
+            "allowed_machine_models": allowed_machine_models
+        }
         
     except Exception as e:
         logger.error(f"Error fetching documents: {e}", exc_info=True)
@@ -1617,10 +1675,18 @@ async def toggle_document_status(filename: str, request: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"Failed to toggle document status: {str(e)}")
 
 
-@app.post("/admin/documents/{filename}/metadata")
-async def update_document_metadata_endpoint(filename: str, request: Dict[str, Any]):
+@app.patch("/admin/documents/{filename}/machine_model")
+async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
     """
-    Update document metadata (machine_model, category, product_family).
+    Update machine_model for a specific document.
+    
+    Body:
+        { "machine_model": "330R" }
+    
+    Validation:
+        - machine_model must be in ALLOWED_MACHINE_MODELS
+        - If empty string or null, sets to None and marks requires_admin_review
+        - If not in allowed list, returns 400 error
     """
     global rag_pipeline
     
@@ -1628,6 +1694,76 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
     try:
+        from .config.machine_models import is_valid_machine_model, get_allowed_machine_models
+        
+        import urllib.parse
+        filename = urllib.parse.unquote(filename)
+        
+        # Security check
+        if '..' in filename or filename.startswith('/'):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        machine_model = request.get("machine_model")
+        
+        # Validate: must be a string (can be empty, which becomes None)
+        if machine_model is not None and not isinstance(machine_model, str):
+            raise HTTPException(status_code=400, detail="machine_model must be a string")
+        
+        # Normalize: empty string becomes None
+        if machine_model == "":
+            machine_model = None
+        
+        # Validate: if not None, must be in allowed list
+        if machine_model is not None and not is_valid_machine_model(machine_model):
+            allowed_models = get_allowed_machine_models()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid machine_model '{machine_model}'. Must be one of: {', '.join(allowed_models) if allowed_models else 'None'}"
+            )
+        
+        from .utils.document_metadata import update_document_metadata
+        updates = {"machine_model": machine_model}
+        
+        # If machine_model is None, mark for review
+        if machine_model is None:
+            updates["requires_admin_review"] = True
+        else:
+            # Clear review flag if machine_model is set
+            updates["requires_admin_review"] = False
+        
+        update_document_metadata(filename, updates)
+        
+        logger.info(f"Updated machine_model for {filename}: {machine_model}")
+        
+        return {
+            "status": "success",
+            "message": f"Machine model updated for {filename}",
+            "machine_model": machine_model,
+            "requires_admin_review": updates.get("requires_admin_review", False)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating machine_model: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update machine_model: {str(e)}")
+
+
+@app.post("/admin/documents/{filename}/metadata")
+async def update_document_metadata_endpoint(filename: str, request: Dict[str, Any]):
+    """
+    Update document metadata (machine_model, category, product_family, is_active).
+    
+    All fields are optional. If machine_model is provided, it must be in ALLOWED_MACHINE_MODELS.
+    """
+    global rag_pipeline
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        from .config.machine_models import is_valid_machine_model, get_allowed_machine_models
+        
         import urllib.parse
         filename = urllib.parse.unquote(filename)
         
@@ -1637,10 +1773,30 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
         
         # Extract allowed metadata fields
         updates = {}
-        allowed_fields = ["machine_model", "category", "product_family"]
+        allowed_fields = ["machine_model", "category", "product_family", "is_active"]
         for field in allowed_fields:
             if field in request:
-                updates[field] = request[field]
+                value = request[field]
+                # Validate machine_model
+                if field == "machine_model":
+                    if value is not None and not isinstance(value, str):
+                        raise HTTPException(status_code=400, detail="machine_model must be a string")
+                    # Normalize empty string to None
+                    if value == "":
+                        value = None
+                    # Validate: if not None, must be in allowed list
+                    if value is not None and not is_valid_machine_model(value):
+                        allowed_models = get_allowed_machine_models()
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid machine_model '{value}'. Must be one of: {', '.join(allowed_models) if allowed_models else 'None'}"
+                        )
+                    # If None, mark for review
+                    if value is None:
+                        updates["requires_admin_review"] = True
+                    else:
+                        updates["requires_admin_review"] = False
+                updates[field] = value
         
         if not updates:
             raise HTTPException(status_code=400, detail="No valid metadata fields provided")
