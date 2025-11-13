@@ -802,21 +802,23 @@ async def query_knowledge_base(request: QueryRequest):
         # Log incoming query
         logger.info(f"📥 Received query: {request.query[:200]}{'...' if len(request.query) > 200 else ''}")
         
-        # Get user machine models for document-level filtering
+        # Get user information for role-based machine filtering
+        user_role = None
         user_machine_models = None
-        user_id = "api_user"  # Default fallback
-        if db_manager:
-            try:
-                # TODO: Get user_id from authenticated session/token when auth is fully wired
-                # For now, try to get from request if available, otherwise use "api_user"
-                # If user_id is available as integer, get machine models
-                # user_machine_models = await db_manager.get_user_machine_models(user_id) if user_id and user_id.isdigit() else None
-                
-                # If no machine models, fallback to full corpus (no filtering)
-                if not user_machine_models:
-                    logger.debug("No user machine models - using full corpus (no filtering)")
-            except Exception as e:
-                logger.debug(f"Could not get user machine models: {e} - using full corpus")
+        
+        # TODO: When authentication is fully wired, get user from token/session
+        # For now, try to extract from Authorization header if available
+        # If no user info available, default to ADMIN role (full access) for backward compatibility
+        try:
+            from fastapi import Request, Header
+            # Try to get user from Authorization header if available
+            # This is a placeholder - actual implementation should use proper auth middleware
+            # For now, default to ADMIN (full access) if no user info
+            user_role = "ADMIN"  # Default to full access for backward compatibility
+            logger.debug("No user authentication available - using ADMIN role (full access)")
+        except Exception as e:
+            logger.debug(f"Could not get user info: {e} - using ADMIN role (full access)")
+            user_role = "ADMIN"  # Default to full access
         
         # Execute RAG query with chat history and machine filtering
         # Note: Retrieval uses only current query, but LLM gets chat history
@@ -829,6 +831,7 @@ async def query_knowledge_base(request: QueryRequest):
             metadata_filters=request.metadata_filters,
             dynamic_windowing=request.dynamic_windowing,
             chat_history=chat_history,  # Pass chat history to pipeline
+            role=user_role,  # Pass user role for machine-based filtering
             user_machine_models=user_machine_models  # Pass machine models for filtering
         )
         
@@ -1278,6 +1281,7 @@ async def get_allowed_machine_models_endpoint():
     """
     Get the list of allowed machine models.
     Used by frontend to build dropdown selectors.
+    Returns all machine models including "GENERAL" and "Any".
     """
     try:
         from .config.machine_models import get_allowed_machine_models
@@ -1289,6 +1293,26 @@ async def get_allowed_machine_models_endpoint():
     except ImportError:
         return {
             "allowed_machine_models": [],
+            "total": 0
+        }
+
+
+@app.get("/admin/machine_models/selection")
+async def get_machine_models_for_selection_endpoint():
+    """
+    Get machine models that can be selected by customers in the UI.
+    Excludes special values like "GENERAL" and "Any".
+    """
+    try:
+        from .config.machine_models import get_machine_models_for_selection
+        selectable_models = get_machine_models_for_selection()
+        return {
+            "machine_models": selectable_models,
+            "total": len(selectable_models)
+        }
+    except ImportError:
+        return {
+            "machine_models": [],
             "total": 0
         }
 
@@ -1426,6 +1450,12 @@ async def get_all_documents():
                 # Get metadata from document_metadata.json
                 doc_metadata = get_document_metadata(filename)
                 machine_model = doc_metadata.get("machine_model")
+                # Normalize: ensure machine_model is a list (for backwards compatibility with single string)
+                if isinstance(machine_model, str):
+                    machine_model = [machine_model]
+                elif machine_model is None:
+                    machine_model = None
+                # machine_model is now either None or a list of strings
                 
                 documents.append({
                     "filename": filename,
@@ -1436,8 +1466,8 @@ async def get_all_documents():
                     "file_path": file_path,
                     "file_type": file_type,
                     "is_active": doc_metadata.get("is_active", True),
-                    "machine_model": machine_model,
-                    "missing_machine_model": machine_model is None,
+                    "machine_model": machine_model,  # Now a list or None
+                    "missing_machine_model": machine_model is None or (isinstance(machine_model, list) and len(machine_model) == 0),
                     "requires_admin_review": doc_metadata.get("requires_admin_review", False),
                     "category": doc_metadata.get("category"),
                     "product_family": doc_metadata.get("product_family")
@@ -1681,11 +1711,15 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
     Update machine_model for a specific document.
     
     Body:
-        { "machine_model": "330R" }
+        { "machine_model": ["EZCut 330", "EZCut 350"] }  # List of models
+        { "machine_model": ["Any"] }  # Special "Any" option
+        { "machine_model": [] }  # Empty list becomes None
     
     Validation:
-        - machine_model must be in ALLOWED_MACHINE_MODELS
-        - If empty string or null, sets to None and marks requires_admin_review
+        - machine_model must be a list (or string for backwards compatibility)
+        - All items must be in ALLOWED_MACHINE_MODELS
+        - If "Any" is present, it must be the only item
+        - If empty list or null, sets to None and marks requires_admin_review
         - If not in allowed list, returns 400 error
     """
     global rag_pipeline
@@ -1694,7 +1728,7 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
     try:
-        from .config.machine_models import is_valid_machine_model, get_allowed_machine_models
+        from .config.machine_models import is_valid_machine_model_list, get_allowed_machine_models
         
         import urllib.parse
         filename = urllib.parse.unquote(filename)
@@ -1705,27 +1739,37 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
         
         machine_model = request.get("machine_model")
         
-        # Validate: must be a string (can be empty, which becomes None)
-        if machine_model is not None and not isinstance(machine_model, str):
-            raise HTTPException(status_code=400, detail="machine_model must be a string")
+        # Accept both list and string (for backwards compatibility)
+        # Normalize to list format
+        if machine_model is None:
+            machine_models_list = None
+        elif isinstance(machine_model, str):
+            # Single string -> convert to list
+            machine_models_list = [machine_model] if machine_model else None
+        elif isinstance(machine_model, list):
+            # Filter out empty strings and None values
+            machine_models_list = [m for m in machine_model if m and isinstance(m, str)]
+            if len(machine_models_list) == 0:
+                machine_models_list = None
+        else:
+            raise HTTPException(status_code=400, detail="machine_model must be a string or list of strings")
         
-        # Normalize: empty string becomes None
-        if machine_model == "":
-            machine_model = None
-        
-        # Validate: if not None, must be in allowed list
-        if machine_model is not None and not is_valid_machine_model(machine_model):
+        # Validate: if not None, must be a valid list
+        if machine_models_list is not None and not is_valid_machine_model_list(machine_models_list):
             allowed_models = get_allowed_machine_models()
+            # Check which models are invalid
+            from .config.machine_models import is_valid_machine_model
+            invalid_models = [m for m in machine_models_list if not is_valid_machine_model(m)]
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid machine_model '{machine_model}'. Must be one of: {', '.join(allowed_models) if allowed_models else 'None'}"
+                detail=f"Invalid machine_model(s) {invalid_models}. Must be from: {', '.join(allowed_models) if allowed_models else 'None'}"
             )
         
         from .utils.document_metadata import update_document_metadata
-        updates = {"machine_model": machine_model}
+        updates = {"machine_model": machine_models_list}
         
         # If machine_model is None, mark for review
-        if machine_model is None:
+        if machine_models_list is None:
             updates["requires_admin_review"] = True
         else:
             # Clear review flag if machine_model is set
@@ -1733,12 +1777,12 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
         
         update_document_metadata(filename, updates)
         
-        logger.info(f"Updated machine_model for {filename}: {machine_model}")
+        logger.info(f"Updated machine_model for {filename}: {machine_models_list}")
         
         return {
             "status": "success",
             "message": f"Machine model updated for {filename}",
-            "machine_model": machine_model,
+            "machine_model": machine_models_list,
             "requires_admin_review": updates.get("requires_admin_review", False)
         }
         
@@ -1754,7 +1798,12 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
     """
     Update document metadata (machine_model, category, product_family, is_active).
     
-    All fields are optional. If machine_model is provided, it must be in ALLOWED_MACHINE_MODELS.
+    All fields are optional. If machine_model is provided, it must be a list of values from ALLOWED_MACHINE_MODELS.
+    machine_model can be:
+    - A list of strings: ["EZCut 330", "EZCut 350"]
+    - A single string (for backwards compatibility): "EZCut 330"
+    - An empty list or null: None
+    - ["Any"]: indicates document applies to any machine
     """
     global rag_pipeline
     
@@ -1762,7 +1811,7 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
     try:
-        from .config.machine_models import is_valid_machine_model, get_allowed_machine_models
+        from .config.machine_models import is_valid_machine_model_list, get_allowed_machine_models, is_valid_machine_model
         
         import urllib.parse
         filename = urllib.parse.unquote(filename)
@@ -1779,23 +1828,34 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
                 value = request[field]
                 # Validate machine_model
                 if field == "machine_model":
-                    if value is not None and not isinstance(value, str):
-                        raise HTTPException(status_code=400, detail="machine_model must be a string")
-                    # Normalize empty string to None
-                    if value == "":
-                        value = None
+                    # Accept both list and string (for backwards compatibility)
+                    if value is None:
+                        machine_models_list = None
+                    elif isinstance(value, str):
+                        # Single string -> convert to list
+                        machine_models_list = [value] if value else None
+                    elif isinstance(value, list):
+                        # Filter out empty strings and None values
+                        machine_models_list = [m for m in value if m and isinstance(m, str)]
+                        if len(machine_models_list) == 0:
+                            machine_models_list = None
+                    else:
+                        raise HTTPException(status_code=400, detail="machine_model must be a string or list of strings")
+                    
                     # Validate: if not None, must be in allowed list
-                    if value is not None and not is_valid_machine_model(value):
+                    if machine_models_list is not None and not is_valid_machine_model_list(machine_models_list):
                         allowed_models = get_allowed_machine_models()
+                        invalid_models = [m for m in machine_models_list if not is_valid_machine_model(m)]
                         raise HTTPException(
                             status_code=400,
-                            detail=f"Invalid machine_model '{value}'. Must be one of: {', '.join(allowed_models) if allowed_models else 'None'}"
+                            detail=f"Invalid machine_model(s) {invalid_models}. Must be from: {', '.join(allowed_models) if allowed_models else 'None'}"
                         )
                     # If None, mark for review
-                    if value is None:
+                    if machine_models_list is None:
                         updates["requires_admin_review"] = True
                     else:
                         updates["requires_admin_review"] = False
+                    value = machine_models_list
                 updates[field] = value
         
         if not updates:

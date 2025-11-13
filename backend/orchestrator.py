@@ -1004,28 +1004,45 @@ class HybridRetriever:
             logger.warning(f"Filename search failed: {e}")
             return []
     
-    def _get_allowed_filenames(self, user_machine_models: Optional[List[str]] = None) -> Optional[set]:
+    def _get_allowed_filenames(self, role: Optional[str] = None, user_machine_models: Optional[List[str]] = None) -> Optional[set]:
         """
-        Build set of allowed filenames based on user machine models.
+        Build set of allowed filenames based on user role and machine models.
         
         Args:
-            user_machine_models: List of machine model strings (e.g., ["330R", "DuraFlex"])
+            role: User role (ADMIN, TECHNICIAN, CUSTOMER, or None)
+            user_machine_models: List of machine model strings (e.g., ["EZCut 330", "Duraflex"])
             
         Returns:
-            Set of allowed filenames, or None if no filtering should be applied
+            Set of allowed filenames, or None if no filtering should be applied (full access)
         """
-        if not user_machine_models or len(user_machine_models) == 0:
-            # No machine models = no filtering (fallback to full corpus)
-            return None
-        
         try:
-            from .utils.document_metadata import get_document_metadata, load_metadata
+            from .utils.document_metadata import load_metadata
+            from .config.machine_models import get_effective_machines_for_user, GENERAL_MACHINE, ANY_MACHINE
+            
+            # Get effective machines for this user based on role
+            effective_machines = get_effective_machines_for_user(role or "CUSTOMER", user_machine_models or [])
+            
+            # For backward compatibility: if customer has no machines, log warning and allow full access temporarily
+            role_upper = (role or "").upper()
+            if role_upper == "CUSTOMER" and (not user_machine_models or len(user_machine_models) == 0):
+                logger.warning(
+                    f"Customer with role '{role}' has no machine_models assigned; "
+                    f"treating as FULL ACCESS temporarily. Admin should assign machines via UI."
+                )
+                # TODO: Once all customers have machines assigned, change this to return empty set
+                # For now, allow full access (includes GENERAL documents)
+                effective_machines = get_effective_machines_for_user("ADMIN", [])  # Full access
             
             # Load all document metadata
             all_metadata = load_metadata()
             allowed_filenames = set()
+            effective_machines_set = set(effective_machines)  # Convert to set for faster lookup
             
-            # Build allowed_filenames = all filenames where machine_model in user_machine_models
+            logger.info(
+                f"🔍 Machine filtering: role={role}, effective_machines={effective_machines} "
+                f"({len(effective_machines)} machines)"
+            )
+            
             for filename, metadata in all_metadata.items():
                 machine_model = metadata.get("machine_model")
                 is_active = metadata.get("is_active", True)
@@ -1034,22 +1051,61 @@ class HybridRetriever:
                 if not is_active:
                     continue
                 
-                # Exclude documents with machine_model = None
+                # Exclude documents with machine_model = None or empty list (for customers)
+                # Admins/technicians see everything, so we include None for them
                 if machine_model is None:
+                    if role_upper in ["ADMIN", "TECHNICIAN"]:
+                        # Admins/technicians can see documents without machine_model
+                        allowed_filenames.add(filename)
+                    # Customers cannot see documents without machine_model
                     continue
                 
-                # Include if machine_model matches user's machine models
-                if machine_model in user_machine_models:
+                # Normalize machine_model to list format (handle both string and list)
+                if isinstance(machine_model, str):
+                    doc_machine_models = [machine_model]
+                elif isinstance(machine_model, list):
+                    doc_machine_models = machine_model
+                    if len(doc_machine_models) == 0:
+                        # Empty list = no machine assigned
+                        if role_upper in ["ADMIN", "TECHNICIAN"]:
+                            allowed_filenames.add(filename)
+                        continue
+                else:
+                    # Invalid type
+                    if role_upper in ["ADMIN", "TECHNICIAN"]:
+                        allowed_filenames.add(filename)
+                    continue
+                
+                # Check if document applies to any machine
+                if ANY_MACHINE in doc_machine_models:
+                    # Document with "Any" applies to all machines
+                    allowed_filenames.add(filename)
+                    continue
+                
+                # Check if document is GENERAL (always included for everyone)
+                if GENERAL_MACHINE in doc_machine_models:
+                    allowed_filenames.add(filename)
+                    continue
+                
+                # Check if any of the document's machine models match effective machines
+                doc_machine_models_set = set(doc_machine_models)
+                if doc_machine_models_set.intersection(effective_machines_set):
                     allowed_filenames.add(filename)
             
-            logger.info(f"🔍 Machine filtering applied — {len(allowed_filenames)} documents allowed, "
-                       f"{len(all_metadata) - len(allowed_filenames)} excluded")
+            logger.info(
+                f"🔍 Machine filtering applied — {len(allowed_filenames)} documents allowed, "
+                f"{len(all_metadata) - len(allowed_filenames)} excluded"
+            )
             
-            return allowed_filenames if allowed_filenames else None
+            return allowed_filenames if allowed_filenames else set()  # Return empty set if no matches
             
         except Exception as e:
-            logger.warning(f"Failed to build allowed filenames for machine filtering: {e}")
-            return None
+            logger.warning(f"Failed to build allowed filenames for machine filtering: {e}", exc_info=True)
+            # On error, for customers return empty set (safer), for admins/techs return None (full access)
+            role_upper = (role or "").upper()
+            if role_upper in ["ADMIN", "TECHNICIAN"]:
+                return None  # Full access on error
+            return set()  # No access on error for customers
     
     def _filter_by_allowed_filenames(self, nodes: List[NodeWithScore], allowed_filenames: Optional[set]) -> List[NodeWithScore]:
         """
@@ -1086,7 +1142,8 @@ class HybridRetriever:
         alpha: float = 0.5,
         metadata_filters: Optional[Dict[str, Any]] = None,
         machine_filename_patterns: Optional[List[str]] = None,  # Unused but kept for API compatibility
-        user_machine_models: Optional[List[str]] = None  # NEW: Machine models for document-level filtering
+        role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER)
+        user_machine_models: Optional[List[str]] = None  # Machine models for document-level filtering
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search combining BM25 and dense embeddings (in parallel).
@@ -1097,13 +1154,14 @@ class HybridRetriever:
             top_k: Number of results to return
             alpha: Weight for dense search (1-alpha for BM25). 0.5 = equal weight
             metadata_filters: Optional metadata filters
-            user_machine_models: Optional list of machine models for document-level filtering
+            role: User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
+            user_machine_models: List of machine models for document-level filtering
         
         Returns:
             Ranked list of nodes
         """
-        # Build allowed filenames based on user machine models (document-level pre-filtering)
-        allowed_filenames = self._get_allowed_filenames(user_machine_models)
+        # Build allowed filenames based on user role and machine models (document-level pre-filtering)
+        allowed_filenames = self._get_allowed_filenames(role=role, user_machine_models=user_machine_models)
         
         # 🚀 FIRST: Try direct filename search for queries that look like they're asking for a specific document
         query_lower = query.lower()
@@ -1387,7 +1445,8 @@ class HybridRetriever:
         metadata_filters: Optional[Dict[str, Any]] = None,
         enable_llm_evaluation: bool = True,
         machine_filename_patterns: Optional[List[str]] = None,
-        user_machine_models: Optional[List[str]] = None  # NEW: Machine models for document-level filtering
+        role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER)
+        user_machine_models: Optional[List[str]] = None  # Machine models for document-level filtering
     ) -> List[NodeWithScore]:
         """
         Perform hybrid search with optional LLM-based document evaluation.
@@ -1398,7 +1457,8 @@ class HybridRetriever:
             alpha: Weight for dense search (1-alpha for BM25)
             metadata_filters: Optional metadata filters
             enable_llm_evaluation: Whether to use LLM evaluation
-            user_machine_models: Optional list of machine models for document-level filtering
+            role: User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
+            user_machine_models: List of machine models for document-level filtering
         
         Returns:
             Ranked list of nodes with LLM evaluation applied
@@ -1410,6 +1470,7 @@ class HybridRetriever:
             alpha=alpha,
             metadata_filters=metadata_filters,
             machine_filename_patterns=machine_filename_patterns,
+            role=role,
             user_machine_models=user_machine_models
         )
         
@@ -3230,7 +3291,8 @@ class RAGOrchestrator:
         metadata_filters: Optional[Dict[str, Any]] = None,
         dynamic_windowing: bool = True,
         chat_history: Optional[List[Dict[str, str]]] = None,
-        user_machine_models: Optional[List[str]] = None  # NEW: Machine models for document-level filtering
+        role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
+        user_machine_models: Optional[List[str]] = None  # Machine models for document-level filtering
     ) -> StructuredResponse:
         """
         Main orchestration method - handles complete RAG pipeline.
@@ -3241,6 +3303,8 @@ class RAGOrchestrator:
             alpha: Weight for dense vs BM25 (0.5 = equal)
             metadata_filters: Optional metadata filters
             dynamic_windowing: Enable dynamic context windowing
+            role: User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
+            user_machine_models: List of machine models for document-level filtering
         
         Returns:
             StructuredResponse with answer, reasoning, and sources
@@ -3410,6 +3474,7 @@ class RAGOrchestrator:
                         metadata_filters=metadata_filters,
                         enable_llm_evaluation=self.enable_llm_evaluation,
                         machine_filename_patterns=machine_filename_patterns,
+                        role=role,
                         user_machine_models=user_machine_models
                     )
                     
@@ -3444,6 +3509,7 @@ class RAGOrchestrator:
                 metadata_filters=metadata_filters,
                 enable_llm_evaluation=self.enable_llm_evaluation,
                 machine_filename_patterns=machine_filename_patterns,
+                role=role,
                 user_machine_models=user_machine_models
             )
         
@@ -3459,6 +3525,7 @@ class RAGOrchestrator:
                     top_k=top_k // 2,  # Get fewer results for refinement
                     alpha=alpha,
                     metadata_filters=metadata_filters,
+                    role=role,
                     user_machine_models=user_machine_models,
                     enable_llm_evaluation=self.enable_llm_evaluation,
                     machine_filename_patterns=machine_filename_patterns
@@ -3553,6 +3620,7 @@ class RAGOrchestrator:
                     top_k=top_k * 2,  # Get more results
                     alpha=alpha,
                     machine_filename_patterns=machine_filename_patterns,
+                    role=role,
                     user_machine_models=user_machine_models
                 )
                 if fallback_nodes:
@@ -3580,6 +3648,7 @@ class RAGOrchestrator:
                             top_k=top_k * 2,
                             alpha=alpha,
                             machine_filename_patterns=machine_filename_patterns,
+                            role=role,
                             user_machine_models=user_machine_models
                         )
                         if fallback_nodes:
@@ -3602,6 +3671,7 @@ class RAGOrchestrator:
                             top_k=top_k * 2,
                             alpha=alpha,
                             machine_filename_patterns=machine_filename_patterns,
+                            role=role,
                             user_machine_models=user_machine_models
                         )
                         if fallback_nodes:
@@ -3624,6 +3694,7 @@ class RAGOrchestrator:
                             top_k=top_k * 2,
                             alpha=alpha,
                             machine_filename_patterns=machine_filename_patterns,
+                            role=role,
                             user_machine_models=user_machine_models
                         )
                         if fallback_nodes:

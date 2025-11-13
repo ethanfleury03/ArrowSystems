@@ -22,7 +22,7 @@ interface AdminUser {
 
 type SortField = keyof Pick<
   AdminUser,
-  "id" | "email" | "name" | "role" | "company_name" | "contact_name" | "contact_phone" | "created_at" | "updated_at"
+  "id" | "email" | "name" | "role" | "company_name" | "contact_name" | "contact_phone" | "machine_models" | "created_at" | "updated_at"
 >;
 type SortDirection = "asc" | "desc";
 
@@ -53,6 +53,7 @@ const BASE_COLUMNS: { label: string; field?: SortField }[] = [
   { label: "Email", field: "email" },
   { label: "Name", field: "name" },
   { label: "Role", field: "role" },
+  { label: "Machine Models", field: "machine_models" },
 ];
 
 const CUSTOMER_EXTRA_COLUMNS: { label: string; field?: SortField }[] = [
@@ -83,12 +84,38 @@ const formatText = (value?: string | null) => {
   return normalized.length > 0 ? normalized : "—";
 };
 
+const formatMachineModels = (machineModels?: string[] | null) => {
+  if (!machineModels || machineModels.length === 0) {
+    return "—";
+  }
+  // For customers, show their assigned machines
+  // For admin/technician, show "All Machines" (they have full access)
+  return machineModels.join(", ");
+};
+
 const getComparableValue = (user: AdminUser, field: SortField) => {
   const value = user[field];
   if (value == null) return "";
+  
+  // Handle date fields (created_at, updated_at)
   if (field === "created_at" || field === "updated_at") {
-    return new Date(value).getTime() || 0;
+    // Type guard: date fields should be strings, not arrays
+    if (typeof value === "string") {
+      return new Date(value).getTime() || 0;
+    }
+    return 0;
   }
+  
+  // Handle machine_models array field
+  if (field === "machine_models") {
+    // For sorting machine_models, join array and convert to lowercase
+    if (Array.isArray(value)) {
+      return value.join(", ").toLowerCase();
+    }
+    return "";
+  }
+  
+  // Handle all other fields (strings, numbers, etc.)
   return String(value).toLowerCase();
 };
 
@@ -166,15 +193,32 @@ export default function AdminUsersPage() {
   const fetchAllowedMachineModels = useCallback(
     async (token: string) => {
       try {
+        // Fetch all machine models for user assignment
+        // For users: includes "Any" (full access) but excludes "GENERAL" (only for documents)
         const response = await fetch(`${apiBaseUrl}/admin/machine_models`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         });
-        if (response.ok) {
-          const data = await response.json();
-          setAllowedMachineModels(Array.isArray(data.allowed_machine_models) ? data.allowed_machine_models : []);
+        if (!response.ok) {
+          // Handle 401 Unauthorized - clear token and redirect to login
+          if (response.status === 401) {
+            console.warn("Authentication failed - clearing token and redirecting to login");
+            localStorage.removeItem("auth_token");
+            localStorage.removeItem("user_profile");
+            setAuthToken(null);
+            window.location.href = "/login";
+            return;
+          }
+          console.warn(`Failed to fetch machine models: ${response.status}`);
+          return;
         }
+        const data = await response.json();
+        const allModels = Array.isArray(data.allowed_machine_models) ? data.allowed_machine_models : [];
+        // Filter out "GENERAL" - it's only for documents, not for user machine assignment
+        // Keep "Any" - it means user can see all machines (full access)
+        const userSelectableModels = allModels.filter((m: string) => m !== "GENERAL");
+        setAllowedMachineModels(userSelectableModels);
       } catch (err) {
         console.warn("Failed to fetch allowed machine models:", err);
       }
@@ -193,6 +237,16 @@ export default function AdminUsersPage() {
           },
         });
         if (!response.ok) {
+          // Handle 401 Unauthorized - clear token and redirect to login
+          if (response.status === 401) {
+            console.warn("Authentication failed - clearing token and redirecting to login");
+            localStorage.removeItem("auth_token");
+            localStorage.removeItem("user_profile");
+            setAuthToken(null);
+            // Redirect to login page
+            window.location.href = "/login";
+            return;
+          }
           throw new Error(`Failed to load users (${response.status})`);
         }
         const data = await response.json();
@@ -219,10 +273,21 @@ export default function AdminUsersPage() {
         setAuthToken(token);
         fetchUsers(token);
         fetchAllowedMachineModels(token);
+      } else {
+        // No token found - redirect to login
+        console.warn("No authentication token found - redirecting to login");
+        setError("Please log in to access the admin dashboard.");
+        // Redirect to login after a short delay to show the error
+        setTimeout(() => {
+          window.location.href = "/login";
+        }, 2000);
       }
     } catch (error) {
       console.warn("Failed to retrieve auth token:", error);
-      setError("Unable to access authentication token.");
+      setError("Unable to access authentication token. Please log in.");
+      setTimeout(() => {
+        window.location.href = "/login";
+      }, 2000);
     }
   }, [fetchUsers, fetchAllowedMachineModels]);
 
@@ -291,51 +356,70 @@ export default function AdminUsersPage() {
       );
     }
 
-    return tableUsers.map((user) => (
-      <tr key={user.id} className="group transition-colors hover:bg-muted/40">
-        <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{user.id}</td>
-        <td className="whitespace-nowrap px-4 py-3 text-sm font-medium">{user.email}</td>
-        <td className="whitespace-nowrap px-4 py-3 text-sm">{user.name ?? "—"}</td>
-        <td className="whitespace-nowrap px-4 py-3">
-          <span className="inline-flex rounded-full border border-border bg-muted/60 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            {user.role}
-          </span>
-        </td>
-        {includeCustomerFields && (
-          <>
-            <td className="whitespace-nowrap px-4 py-3 text-sm">{formatText(user.company_name)}</td>
-            <td className="whitespace-nowrap px-4 py-3 text-sm">{formatText(user.contact_phone)}</td>
-            <td className="whitespace-nowrap px-4 py-3 text-sm">{formatText(user.contact_name)}</td>
-          </>
-        )}
-        <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
-          {formatDate(user.created_at)}
-        </td>
-        <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
-          {formatDate(user.updated_at)}
-        </td>
-        <td className="whitespace-nowrap px-4 py-3 text-sm">
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => handleEditUser(user)}
-              className="border-border text-xs"
-            >
-              Edit
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => handleDeleteUser(user)}
-              className="text-xs"
-            >
-              Delete
-            </Button>
-          </div>
-        </td>
-      </tr>
-    ));
+    return tableUsers.map((user) => {
+      const isCustomer = user.role.toUpperCase() === "CUSTOMER";
+      const isAdminOrTech = user.role.toUpperCase() === "ADMIN" || user.role.toUpperCase() === "TECHNICIAN";
+      const machineModels = user.machine_models;
+      
+      return (
+        <tr key={user.id} className="group transition-colors hover:bg-muted/40">
+          <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{user.id}</td>
+          <td className="whitespace-nowrap px-4 py-3 text-sm font-medium">{user.email}</td>
+          <td className="whitespace-nowrap px-4 py-3 text-sm">{user.name ?? "—"}</td>
+          <td className="whitespace-nowrap px-4 py-3">
+            <span className="inline-flex rounded-full border border-border bg-muted/60 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              {user.role}
+            </span>
+          </td>
+          <td className="px-4 py-3 text-sm">
+            {isAdminOrTech ? (
+              <span className="text-muted-foreground italic">All Machines (Full Access)</span>
+            ) : isCustomer ? (
+              machineModels && machineModels.length > 0 ? (
+                <span className="text-foreground">{formatMachineModels(machineModels)}</span>
+              ) : (
+                <span className="text-orange-600 dark:text-orange-400 italic">No machines assigned</span>
+              )
+            ) : (
+              "—"
+            )}
+          </td>
+          {includeCustomerFields && (
+            <>
+              <td className="whitespace-nowrap px-4 py-3 text-sm">{formatText(user.company_name)}</td>
+              <td className="whitespace-nowrap px-4 py-3 text-sm">{formatText(user.contact_phone)}</td>
+              <td className="whitespace-nowrap px-4 py-3 text-sm">{formatText(user.contact_name)}</td>
+            </>
+          )}
+          <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
+            {formatDate(user.created_at)}
+          </td>
+          <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
+            {formatDate(user.updated_at)}
+          </td>
+          <td className="whitespace-nowrap px-4 py-3 text-sm">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleEditUser(user)}
+                className="border-border text-xs"
+              >
+                Edit
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => handleDeleteUser(user)}
+                className="text-xs"
+              >
+                Delete
+              </Button>
+            </div>
+          </td>
+        </tr>
+      );
+    });
   };
 
   const handleSort = (field: SortField) => {
@@ -382,27 +466,40 @@ export default function AdminUsersPage() {
     setIsDeleteModalOpen(true);
   };
 
+  const isCustomerRole = formState.role === "CUSTOMER";
+  
   const submitAddUser = async () => {
     if (!authToken) return;
+    
+    // Validation: Customers must have at least one machine selected
+    if (isCustomerRole && formState.machineModels.length === 0) {
+      showToast("Customers must have at least one machine assigned.", "error");
+      return;
+    }
+    
     setActionSubmitting(true);
     try {
       const payload: Record<string, unknown> = {
         email: formState.email,
         role: formState.role,
         password: formState.password,
-        machine_models: formState.machineModels.length > 0 ? formState.machineModels : null,
       };
+      
+      // Only include machine_models for customers
       if (isCustomerRole) {
+        payload.machine_models = formState.machineModels.length > 0 ? formState.machineModels : [];
         payload.name = formState.contactName || undefined;
         payload.company_name = formState.companyName;
         payload.contact_name = formState.contactName;
         payload.contact_phone = formState.companyPhone;
       } else {
+        // For admin/technician, don't send machine_models (backend will ignore anyway)
         payload.name = formState.name || undefined;
         payload.company_name = null;
         payload.contact_name = null;
         payload.contact_phone = null;
       }
+      
       const response = await fetch(`${apiBaseUrl}/admin/create_user`, {
         method: "POST",
         headers: {
@@ -428,22 +525,34 @@ export default function AdminUsersPage() {
 
   const submitEditUser = async () => {
     if (!authToken || !selectedUser) return;
+    
+    // Validation: Customers must have at least one machine selected
+    const isEditingCustomer = formState.role === "CUSTOMER";
+    if (isEditingCustomer && formState.machineModels.length === 0) {
+      showToast("Customers must have at least one machine assigned.", "error");
+      return;
+    }
+    
     setActionSubmitting(true);
     try {
       const payload: Record<string, unknown> = {
         email: formState.email,
         role: formState.role,
-        machine_models: formState.machineModels.length > 0 ? formState.machineModels : null,
       };
       if (formState.password) {
         payload.password = formState.password;
       }
-      if (isCustomerRole) {
+      
+      // Only include machine_models for customers
+      if (isEditingCustomer) {
+        payload.machine_models = formState.machineModels.length > 0 ? formState.machineModels : [];
         payload.name = formState.contactName || null;
         payload.company_name = formState.companyName;
         payload.contact_name = formState.contactName;
         payload.contact_phone = formState.companyPhone;
       } else {
+        // For admin/technician, clear machine_models (backend will ignore anyway, but clear for consistency)
+        payload.machine_models = [];
         payload.name = formState.name || null;
         payload.company_name = null;
         payload.contact_name = null;
@@ -500,8 +609,6 @@ export default function AdminUsersPage() {
       setActionSubmitting(false);
     }
   };
-
-  const isCustomerRole = formState.role.toUpperCase() === "CUSTOMER";
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 md:mx-0 md:px-6 xl:mx-auto">
@@ -746,36 +853,44 @@ export default function AdminUsersPage() {
               />
             </div>
             
-            <div className="grid gap-2">
-              <label className="text-sm font-medium text-muted-foreground">Machine Models</label>
-              <div className="space-y-2">
-                <select
-                  multiple
-                  value={formState.machineModels}
-                  onChange={(e) => {
-                    const selected = Array.from(e.target.selectedOptions, option => option.value);
-                    setFormState((prev) => ({ ...prev, machineModels: selected }));
-                  }}
-                  size={Math.min(allowedMachineModels.length + 1, 6)}
-                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-                  disabled={actionSubmitting}
-                >
-                  {allowedMachineModels.length === 0 ? (
-                    <option disabled>No machine models available</option>
-                  ) : (
-                    allowedMachineModels.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  Select one or more machine models this user has access to. Hold Ctrl/Cmd to select multiple.
-                  {formState.machineModels.length > 0 && ` (${formState.machineModels.length} selected)`}
-                </p>
+            {isCustomerRole && (
+              <div className="grid gap-2">
+                <label className="text-sm font-medium text-muted-foreground">
+                  Machines this customer has <span className="text-red-500">*</span>
+                </label>
+                <div className="space-y-2">
+                  <select
+                    multiple
+                    value={formState.machineModels}
+                    onChange={(e) => {
+                      const selected = Array.from(e.target.selectedOptions, option => option.value);
+                      setFormState((prev) => ({ ...prev, machineModels: selected }));
+                    }}
+                    size={Math.min(allowedMachineModels.length + 1, 6)}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                    disabled={actionSubmitting}
+                    required
+                  >
+                    {allowedMachineModels.length === 0 ? (
+                      <option disabled>No machine models available</option>
+                    ) : (
+                      allowedMachineModels.map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Select one or more machine models this customer has access to. Hold Ctrl/Cmd to select multiple.
+                    {formState.machineModels.length > 0 && ` (${formState.machineModels.length} selected)`}
+                    {formState.machineModels.length === 0 && (
+                      <span className="text-red-500 block mt-1">At least one machine must be selected for customers.</span>
+                    )}
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           <div className="mt-6 flex justify-end gap-3">
@@ -784,7 +899,7 @@ export default function AdminUsersPage() {
             </Button>
             <Button
               onClick={isAddModalOpen ? submitAddUser : submitEditUser}
-              disabled={actionSubmitting}
+              disabled={actionSubmitting || (isCustomerRole && formState.machineModels.length === 0)}
               className="bg-primary text-primary-foreground"
             >
               {actionSubmitting ? "Saving..." : "Save"}
