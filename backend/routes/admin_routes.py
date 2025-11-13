@@ -118,19 +118,55 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         _: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
     ):
-        # Validate machine_models against allowed list
-        if payload.machine_models:
-            try:
-                from ..config.machine_models import is_valid_machine_model, get_allowed_machine_models
-                invalid_models = [m for m in payload.machine_models if not is_valid_machine_model(m)]
+        """
+        Create a new user (admin-only).
+        
+        Validation rules:
+        - If role == "CUSTOMER" → machine_models is REQUIRED and must be a non-empty subset of ALLOWED_MACHINE_MODELS
+        - If role in ["ADMIN", "TECHNICIAN"] → machine_models can be omitted or ignored
+        """
+        from ..config.machine_models import (
+            normalize_machine_models,
+            is_valid_machine_model_list,
+            get_allowed_machine_models,
+            get_machine_models_for_selection
+        )
+        
+        role_upper = (payload.role or "TECHNICIAN").upper()
+        
+        # Normalize machine_models
+        machine_models = normalize_machine_models(payload.machine_models)
+        
+        # Validation: Customers must have at least one machine assigned
+        if role_upper == "CUSTOMER":
+            if not machine_models or len(machine_models) == 0:
+                allowed_models = get_machine_models_for_selection()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Customers must have at least one machine assigned. Available machines: {', '.join(allowed_models) if allowed_models else 'None'}"
+                )
+            
+            # Validate all machines are in allowed list
+            from ..config.machine_models import is_valid_machine_model
+            invalid_models = [m for m in machine_models if not is_valid_machine_model(m)]
+            if invalid_models:
+                allowed_models = get_allowed_machine_models()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid machine_models: {', '.join(invalid_models)}. Must be a subset of: {', '.join(allowed_models) if allowed_models else 'None'}"
+                )
+        else:
+            # For admin/technician, machine_models are optional (will be ignored in retrieval anyway)
+            # But still validate if provided
+            if machine_models and len(machine_models) > 0:
+                from ..config.machine_models import is_valid_machine_model
+                invalid_models = [m for m in machine_models if not is_valid_machine_model(m)]
                 if invalid_models:
                     allowed_models = get_allowed_machine_models()
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"Invalid machine_models: {', '.join(invalid_models)}. Must be a subset of: {', '.join(allowed_models) if allowed_models else 'None'}"
                     )
-            except ImportError:
-                pass  # Config not available, skip validation
         
         existing = await manager.get_user_by_email(payload.email)
         if existing:
@@ -144,7 +180,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             company_name=payload.company_name,
             contact_name=payload.contact_name,
             contact_phone=payload.contact_phone,
-            machine_models=payload.machine_models,
+            machine_models=machine_models if role_upper == "CUSTOMER" else None,  # Only set for customers
         )
         return created
 
@@ -155,21 +191,84 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         _: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
     ):
-        # Validate machine_models against allowed list
-        if payload.machine_models is not None:
-            try:
-                from ..config.machine_models import is_valid_machine_model, get_allowed_machine_models
-                invalid_models = [m for m in payload.machine_models if not is_valid_machine_model(m)]
-                if invalid_models:
-                    allowed_models = get_allowed_machine_models()
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Invalid machine_models: {', '.join(invalid_models)}. Must be a subset of: {', '.join(allowed_models) if allowed_models else 'None'}"
-                    )
-            except ImportError:
-                pass  # Config not available, skip validation
+        """
+        Update user (admin-only).
+        
+        Validation rules:
+        - If role is changed TO "CUSTOMER" → machine_models must be non-empty and valid
+        - If role is changed FROM "CUSTOMER" to admin/technician → machine_models can be cleared
+        - If role remains "CUSTOMER" and machine_models is updated → must be non-empty and valid
+        """
+        from ..config.machine_models import (
+            normalize_machine_models,
+            is_valid_machine_model_list,
+            get_allowed_machine_models,
+            get_machine_models_for_selection
+        )
+        
+        # Get current user to check role changes
+        current_user = await manager.get_user_by_id(user_id)
+        if not current_user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        
+        current_role = current_user.get("role", "TECHNICIAN").upper()
+        new_role = (payload.role or current_role).upper()
+        role_changed = new_role != current_role
+        
+        # Normalize machine_models
+        machine_models = normalize_machine_models(payload.machine_models) if payload.machine_models is not None else None
+        
+        # Validation based on role changes
+        if role_changed:
+            # Role is being changed
+            if new_role == "CUSTOMER":
+                # Changed TO customer - require machine_models
+                if not machine_models or len(machine_models) == 0:
+                    # Try to keep existing machine_models if available
+                    existing_machine_models = current_user.get("machine_models", [])
+                    if not existing_machine_models or len(existing_machine_models) == 0:
+                        allowed_models = get_machine_models_for_selection()
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Cannot change role to CUSTOMER without machine_models. Customers must have at least one machine assigned. Available machines: {', '.join(allowed_models) if allowed_models else 'None'}"
+                        )
+                    machine_models = existing_machine_models
+            # If changed FROM customer to admin/technician, machine_models can be cleared
+            # (retrieval will ignore them anyway via get_effective_machines_for_user)
+        else:
+            # Role not changed - validate based on current role
+            if new_role == "CUSTOMER":
+                if machine_models is not None:
+                    # machine_models is being updated for a customer
+                    if len(machine_models) == 0:
+                        allowed_models = get_machine_models_for_selection()
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Cannot clear machine_models for CUSTOMER role. Customers must have at least one machine assigned. Available machines: {', '.join(allowed_models) if allowed_models else 'None'}"
+                        )
+        
+        # Validate machine_models if provided
+        if machine_models is not None and len(machine_models) > 0:
+            if not is_valid_machine_model_list(machine_models):
+                from ..config.machine_models import is_valid_machine_model
+                invalid_models = [m for m in machine_models if not is_valid_machine_model(m)]
+                allowed_models = get_allowed_machine_models()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid machine_models: {', '.join(invalid_models)}. Must be a subset of: {', '.join(allowed_models) if allowed_models else 'None'}"
+                )
         
         try:
+            # If role is admin/technician and machine_models is None, clear it
+            # If role is customer and machine_models is None, keep existing (don't update)
+            update_machine_models = machine_models
+            if new_role != "CUSTOMER" and machine_models is None:
+                # Admin/technician - can clear machine_models
+                update_machine_models = []
+            elif new_role == "CUSTOMER" and machine_models is None:
+                # Customer - keep existing machine_models (don't update)
+                update_machine_models = None
+            
             updated = await manager.update_user(
                 user_id,
                 email=payload.email,
@@ -179,7 +278,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 company_name=payload.company_name,
                 contact_name=payload.contact_name,
                 contact_phone=payload.contact_phone,
-                machine_models=payload.machine_models,
+                machine_models=update_machine_models,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

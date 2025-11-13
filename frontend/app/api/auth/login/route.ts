@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { setLoginSession } from '@/lib/auth';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { getBackendUrl } from '@/lib/backend-url';
 
 export async function POST(request: NextRequest) {
   try {
+    // Detect backend URL from request hostname (for network access)
+    const BACKEND_URL = getBackendUrl(request);
+    
     const body = await request.json();
     const { email, password } = body;
 

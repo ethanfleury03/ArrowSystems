@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-// Use BACKEND_URL from env (set in Docker) or default to localhost for local dev
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { getBackendUrl } from '@/lib/backend-url';
 
 // Query summarization configuration
 const SUMMARIZE_ENABLED = process.env.ENABLE_QUERY_SUMMARIZATION !== 'false'; // Default: enabled
@@ -11,9 +9,9 @@ const SUMMARIZE_MIN_LENGTH = parseInt(process.env.QUERY_SUMMARIZE_MIN_LENGTH || 
  * Summarize a long query using the backend summarization endpoint.
  * Only called if query exceeds min_length threshold.
  */
-async function summarizeQuery(query: string): Promise<{ summary: string; wasSummarized: boolean; contentType?: string }> {
+async function summarizeQuery(query: string, backendUrl: string): Promise<{ summary: string; wasSummarized: boolean; contentType?: string }> {
   try {
-    const response = await fetch(`${BACKEND_URL}/summarize-query`, {
+    const response = await fetch(`${backendUrl}/summarize-query`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -42,13 +40,16 @@ async function summarizeQuery(query: string): Promise<{ summary: string; wasSumm
 
 export async function POST(request: NextRequest) {
   try {
+    // Detect backend URL from request hostname (for network access)
+    const BACKEND_URL = getBackendUrl(request);
+    
     const body = await request.json();
     let query = body.query;
     let summarizationInfo = null;
     
     // Summarize long queries if enabled
     if (SUMMARIZE_ENABLED && query && query.length >= SUMMARIZE_MIN_LENGTH) {
-      const result = await summarizeQuery(query);
+      const result = await summarizeQuery(query, BACKEND_URL);
       query = result.summary;
       if (result.wasSummarized) {
         summarizationInfo = {
@@ -112,10 +113,18 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('API route error:', error);
     
+    // Detect backend URL for error message (fallback if detection failed)
+    let backendUrlForError = 'http://localhost:8000';
+    try {
+      backendUrlForError = getBackendUrl(request);
+    } catch {
+      // Use default if detection fails
+    }
+    
     // Check if it's a network error (backend not reachable)
     if (error instanceof TypeError && (error.message.includes('fetch') || error.message.includes('ECONNREFUSED'))) {
       return NextResponse.json(
-        { detail: `Cannot connect to backend at ${BACKEND_URL}. Make sure the backend is running on port 8000.` },
+        { detail: `Cannot connect to backend at ${backendUrlForError}. Make sure the backend is running on port 8000.` },
         { status: 503 }
       );
     }

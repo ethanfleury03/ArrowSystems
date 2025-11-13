@@ -56,7 +56,7 @@ export default function AdminDocumentsPage() {
   const [toastType, setToastType] = useState<"success" | "error">("success");
   
   // Edit form state
-  const [editMachineModel, setEditMachineModel] = useState("");
+  const [editMachineModel, setEditMachineModel] = useState<string[]>([]);  // Changed to array
   const [editCategory, setEditCategory] = useState("");
   const [editProductFamily, setEditProductFamily] = useState("");
   const [editIsActive, setEditIsActive] = useState(true);
@@ -114,15 +114,32 @@ export default function AdminDocumentsPage() {
   const fetchAllowedMachineModels = useCallback(
     async (token: string) => {
       try {
+        // Fetch selectable machine models (excludes "Any" and includes "GENERAL")
+        // For documents, we want all models except "Any" (which is only for user machine access)
         const response = await fetch(`${apiBaseUrl}/admin/machine_models`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         });
-        if (response.ok) {
-          const data = await response.json();
-          setAllowedMachineModels(Array.isArray(data.allowed_machine_models) ? data.allowed_machine_models : []);
+        if (!response.ok) {
+          // Handle 401 Unauthorized - clear token and redirect to login
+          if (response.status === 401) {
+            console.warn("Authentication failed - clearing token and redirecting to login");
+            localStorage.removeItem("auth_token");
+            localStorage.removeItem("user_profile");
+            setAuthToken(null);
+            window.location.href = "/login";
+            return;
+          }
+          console.warn(`Failed to fetch machine models: ${response.status}`);
+          return;
         }
+        const data = await response.json();
+        const allModels = Array.isArray(data.allowed_machine_models) ? data.allowed_machine_models : [];
+        // Filter out "Any" - it's only for user machine access, not for document machine models
+        // Keep "GENERAL" as it's a valid document machine model
+        const documentModels = allModels.filter((model: string) => model !== "Any" && model !== "any");
+        setAllowedMachineModels(documentModels);
       } catch (err) {
         console.warn("Failed to fetch allowed machine models:", err);
         // Fallback: try to get from documents response
@@ -142,14 +159,26 @@ export default function AdminDocumentsPage() {
           },
         });
         if (!response.ok) {
+          // Handle 401 Unauthorized - clear token and redirect to login
+          if (response.status === 401) {
+            console.warn("Authentication failed - clearing token and redirecting to login");
+            localStorage.removeItem("auth_token");
+            localStorage.removeItem("user_profile");
+            setAuthToken(null);
+            // Redirect to login page
+            window.location.href = "/login";
+            return;
+          }
           throw new Error(`Failed to load documents (${response.status})`);
         }
         const data = await response.json();
         setDocuments(Array.isArray(data.documents) ? data.documents : []);
         
         // Also extract allowed_machine_models from response if available
+        // Filter out "Any" as it's only for user machine access, not document machine models
         if (data.allowed_machine_models && Array.isArray(data.allowed_machine_models)) {
-          setAllowedMachineModels(data.allowed_machine_models);
+          const documentModels = data.allowed_machine_models.filter((model: string) => model !== "Any" && model !== "any");
+          setAllowedMachineModels(documentModels);
         }
       } catch (err) {
         console.error("Failed to fetch documents:", err);
@@ -168,10 +197,21 @@ export default function AdminDocumentsPage() {
         setAuthToken(token);
         fetchDocuments(token);
         fetchAllowedMachineModels(token);
+      } else {
+        // No token found - redirect to login
+        console.warn("No authentication token found - redirecting to login");
+        setError("Please log in to access the admin dashboard.");
+        // Redirect to login after a short delay to show the error
+        setTimeout(() => {
+          window.location.href = "/login";
+        }, 2000);
       }
     } catch (error) {
       console.warn("Failed to retrieve auth token:", error);
-      setError("Unable to access authentication token.");
+      setError("Unable to access authentication token. Please log in.");
+      setTimeout(() => {
+        window.location.href = "/login";
+      }, 2000);
     }
   }, [fetchDocuments, fetchAllowedMachineModels]);
 
@@ -214,7 +254,7 @@ export default function AdminDocumentsPage() {
     setUploadFile(null);
     setUploadProgress("");
     setDeleteConfirmation("");
-    setEditMachineModel("");
+    setEditMachineModel([]);
     setEditCategory("");
     setEditProductFamily("");
     setEditIsActive(true);
@@ -235,7 +275,11 @@ export default function AdminDocumentsPage() {
 
   const handleEdit = (doc: Document) => {
     setSelectedDocument(doc);
-    setEditMachineModel(doc.machine_model || "");
+    // Normalize machine_model to array (handle both string and array formats)
+    const machineModels = doc.machine_model 
+      ? (Array.isArray(doc.machine_model) ? doc.machine_model : [doc.machine_model])
+      : [];
+    setEditMachineModel(machineModels);
     setEditCategory(doc.category || "");
     setEditProductFamily(doc.product_family || "");
     setEditIsActive(doc.is_active);
@@ -332,46 +376,43 @@ export default function AdminDocumentsPage() {
     try {
       const encodedFilename = encodeURIComponent(selectedDocument.filename);
       
-      // Update machine_model via PATCH endpoint
-      if (editMachineModel !== selectedDocument.machine_model) {
-        const machineModelResponse = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}/machine_model`, {
-          method: "PATCH",
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ machine_model: editMachineModel || null }),
-        });
-        if (!machineModelResponse.ok) {
-          const detail = await machineModelResponse.json().catch(() => null);
-          throw new Error(extractApiError(detail) || "Failed to update machine model");
-        }
-      }
+      // Compare machine models (handle both array and string formats)
+      const currentMachineModels = selectedDocument.machine_model 
+        ? (Array.isArray(selectedDocument.machine_model) 
+            ? selectedDocument.machine_model 
+            : [selectedDocument.machine_model])
+        : [];
+      const modelsEqual = editMachineModel.length === currentMachineModels.length &&
+        editMachineModel.every((model, idx) => model === currentMachineModels[idx]);
       
-      // Update other metadata via POST endpoint
-      const updates: any = {};
+      // Build update body
+      const body: Record<string, unknown> = {};
+      if (!modelsEqual) {
+        body.machine_model = editMachineModel.length > 0 ? editMachineModel : null;
+      }
       if (editCategory !== (selectedDocument.category || "")) {
-        updates.category = editCategory || null;
+        body.category = editCategory || null;
       }
       if (editProductFamily !== (selectedDocument.product_family || "")) {
-        updates.product_family = editProductFamily || null;
+        body.product_family = editProductFamily || null;
       }
       if (editIsActive !== selectedDocument.is_active) {
-        updates.is_active = editIsActive;
+        body.is_active = editIsActive;
       }
       
-      if (Object.keys(updates).length > 0) {
-        const metadataResponse = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}/metadata`, {
+      // Update via metadata endpoint if any changes
+      if (Object.keys(body).length > 0) {
+        const response = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}/metadata`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify(updates),
+          body: JSON.stringify(body),
         });
-        if (!metadataResponse.ok) {
-          const detail = await metadataResponse.json().catch(() => null);
-          throw new Error(extractApiError(detail) || "Failed to update metadata");
+        if (!response.ok) {
+          const detail = await response.json().catch(() => null);
+          throw new Error(extractApiError(detail) || "Failed to update document");
         }
       }
       
@@ -548,7 +589,7 @@ export default function AdminDocumentsPage() {
                       </button>
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm">
-                      {doc.missing_machine_model || !doc.machine_model ? (
+                      {doc.missing_machine_model || !doc.machine_model || (Array.isArray(doc.machine_model) && doc.machine_model.length === 0) ? (
                         <div className="flex items-center gap-2">
                           <span className="text-red-600 dark:text-red-400 font-medium">Missing</span>
                           {doc.requires_admin_review && (
@@ -558,7 +599,11 @@ export default function AdminDocumentsPage() {
                           )}
                         </div>
                       ) : (
-                        <span className="text-muted-foreground">{doc.machine_model}</span>
+                        <span className="text-muted-foreground">
+                          {Array.isArray(doc.machine_model) 
+                            ? doc.machine_model.join(", ")
+                            : doc.machine_model}
+                        </span>
                       )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
@@ -678,29 +723,37 @@ export default function AdminDocumentsPage() {
               </div>
               <div>
                 <label className="mb-2 block text-sm font-medium">
-                  Machine Model <span className="text-red-500">*</span>
+                  Machine Model(s) <span className="text-red-500">*</span>
                 </label>
-                <select
-                  value={editMachineModel}
-                  onChange={(e) => setEditMachineModel(e.target.value)}
-                  className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-                  disabled={actionSubmitting}
-                >
-                  <option value="">None</option>
-                  {allowedMachineModels.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  If the automatic system guessed the wrong machine model, you can correct it here.
-                </p>
-                {selectedDocument.requires_admin_review && (
-                  <p className="mt-1 text-xs text-orange-600 dark:text-orange-400">
-                    ⚠️ This document requires admin review (machine model was not automatically detected).
+                <div className="space-y-2">
+                  <select
+                    multiple
+                    value={editMachineModel}
+                    onChange={(e) => {
+                      const selected = Array.from(e.target.selectedOptions, option => option.value);
+                      setEditMachineModel(selected);
+                    }}
+                    size={Math.min(allowedMachineModels.length + 1, 8)}
+                    className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                    disabled={actionSubmitting}
+                  >
+                    {allowedMachineModels.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Select one or more machine models. Hold Ctrl/Cmd to select multiple. 
+                    Select &quot;GENERAL&quot; if this document applies to all users regardless of machine.
+                    {editMachineModel.length > 0 && ` (${editMachineModel.length} selected)`}
                   </p>
-                )}
+                  {selectedDocument.requires_admin_review && (
+                    <p className="mt-1 text-xs text-orange-600 dark:text-orange-400">
+                      ⚠️ This document requires admin review (machine model was not automatically detected).
+                    </p>
+                  )}
+                </div>
               </div>
               <div>
                 <label className="mb-2 block text-sm font-medium">Category</label>
