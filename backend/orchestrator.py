@@ -213,6 +213,10 @@ class StructuredResponse:
     confidence: float
     intent: QueryIntent
     matched_machine_name: Optional[str] = None  # Machine name matched in query (if >=95% similarity)
+    token_input: Optional[int] = None  # Input tokens used
+    token_output: Optional[int] = None  # Output tokens used
+    token_total: Optional[int] = None  # Total tokens used
+    cost_usd: Optional[float] = None  # Estimated cost in USD
 
 
 class MachineNameMatcher:
@@ -1392,6 +1396,18 @@ class ResponseGenerator:
         # Build answer from context (with LLM if available, including chat history)
         answer = self._build_answer(query, context, intent, answer_generator, chat_history or [])
         
+        # Capture token usage from answer generator if available
+        token_input = None
+        token_output = None
+        token_total = None
+        cost_usd = None
+        if answer_generator and hasattr(answer_generator, '_last_token_usage') and answer_generator._last_token_usage:
+            token_usage = answer_generator._last_token_usage
+            token_input = token_usage.get('token_input')
+            token_output = token_usage.get('token_output')
+            token_total = token_usage.get('token_total')
+            cost_usd = token_usage.get('cost_usd')
+        
         # Generate reasoning
         reasoning = self._generate_reasoning(context, intent)
         
@@ -1408,7 +1424,11 @@ class ResponseGenerator:
             sources=sources,
             confidence=confidence,
             intent=intent,
-            matched_machine_name=matched_machine_name
+            matched_machine_name=matched_machine_name,
+            token_input=token_input,
+            token_output=token_output,
+            token_total=token_total,
+            cost_usd=cost_usd
         )
     
     def _build_answer(
@@ -2475,6 +2495,7 @@ class ClaudeAnswerGenerator:
         self.enable_caching = enable_caching
         self.answer_cache = {}
         self.claude_client = None
+        self._last_token_usage = None  # Store last token usage for access
         
         # Initialize Claude by default
         self._initialize_claude(api_key)
@@ -2600,12 +2621,39 @@ class ClaudeAnswerGenerator:
             
             answer = response.content[0].text
             
+            # Extract token usage from response
+            token_input = None
+            token_output = None
+            token_total = None
+            cost_usd = None
+            
+            if hasattr(response, 'usage') and response.usage:
+                token_input = getattr(response.usage, 'input_tokens', None)
+                token_output = getattr(response.usage, 'output_tokens', None)
+                if token_input is not None and token_output is not None:
+                    token_total = token_input + token_output
+                    # Estimate cost: Claude Sonnet 4 pricing (as of 2025)
+                    # Input: ~$3 per 1M tokens, Output: ~$15 per 1M tokens
+                    cost_usd = (token_input / 1_000_000 * 3.0) + (token_output / 1_000_000 * 15.0)
+            
             # Validate answer against source documents
             answer = self._validate_answer_facts(answer, documents)
             
-            # Cache the result
+            # Cache the result (without token info for cache key)
             if self.enable_caching:
                 self.answer_cache[cache_key] = answer
+            
+            # Return answer with token usage info
+            # Store token usage in a way that can be accessed later
+            # We'll attach it as metadata to the answer string (hacky but works)
+            # Actually, better to return a tuple or modify the return type
+            # For now, we'll store it in a class attribute that can be accessed
+            self._last_token_usage = {
+                'token_input': token_input,
+                'token_output': token_output,
+                'token_total': token_total,
+                'cost_usd': cost_usd
+            }
             
             return answer
             

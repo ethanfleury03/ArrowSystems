@@ -74,46 +74,41 @@ backend entrypoints now run as modules (for example `python -m backend.api`).
 
 ### Web Interface (Recommended)
 
-```bash
-# Windows
-start.bat
+The application uses a **Next.js frontend** with a **FastAPI backend**.
 
-# Linux/Mac
-chmod +x start.sh
-./start.sh
+#### Using Docker Compose (Easiest)
+
+```bash
+# Start both frontend and backend
+docker-compose up
 ```
 
-Then open http://localhost:8501 and login with:
+Then open http://localhost:3000 and login with:
 - Username: `admin`
 - Password: `admin123`
 
-### 🎭 UI Development Mode (No GPU Required)
+#### Manual Setup
 
-For UI development without needing a GPU or vector index:
-
+**Backend (FastAPI):**
 ```bash
-# Windows
-start_mock.bat
+# Install dependencies
+pip install -r backend/requirements.txt
 
-# Linux/Mac
-chmod +x start_mock.sh
-./start_mock.sh
+# Start backend API
+python -m backend.api --host 0.0.0.0 --port 8000
+
+# Or use the startup script
+./scripts/start_api.sh
 ```
 
-**What is Mock Mode?**
-- ✅ Instant startup (no model downloads)
-- ✅ Fast responses (~0.5 seconds)
-- ✅ No GPU or vector index needed
-- ✅ Perfect for UI development and testing
-- ⚠️ Returns simulated responses (not real knowledge base)
+**Frontend (Next.js):**
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-**When to use:**
-- Developing UI features
-- Testing layouts and styling
-- Working on frontend without backend access
-- Rapid iteration on user experience
-
-**Switch to real mode:** Set `USE_MOCK_RAG=false` or use `start.bat`/`start.sh`
+Then open http://localhost:3000
 
 ### Command Line Interface
 
@@ -166,7 +161,12 @@ cd rag_app.py
 git pull
 
 # 3. Run app (works immediately!)
-streamlit run app.py
+# Using Docker Compose (recommended)
+docker-compose up
+
+# Or manually:
+# Backend: python -m backend.api --host 0.0.0.0 --port 8000
+# Frontend: cd frontend && npm install && npm run dev
 ```
 
 ### 💡 Benefits:
