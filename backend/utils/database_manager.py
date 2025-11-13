@@ -235,6 +235,11 @@ class DatabaseManager:
         confidence: Optional[float] = None,
         response_time_ms: Optional[int] = None,
         session_id: Optional[str] = None,
+        machine_name: Optional[str] = None,
+        token_input: Optional[int] = None,
+        token_output: Optional[int] = None,
+        token_total: Optional[int] = None,
+        cost_usd: Optional[float] = None,
         **kwargs: Any,
     ) -> Optional[str]:
         def _save() -> Optional[str]:
@@ -249,6 +254,15 @@ class DatabaseManager:
                         "sources": sources or [],
                         **{k: v for k, v in kwargs.items() if v is not None},
                     }
+                    
+                    # Serialize sources to JSON string for analytics
+                    import json
+                    sources_json_str = None
+                    if sources:
+                        try:
+                            sources_json_str = json.dumps(sources)
+                        except Exception:
+                            pass
 
                     record = QueryHistory(
                         user_id=user_id,
@@ -256,6 +270,12 @@ class DatabaseManager:
                         answer_text=answer_text,
                         response_time_ms=response_time_ms,
                         metadata_json=metadata,
+                        machine_name=machine_name,
+                        token_input=token_input,
+                        token_output=token_output,
+                        token_total=token_total,
+                        cost_usd=cost_usd,
+                        sources_json=sources_json_str,
                     )
                     session.add(record)
                     session.commit()

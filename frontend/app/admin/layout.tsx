@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import type { ReactNode } from "react";
-import { Menu, Users, FileText, Activity, ArrowLeft, X } from "lucide-react";
+import { Menu, Users, FileText, Activity, ArrowLeft, X, BarChart3 } from "lucide-react";
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -22,6 +22,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "User Management", href: "/admin/users", icon: Users },
   { label: "Documents", href: "/admin/documents", icon: FileText },
   { label: "Logs", href: "/admin/logs", icon: Activity },
+  { label: "Analytics", href: "/admin/analytics", icon: BarChart3 },
 ];
 
 export default function AdminLayout({ children }: AdminLayoutProps) {

@@ -35,16 +35,89 @@ from .utils.saved_response_manager import SavedResponseManager
 from .security import create_access_token
 from .routes.admin_routes import create_admin_router
 
+
+# ============================================================================
+# Async Wrapper for Blocking RAG Operations
+# ============================================================================
+
+async def run_blocking_rag_operation(func, *args, **kwargs):
+    """
+    Wrapper to run blocking RAG operations in a thread pool.
+    
+    This allows blocking synchronous RAG operations (like embedding inference,
+    vector search, LLM API calls) to run without blocking the async event loop,
+    enabling true concurrency with multiple workers.
+    
+    Args:
+        func: The blocking function to execute
+        *args: Positional arguments to pass to the function
+        **kwargs: Keyword arguments to pass to the function
+    
+    Returns:
+        The result of the blocking function call
+    """
+    try:
+        # Use asyncio.to_thread() (Python 3.9+) to run blocking code in thread pool
+        result = await asyncio.to_thread(func, *args, **kwargs)
+        return result
+    except Exception as e:
+        logger.error(f"Error in blocking RAG operation: {e}", exc_info=True)
+        raise
+
 # Configure logging
+# Determine log file path - try multiple locations
+log_file_path = None
+possible_log_paths = [
+    'api.log',  # Current directory
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'api.log'),  # Project root
+    os.path.join(os.getcwd(), 'api.log'),  # Current working directory
+    '/app/api.log',  # Docker
+    '/workspace/api.log',  # RunPod
+]
+
+for path in possible_log_paths:
+    try:
+        # Try to create/write to the file to test if it's writable
+        log_dir = os.path.dirname(path) if os.path.dirname(path) else '.'
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        # Test write
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write('')  # Just test if we can write
+        log_file_path = path
+        break
+    except (OSError, PermissionError):
+        continue
+
+# If no path worked, use current directory
+if not log_file_path:
+    log_file_path = 'api.log'
+
+# Store log file path in module variable for use in main()
+_API_LOG_FILE_PATH = os.path.abspath(log_file_path)
+
+# Configure log rotation for 24/7 operation
+# Max file size: 10MB, keep 5 backup files (total ~50MB of logs)
+from logging.handlers import RotatingFileHandler
+
+max_bytes = 10 * 1024 * 1024  # 10 MB
+backup_count = 5
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('api.log'),
+        RotatingFileHandler(
+            log_file_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding='utf-8'
+        ),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+logger.info(f"Logging initialized with rotation (max {max_bytes // (1024*1024)}MB, {backup_count} backups). Log file: {_API_LOG_FILE_PATH}")
 
 # Global variables for RAG pipeline and database
 rag_pipeline = None
@@ -320,6 +393,21 @@ async def lifespan(app: FastAPI):
     saved_response_manager = SavedResponseManager(db_manager)
     await db_manager.seed_default_users()
     logger.info("✅ SQLite database initialized at %s", DEFAULT_DB_PATH)
+    
+    # Check for multi-worker setup and warn about SQLite limitations
+    gunicorn_workers = os.getenv("GUNICORN_WORKERS", "1")
+    try:
+        worker_count = int(gunicorn_workers)
+        if worker_count > 1:
+            logger.warning("=" * 60)
+            logger.warning("⚠️  SQLITE MULTI-WORKER WARNING")
+            logger.warning("=" * 60)
+            logger.warning("SQLite has concurrency limitations with multiple workers.")
+            logger.warning("Concurrent writes may cause 'database is locked' errors.")
+            logger.warning("For production with multiple workers, consider migrating to PostgreSQL.")
+            logger.warning("=" * 60)
+    except (ValueError, TypeError):
+        pass  # Ignore if GUNICORN_WORKERS is not a valid integer
     
     # Initialize RAG pipeline
     try:
@@ -715,7 +803,9 @@ async def query_knowledge_base(request: QueryRequest):
         
         # Execute RAG query with chat history
         # Note: Retrieval uses only current query, but LLM gets chat history
-        response = rag_pipeline.query(
+        # Wrap blocking RAG operation in thread pool for concurrency
+        response = await run_blocking_rag_operation(
+            rag_pipeline.query,
             query=request.query,
             top_k=request.top_k,
             alpha=request.alpha,
@@ -767,6 +857,15 @@ async def query_knowledge_base(request: QueryRequest):
 
         if db_manager:
             try:
+                # Extract machine name from matched_machine_name if available
+                machine_name = response.matched_machine_name
+                
+                # Extract token usage and cost from response
+                token_input = response.token_input
+                token_output = response.token_output
+                token_total = response.token_total
+                cost_usd = response.cost_usd
+                
                 await db_manager.save_query(
                     user=user_id,
                     query_text=request.query,
@@ -776,7 +875,12 @@ async def query_knowledge_base(request: QueryRequest):
                     sources=[s['name'] for s in response.sources],
                     confidence=response.confidence,
                     response_time_ms=response_time_ms,
-                    session_id=session_id
+                    session_id=session_id,
+                    machine_name=machine_name,
+                    token_input=token_input,
+                    token_output=token_output,
+                    token_total=token_total,
+                    cost_usd=cost_usd
                 )
                 logger.info("Query saved to database")
             except Exception as e:
@@ -1101,10 +1205,33 @@ async def serve_document(filename: str):
             if not filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
                 raise HTTPException(status_code=400, detail="Invalid file type")
             
-            return FileResponse(
-                file_path,
-                media_type="application/pdf" if filename.lower().endswith('.pdf') else "application/octet-stream",
-                filename=filename
+            from fastapi.responses import Response
+            import mimetypes
+            
+            # Determine media type
+            if filename.lower().endswith('.pdf'):
+                media_type = "application/pdf"
+            elif filename.lower().endswith('.docx'):
+                media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif filename.lower().endswith(('.md', '.markdown')):
+                media_type = "text/markdown"
+            else:
+                media_type, _ = mimetypes.guess_type(filename)
+                if not media_type:
+                    media_type = "application/octet-stream"
+            
+            # Read file content
+            with open(file_path, "rb") as f:
+                content = f.read()
+            
+            # Return response with inline content-disposition header
+            return Response(
+                content=content,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f'inline; filename="{filename}"',
+                    "Content-Length": str(len(content))
+                }
             )
     
     raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
@@ -1175,17 +1302,17 @@ async def get_all_documents():
         
         # Get document IDs from ALL sources (corpus_nodes, docstore, AND filesystem)
         # Combine all sources to ensure we get all documents
-        doc_ids = []
-        docstore = None
         all_filenames = set(seen_filenames)  # Start with corpus_nodes filenames
         
-        # Source 1: Get from docstore
+        # Build a filename -> doc_id map from docstore for O(1) lookups (optimization)
+        filename_to_doc_id = {}
+        docstore = None
         if rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'docstore') and rag_pipeline.orchestrator.index.docstore:
             docstore = rag_pipeline.orchestrator.index.docstore
             docstore_ids = list(docstore.docs.keys())
             logger.info(f"Found {len(docstore_ids)} documents in docstore")
             
-            # Extract filenames from docstore documents
+            # Build filename -> doc_id map in one pass
             for doc_id in docstore_ids[:1000]:  # Limit to prevent memory issues
                 try:
                     doc = docstore.get_document(doc_id)
@@ -1193,6 +1320,8 @@ async def get_all_documents():
                         filename = doc.metadata.get('file_name', doc_id)
                         if filename and filename != doc_id:
                             all_filenames.add(filename)
+                            if filename not in filename_to_doc_id:  # Keep first match
+                                filename_to_doc_id[filename] = doc_id
                 except:
                     pass
         
@@ -1220,22 +1349,16 @@ async def get_all_documents():
             logger.warning("No documents found in corpus_nodes, docstore, or filesystem")
             return {"documents": [], "total": 0}
         
-        # Build document list
+        # Build document list (optimized - no nested loops)
         for filename in doc_ids[:1000]:  # Limit to first 1000
             try:
-                # Try to get document from docstore if available
+                # Get document from docstore using O(1) lookup instead of nested loop
                 doc = None
-                if docstore:
-                    # Try to find doc_id that matches this filename
-                    for doc_id in docstore.docs.keys():
-                        try:
-                            temp_doc = docstore.get_document(doc_id)
-                            if hasattr(temp_doc, 'metadata') and temp_doc.metadata:
-                                if temp_doc.metadata.get('file_name') == filename:
-                                    doc = temp_doc
-                                    break
-                        except:
-                            continue
+                if docstore and filename in filename_to_doc_id:
+                    try:
+                        doc = docstore.get_document(filename_to_doc_id[filename])
+                    except:
+                        pass
                 
                 # Get file path and size
                 file_path = os.path.join("data", filename)
@@ -1273,7 +1396,7 @@ async def get_all_documents():
                     "product_family": doc_metadata.get("product_family")
                 })
             except Exception as e:
-                logger.debug(f"Error processing document {doc_id}: {e}")
+                logger.debug(f"Error processing document {filename}: {e}")
                 continue
         
         # Remove duplicates by filename
@@ -1580,42 +1703,104 @@ async def delete_document(filename: str):
         delete_document_metadata(filename)
         
         # Remove from vector store and docstore
-        # Note: LlamaIndex doesn't support direct deletion, so we need to rebuild
-        # For now, mark as deleted and filter in retrieval
-        # In production, you'd want to trigger a re-index
+        deleted_nodes = 0
+        deleted_ref_docs = 0
+        storage_path = None
         
-        # Reload RAG pipeline
-        if rag_pipeline:
+        # Determine storage path first
+        possible_paths = [
+            "latest_model",
+            "../latest_model",
+            "/workspace/latest_model",
+            "/workspace/ArrowSystems/latest_model",
+            "/workspace/storage",
+            "./storage"
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                storage_path = path
+                break
+        
+        if rag_pipeline and rag_pipeline.orchestrator and rag_pipeline.orchestrator.index:
             try:
-                # Determine storage path
-                possible_paths = [
-                    "latest_model",
-                    "../latest_model",
-                    "/workspace/latest_model",
-                    "/workspace/ArrowSystems/latest_model",
-                    "/workspace/storage",
-                    "./storage"
-                ]
+                index = rag_pipeline.orchestrator.index
                 
-                storage_path = None
-                for path in possible_paths:
-                    if os.path.exists(path):
-                        storage_path = path
-                        break
+                # Find all nodes with this filename
+                nodes_to_delete = []
+                ref_doc_ids_to_delete = set()
                 
-                if storage_path:
-                    logger.info("Reloading RAG pipeline after document deletion...")
-                    rag_pipeline.orchestrator.load_index(storage_dir=storage_path)
-                    logger.info("✅ RAG pipeline reloaded")
+                # Method 1: Find nodes via retriever corpus_nodes (if available)
+                if hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
+                    retriever = rag_pipeline.orchestrator.retriever
+                    if hasattr(retriever, 'corpus_nodes') and retriever.corpus_nodes:
+                        for node_wrapper in retriever.corpus_nodes:
+                            node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+                            if hasattr(node, 'metadata') and node.metadata:
+                                if node.metadata.get('file_name') == filename:
+                                    nodes_to_delete.append(node)
+                                    # Track ref_doc_id if available
+                                    if hasattr(node, 'ref_doc_id') and node.ref_doc_id:
+                                        ref_doc_ids_to_delete.add(node.ref_doc_id)
+                
+                # Method 2: Find nodes via docstore
+                if hasattr(index, 'docstore') and index.docstore:
+                    for doc_id in list(index.docstore.docs.keys()):
+                        try:
+                            doc = index.docstore.get_document(doc_id)
+                            if hasattr(doc, 'metadata') and doc.metadata:
+                                if doc.metadata.get('file_name') == filename:
+                                    ref_doc_ids_to_delete.add(doc_id)
+                        except:
+                            continue
+                
+                # Delete nodes from index
+                for node in nodes_to_delete:
+                    try:
+                        if hasattr(node, 'node_id'):
+                            index.delete(node.node_id)
+                            deleted_nodes += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to delete node {getattr(node, 'node_id', 'unknown')}: {e}")
+                
+                # Delete reference documents (this removes associated nodes)
+                for ref_doc_id in ref_doc_ids_to_delete:
+                    try:
+                        index.delete_ref_doc(ref_doc_id, delete_from_docstore=True)
+                        deleted_ref_docs += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to delete ref_doc {ref_doc_id}: {e}")
+                
+                # Persist the index to save deletions
+                if (deleted_nodes > 0 or deleted_ref_docs > 0) and storage_path:
+                    try:
+                        logger.info(f"Persisting index after deleting {deleted_nodes} nodes and {deleted_ref_docs} ref_docs...")
+                        index.storage_context.persist(persist_dir=storage_path)
+                        logger.info("✅ Index persisted with deletions")
+                    except Exception as e:
+                        logger.warning(f"Failed to persist index: {e}")
+                    
+            except Exception as e:
+                logger.error(f"Error deleting nodes from index: {e}", exc_info=True)
+                # Continue with file deletion even if index deletion fails
+        
+        # Reload RAG pipeline to refresh in-memory state
+        if storage_path and rag_pipeline:
+            try:
+                logger.info("Reloading RAG pipeline after document deletion...")
+                rag_pipeline.orchestrator.load_index(storage_dir=storage_path)
+                logger.info("✅ RAG pipeline reloaded")
             except Exception as e:
                 logger.warning(f"Failed to reload RAG pipeline: {e}")
         
-        logger.info(f"Deleted document: {filename} (files: {deleted_files})")
+        logger.info(f"Deleted document: {filename} (files: {deleted_files}, nodes: {deleted_nodes}, ref_docs: {deleted_ref_docs})")
         
         return {
             "status": "success",
-            "message": f"Document {filename} deleted completely. RAG pipeline reloaded.",
-            "deleted_files": deleted_files
+            "message": f"Document {filename} deleted completely. Removed {deleted_nodes} nodes and {deleted_ref_docs} reference documents from index.",
+            "deleted_files": deleted_files,
+            "deleted_nodes": deleted_nodes,
+            "deleted_ref_docs": deleted_ref_docs
         }
         
     except HTTPException:
@@ -2025,8 +2210,9 @@ async def search_sandbox(request: SearchSandboxRequest):
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
     try:
-        # Execute search
-        response = rag_pipeline.query(
+        # Execute search - wrap blocking RAG operation in thread pool
+        response = await run_blocking_rag_operation(
+            rag_pipeline.query,
             query=request.query,
             top_k=request.top_k,
             alpha=request.alpha
@@ -2070,21 +2256,149 @@ async def search_sandbox(request: SearchSandboxRequest):
 def main():
     """Main function to run the FastAPI server."""
     import argparse
+    import sys
     
     parser = argparse.ArgumentParser(description="DuraFlex Technical Assistant API Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8501, help="Port to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+    parser.add_argument("--dev", action="store_true", help="Run in development mode with Uvicorn (single worker)")
     
     args = parser.parse_args()
     
-    uvicorn.run(
-        "backend.api:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level="info"
-    )
+    # Configure uvicorn logging to also write to file
+    # Use the log file path that was determined during logging setup
+    log_file_path = _API_LOG_FILE_PATH
+    
+    # Create a custom log config for uvicorn that writes to both file and console
+    # Uvicorn access logs use a special format, so we use the default access format
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            },
+            "access": {
+                # Uvicorn's default access log format
+                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+            "file": {
+                "formatter": "default",
+                "class": "logging.handlers.RotatingFileHandler",
+                "filename": log_file_path,
+                "maxBytes": 10 * 1024 * 1024,  # 10 MB
+                "backupCount": 5,
+                "encoding": "utf-8",
+            },
+            "access_file": {
+                "formatter": "access",
+                "class": "logging.handlers.RotatingFileHandler",
+                "filename": log_file_path,
+                "maxBytes": 10 * 1024 * 1024,  # 10 MB
+                "backupCount": 5,
+                "encoding": "utf-8",
+            },
+        },
+        "loggers": {
+            "uvicorn": {
+                "handlers": ["default", "file"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            "uvicorn.error": {
+                "handlers": ["default", "file"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            "uvicorn.access": {
+                "handlers": ["default", "access_file"],
+                "level": "INFO",
+                "propagate": False,
+            },
+        },
+    }
+    
+    # Also redirect stdout and stderr to the log file (in addition to console)
+    class TeeOutput:
+        """Tee output to both file and original stream."""
+        def __init__(self, original_stream, log_file):
+            self.original_stream = original_stream
+            self.log_file = log_file
+            
+        def write(self, text):
+            self.original_stream.write(text)
+            try:
+                self.log_file.write(text)
+                self.log_file.flush()
+            except:
+                pass
+                
+        def flush(self):
+            self.original_stream.flush()
+            try:
+                self.log_file.flush()
+            except:
+                pass
+    
+    # Open log file in append mode for tee
+    try:
+        log_file_handle = open(log_file_path, 'a', encoding='utf-8')
+        # Tee stdout and stderr to log file
+        sys.stdout = TeeOutput(sys.stdout, log_file_handle)
+        sys.stderr = TeeOutput(sys.stderr, log_file_handle)
+        logger.info(f"Teeing stdout/stderr to log file: {os.path.abspath(log_file_path)}")
+    except Exception as e:
+        logger.warning(f"Could not tee stdout/stderr to log file: {e}")
+    
+    # Development mode: Use Uvicorn directly (single worker, auto-reload)
+    if args.dev or args.reload:
+        if not args.dev:
+            logger.warning("⚠️  Running with --reload flag. For production, use Gunicorn with multiple workers.")
+        logger.info("🔧 Running in development mode with Uvicorn (single worker)")
+        uvicorn.run(
+            "backend.api:app",
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+            log_level="info",
+            log_config=log_config,
+        )
+    else:
+        # Production mode: Print instructions to use Gunicorn
+        logger.warning("=" * 60)
+        logger.warning("⚠️  PRODUCTION MODE DETECTED")
+        logger.warning("=" * 60)
+        logger.warning("For production deployment, use Gunicorn with multiple workers:")
+        logger.warning("")
+        logger.warning("  gunicorn backend.api:app \\")
+        logger.warning("      --workers 3 \\")
+        logger.warning("      --worker-class uvicorn.workers.UvicornWorker \\")
+        logger.warning("      --bind 0.0.0.0:8000 \\")
+        logger.warning("      --timeout 300 \\")
+        logger.warning("      --keep-alive 5 \\")
+        logger.warning("      --max-requests 1000 \\")
+        logger.warning("      --max-requests-jitter 100")
+        logger.warning("")
+        logger.warning("For development, use: python -m backend.api --dev --reload")
+        logger.warning("=" * 60)
+        logger.warning("")
+        logger.warning("Starting with single-worker Uvicorn (not recommended for production)...")
+        uvicorn.run(
+            "backend.api:app",
+            host=args.host,
+            port=args.port,
+            reload=False,
+            log_level="info",
+            log_config=log_config,
+        )
 
 
 if __name__ == "__main__":

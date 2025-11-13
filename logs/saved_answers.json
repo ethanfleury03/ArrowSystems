@@ -48,5 +48,21 @@
       "EZCut 350R Manual (1).docx.pdf"
     ],
     "feedback_type": "negative"
+  },
+  {
+    "id": "20251113192707243989",
+    "timestamp": "2025-11-13T19:27:07.244013",
+    "user": "api_user",
+    "query": "Duraflex System Requirements?",
+    "answer": "Definition: DuraFlex Ink: Memjet aqueous pigment ink used with DuraFlex Print Engine\n\n# DuraFlex System Requirements\n\nBased on the provided documentation, the DuraFlex system has specific hardware and software requirements that vary depending on performance needs and application requirements.\n\n## Standard Configuration Requirements\n\nThe DuraFlex system requires the following minimum specifications [2]:\n\n**Processor:**\n- 3.40 GHz 16-Core Processor (32 threads)\n- 4.90 GHz Max Turbo Frequency\n- Closed Loop Water Cooler [2]\n\n**Memory and Storage:**\n- 32GB DDR4-3600 MHz Memory\n- 1 x Samsung 500GB 970 EVO Plus NVMe SSD\n- 1 x 960GB Enterprise Solid State Drive [2]\n\n**Network Components:**\n- 1 x Intel 2 Port \u2013 Ethernet Converged Network Adapter X710-DA2 (X710DA2BLK)\n- 1 x Intel Ethernet SFP+SR Optic (E10GSFPSR) [2]\n\n**Graphics and Operating System:**\n- GeForce GT710 Graphic Card\n- Microsoft Windows 11 Pro 64 bit [2]\n\n## Alternative Configuration\n\nAn alternative configuration is also documented with the following specifications [3][4]:\n\n**Processor:**\n- 2.10 GHz Base/4.90 Max Turbo\n- 12 Core/20 Thread processor [3]\n\n**Memory and Storage:**\n- 32GB DDR5 3200MHz Memory\n- One (1) 500GB Samsung 980 PRO NVMe [4]\n\n**Network and Graphics:**\n- One (1) Intel Gigabit CT Desktop Adapter\n- One (1) Intel 2 Port \u2013 10Gbase-T Ethernet Converged Network Adapter\n- One (1) GeForce GT 730 Graphic Card\n- One (1) Microsoft Windows 11 Pro 64 bit [4]\n\n## High Performance Configuration\n\nFor enhanced performance requirements, particularly for suboptimal input files, 2-wide or duplex applications, or POD systems requiring real-time page requests in any order, a higher performance configuration is recommended [4]:\n\n**Processor:**\n- AMD Ryzen 9 5950X CPU [4]\n\n## System Integration\n\nThe DuraFlex system integrates with various mechanical components and control systems, including compatibility with Kirrawee/Ultron mechanical control systems [5]. The system also supports command line interface operations for component control including circulation pumps, valves, lifter motors, and maintenance servo motors [6][8][9].\n\n## Summary\n\nThe DuraFlex system requirements encompass multiple configuration options ranging from standard to high-performance setups, all requiring Windows 11 Pro 64-bit operating system, substantial memory (32GB), NVMe SSD storage, and specialized network adapters. The specific configuration choice depends on the intended application requirements and performance expectations [2][4].",
+    "is_helpful": true,
+    "confidence": 0.9967857142857144,
+    "intent_type": "lookup",
+    "sources": [
+      "DuraFlex TB0002 Printhead Identification and System Compatibility 20Nov2020.pdf",
+      "DuraFlex System Requirements _ Xitron Support.pdf",
+      "DuraFlex_Command Line Interface-Supplimental_V1.0_29April2025.pdf"
+    ],
+    "feedback_type": "positive"
   }
 ]

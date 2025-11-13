@@ -37,8 +37,21 @@ echo ""
 # Run with appropriate settings based on environment
 if [ "$ENVIRONMENT" = "development" ]; then
     echo "🔧 Running in development mode with auto-reload..."
-    python -m backend.api --host 0.0.0.0 --port 8000 --reload
+    python -m backend.api --host 0.0.0.0 --port 8000 --dev --reload
 else
-    echo "🏭 Running in production mode..."
-    python -m backend.api --host 0.0.0.0 --port 8000 --workers 2
+    echo "🏭 Running in production mode with Gunicorn (multi-worker)..."
+    WORKERS=${GUNICORN_WORKERS:-3}
+    TIMEOUT=${GUNICORN_TIMEOUT:-300}
+    MAX_REQUESTS=${GUNICORN_MAX_REQUESTS:-1000}
+    
+    gunicorn backend.api:app \
+        --workers $WORKERS \
+        --worker-class uvicorn.workers.UvicornWorker \
+        --bind 0.0.0.0:8000 \
+        --timeout $TIMEOUT \
+        --keep-alive 5 \
+        --max-requests $MAX_REQUESTS \
+        --max-requests-jitter 100 \
+        --access-logfile - \
+        --error-logfile -
 fi
