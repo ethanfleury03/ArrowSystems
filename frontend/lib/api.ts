@@ -9,6 +9,34 @@ const apiClient = axios.create({
   withCredentials: true,
 });
 
+// Add interceptor to include JWT token in all requests
+apiClient.interceptors.request.use(
+  (config) => {
+    // Get JWT token from localStorage if available (client-side only)
+    if (typeof window !== 'undefined') {
+      const authToken = localStorage.getItem('auth_token');
+      if (authToken && config.headers) {
+        // Determine if calling Next.js API route or backend directly
+        const baseURL = config.baseURL || '';
+        const isApiRoute = baseURL.startsWith('/') || baseURL.includes('/api') || 
+                          (typeof config.url === 'string' && config.url.startsWith('/api'));
+        
+        if (isApiRoute) {
+          // If calling Next.js API route, send custom header
+          config.headers['X-Auth-Token'] = authToken;
+        } else {
+          // If calling backend directly, send Authorization header
+          config.headers['Authorization'] = `Bearer ${authToken}`;
+        }
+      }
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
 export interface SourceInfo {
   id: string;
   name: string;
@@ -54,6 +82,7 @@ export interface QueryParams {
 
 export async function sendQuery(query: string, params?: QueryParams): Promise<QueryResponse> {
   try {
+    // JWT token is automatically added by the axios interceptor
     const response = await apiClient.post<QueryResponse>('/query', {
       query,
       top_k: params?.top_k ?? 10,

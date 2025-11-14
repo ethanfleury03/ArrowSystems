@@ -1,0 +1,515 @@
+{
+  "print_quality_artefacts_reference_guide.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "GENERAL"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "PC Configuration.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "GENERAL"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "OperationManualEFSmallSeries_en.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "GENERAL"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "Hydration Control.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "GENERAL"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "EZCut 350R Manual (1).docx.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "EZCut 350R"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "EZCut 330_How to set tension.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "EZCut 330"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "EZCut 330_How to make the cutting  file.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "EZCut 330"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "EZCut 330 User Manual Ver.202106 (1).pdf": {
+    "is_active": true,
+    "machine_model": [
+      "EZCut 330"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "EZCut 330 Troubleshooting.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "EZCut 330"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "EF-G3-B Specification sheet  .pdf": {
+    "is_active": true,
+    "machine_model": [
+      "GENERAL"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex_Command Line Interface-Supplimental_V1.0_29April2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex_MagV2 transition Overview_30Jan2025_R1.0.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Troubleshooting Guide V4.05_30May2022.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex TB0011 PH Hydration Settings 01Nov2022.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex TB0008 WIMM Alternate Connection 22Dec2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex TB0007 Inline Degasser Installation 07Dec2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex TB0002 Printhead Identification and System Compatibility 20Nov2020.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex System Requirements _ Xitron Support.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Spare Parts List V1.03_17April2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Software Release Notes R5.3.3 V1.01_26Aug2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Software Release Notes R5.2.2 V1.01_29Mar2022.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Software Release Notes R5.0.2 V1.00_20Aug2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Software Release Notes R4.2.3 V1.00_30Apr2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Software Databook and Design Guide R3.1.1_V1.00_09Jun2020.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Service and Repair Guide V2.00_12May2023.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Printhead Storage and Shipping Guide V1.00_01Nov2022 (3).pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Printhead Cradle Repair Guide_V1.1_03Oct2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Operations Guide V4.06_21Sep2022.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Mechanical and Fluidics Databook and Design Guide V4.02_15Jul2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Job Submission Library Guide V1.01_30Apr2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex JIT Printing Guide V1.00_24May24.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Installation and Commissioning Guide V5.01_06Apr2023.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Electrical Databook and Design Guide V4.03_02Aug2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Demo GUI User Guide V4.01_03Jun2021.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Dehydration Management Summary_R1.0.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex Declog Options Summary_R1.0.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraFlex - Service and Support_PPU Procedure - V1.0.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraCore Operating and Troubleshooting 01May2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "DuraCore"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraCore 1x1 Print Engine Installation Guide_v2.0_18Aug2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "DuraCore"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraBolt Installation Guide_v6.0_18Aug2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "DuraBolt"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "07.01_D-Flex_Alternate Temperature Regulation Configuration_V1.2_04Oct2024.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DuraBolt DuraCore Software Release Notes R3.3.0_V1.01_05Sep2025.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "DuraBolt",
+      "DuraCore"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "Dura-Printer MCS2.0 Setup and Installation Guide V1.00_21Dec2022.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex",
+      "DuraLink",
+      "DuraBolt"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "Digital_die_cutter_VR350_User_Guide[1].pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Digital Die Cutter VR350"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "Connecting to a DuraFlex printer.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "Arrow Any-002 Manual.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "ANYTRON Any-002"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "ANYJET User Guide V1.1.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Anytron AnyJet"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "anyCUTIII User Manual_ver1.1_ENG_Ana (2).pdf": {
+    "is_active": true,
+    "machine_model": [
+      "anyCutIII"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "anyCUTII User Manual_ver1.0_ENG (1).pdf": {
+    "is_active": true,
+    "machine_model": [
+      "anyCutII"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "anycut_user manual_eng_20150526.docx": {
+    "is_active": true,
+    "machine_model": [
+      "Anycut"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "2800 Series Mini Laser Pro User Manual Draft.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "2800 Series Mini Laser Pro"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  }
+}

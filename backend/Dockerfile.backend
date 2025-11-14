@@ -152,7 +152,14 @@ if [ "$BUILD_ENV" = "development" ]; then
     exec python -m backend.api --host 0.0.0.0 --port 8000 --dev --reload
 else
     # Production: Use Gunicorn with multiple workers
-    WORKERS=${GUNICORN_WORKERS:-3}
+    # Use 1 worker for dev environment to reduce log duplication, 3 for production
+    ENV_TYPE=${ENV:-${NODE_ENV:-production}}
+    if [ "$ENV_TYPE" = "dev" ] || [ "$ENV_TYPE" = "development" ]; then
+        DEFAULT_WORKERS=1
+    else
+        DEFAULT_WORKERS=3
+    fi
+    WORKERS=${GUNICORN_WORKERS:-$DEFAULT_WORKERS}
     TIMEOUT=${GUNICORN_TIMEOUT:-300}
     MAX_REQUESTS=${GUNICORN_MAX_REQUESTS:-1000}
     
