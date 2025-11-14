@@ -4,17 +4,22 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 import json
 import re
+import sys
 
 import jwt
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-from sqlalchemy import select, func, desc, and_, or_, case
+from sqlalchemy import select, func, desc, and_, or_, case, text, inspect
 from sqlalchemy.orm import Session
 
 from ..security import decode_access_token
 from ..utils.database_manager import DatabaseManager
-from ..utils.db import SessionLocal, QueryHistory, User
+from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, run_sync
+from ..utils.audit_log import audit_log
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class AdminUserResponse(BaseModel):
@@ -115,8 +120,9 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
     @router.post("/create_user", response_model=AdminUserResponse, status_code=status.HTTP_201_CREATED)
     async def create_user(
         payload: AdminUserCreateRequest = Body(...),
-        _: Dict[str, str] = Depends(get_current_admin),
+        admin: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
     ):
         """
         Create a new user (admin-only).
@@ -182,14 +188,31 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             contact_phone=payload.contact_phone,
             machine_models=machine_models if role_upper == "CUSTOMER" else None,  # Only set for customers
         )
+        
+        # Audit log user creation
+        await audit_log(
+            "admin_created_user",
+            level="info",
+            user_id=admin.get("email"),
+            role=admin.get("role"),
+            metadata={
+                "created_user_email": payload.email,
+                "created_user_role": payload.role,
+                "created_user_id": str(created.get("id")),
+                "machine_models": machine_models if role_upper == "CUSTOMER" else None,
+            },
+            request=http_request,
+        )
+        
         return created
 
     @router.put("/edit_user/{user_id}", response_model=AdminUserResponse)
     async def edit_user(
         user_id: int,
         payload: AdminUserUpdateRequest = Body(...),
-        _: Dict[str, str] = Depends(get_current_admin),
+        admin: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
     ):
         """
         Update user (admin-only).
@@ -269,6 +292,10 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 # Customer - keep existing machine_models (don't update)
                 update_machine_models = None
             
+            # Get user before update for audit log
+            user_before = await manager.get_user_by_id(user_id)
+            user_before_machines = user_before.get("machine_models", []) if user_before else []
+            
             updated = await manager.update_user(
                 user_id,
                 email=payload.email,
@@ -280,6 +307,27 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 contact_phone=payload.contact_phone,
                 machine_models=update_machine_models,
             )
+            
+            # Audit log user update
+            machines_changed = update_machine_models is not None and update_machine_models != user_before_machines
+            role_changed = payload.role and payload.role.upper() != (user_before.get("role", "") if user_before else "").upper()
+            
+            await audit_log(
+                "admin_updated_user",
+                level="info",
+                user_id=admin.get("email"),
+                role=admin.get("role"),
+                metadata={
+                    "updated_user_id": str(user_id),
+                    "updated_user_email": updated.get("email"),
+                    "role_changed": role_changed,
+                    "machines_changed": machines_changed,
+                    "old_machines": user_before_machines,
+                    "new_machines": update_machine_models if machines_changed else None,
+                },
+                request=http_request,
+            )
+            
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
         return updated
@@ -287,358 +335,38 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
     @router.delete("/delete_user/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_user(
         user_id: int,
-        _: Dict[str, str] = Depends(get_current_admin),
+        admin: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
     ):
+        # Get user before deletion for audit log
+        user_to_delete = await manager.get_user_by_id(user_id)
+        if not user_to_delete:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        
         deleted = await manager.delete_user(user_id)
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        
+        # Audit log user deletion
+        await audit_log(
+            "admin_deleted_user",
+            level="info",
+            user_id=admin.get("email"),
+            role=admin.get("role"),
+            metadata={
+                "deleted_user_id": str(user_id),
+                "deleted_user_email": user_to_delete.get("email"),
+                "deleted_user_role": user_to_delete.get("role"),
+            },
+            request=http_request,
+        )
+        
         return None
 
-    @router.post("/logs/test")
-    async def test_logging(
-        _: Dict[str, str] = Depends(get_current_admin),
-    ):
-        """
-        Test endpoint to generate a test log entry.
-        This helps verify that logging is working correctly.
-        """
-        import logging
-        test_logger = logging.getLogger("test_logger")
-        
-        test_logger.info("TEST LOG: Admin logs endpoint test - INFO level")
-        test_logger.warning("TEST LOG: Admin logs endpoint test - WARNING level")
-        test_logger.error("TEST LOG: Admin logs endpoint test - ERROR level")
-        
-        return {
-            "status": "success",
-            "message": "Test log entries have been written. Check the logs endpoint to see them.",
-            "timestamp": datetime.now().isoformat()
-        }
-    
-    @router.get("/logs")
-    async def get_logs(
-        _: Dict[str, str] = Depends(get_current_admin),
-        limit: int = 1000,
-        level: Optional[str] = None,
-        search: Optional[str] = None,
-        tail: bool = True,
-        max_lines_per_file: int = 10000,  # Max lines to read per file (for large files)
-    ):
-        """
-        Get system logs from multiple log files (backend and frontend).
-        
-        Args:
-            limit: Maximum number of log lines to return (default: 1000)
-            level: Filter by log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-            search: Search term to filter logs
-            tail: If True, return the last N lines. If False, return from the beginning.
-        """
-        import os
-        import re
-        from datetime import datetime
-        
-        def parse_log_line(line: str, source: str) -> Dict[str, Any]:
-            """Parse a single log line into structured format."""
-            line = line.strip()
-            if not line:
-                return None
-            
-            log_entry = {
-                "raw": line,
-                "timestamp": None,
-                "level": None,
-                "logger": None,
-                "message": line,
-                "source": source,
-            }
-            
-            # Try to extract timestamp (various formats)
-            timestamp_patterns = [
-                r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})?)',  # Python logging format
-                r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z?)',  # ISO format
-                r'^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]',  # Bracket format
-            ]
-            
-            for pattern in timestamp_patterns:
-                timestamp_match = re.match(pattern, line)
-                if timestamp_match:
-                    log_entry["timestamp"] = timestamp_match.group(1)
-                    break
-            
-            # Extract log level (various formats)
-            level_patterns = [
-                r'\s-\s(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s-',  # Python format
-                r'\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b',  # Generic
-                r'\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]',  # Bracket format
-            ]
-            
-            for pattern in level_patterns:
-                level_match = re.search(pattern, line, re.IGNORECASE)
-                if level_match:
-                    log_entry["level"] = level_match.group(1).upper()
-                    break
-            
-            # Extract logger name (between timestamp and level)
-            if log_entry["level"]:
-                parts = re.split(rf'\s*-\s*{re.escape(log_entry["level"])}\s*-\s*', line, 1, re.IGNORECASE)
-                if len(parts) > 1:
-                    log_entry["message"] = parts[1]
-                    # Extract logger name from first part
-                    if log_entry["timestamp"]:
-                        logger_part = parts[0].replace(log_entry["timestamp"], "").strip(" -[]")
-                        if logger_part:
-                            log_entry["logger"] = logger_part
-            
-            return log_entry
-        
-        def read_log_file(file_path: str, source: str, max_lines: int = 10000) -> List[Dict[str, Any]]:
-            """
-            Read and parse a log file efficiently.
-            For large files, only reads the tail (last N lines) to avoid memory issues.
-            """
-            entries = []
-            try:
-                if not os.path.exists(file_path):
-                    return entries
-                
-                file_size = os.path.getsize(file_path)
-                if file_size == 0:
-                    # File exists but is empty - add info entry
-                    entries.append({
-                        "raw": f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - log_reader - INFO - Log file {file_path} exists but is empty (0 bytes)",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "level": "INFO",
-                        "logger": "log_reader",
-                        "message": f"Log file {file_path} exists but is empty (0 bytes). Waiting for logs to be written.",
-                        "source": "system",
-                    })
-                    return entries
-                
-                # For large files (>5MB), use tail reading to avoid loading entire file into memory
-                # This is important for 24/7 operation where log files can grow very large
-                large_file_threshold = 5 * 1024 * 1024  # 5 MB
-                
-                if file_size > large_file_threshold:
-                    # Read from the end of the file (tail)
-                    # Estimate: average log line is ~200 bytes, so max_lines * 200 bytes
-                    bytes_to_read = min(max_lines * 200, file_size)
-                    
-                    with open(file_path, 'rb') as f:
-                        # Seek to position near the end
-                        f.seek(max(0, file_size - bytes_to_read))
-                        # Read and decode
-                        chunk = f.read()
-                        try:
-                            text = chunk.decode('utf-8', errors='ignore')
-                        except:
-                            # If UTF-8 fails, try to find the start of a line
-                            # Skip partial line at the beginning
-                            text = chunk.decode('utf-8', errors='ignore')
-                            if '\n' in text:
-                                text = text.split('\n', 1)[1]  # Skip first partial line
-                        
-                        lines = text.splitlines()
-                        # Only take the last max_lines
-                        lines = lines[-max_lines:] if len(lines) > max_lines else lines
-                else:
-                    # For smaller files, read normally but still limit lines
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        all_lines = f.readlines()
-                        # Only take the last max_lines for consistency
-                        lines = all_lines[-max_lines:] if len(all_lines) > max_lines else all_lines
-                
-                if not lines:
-                    return entries
-                
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    entry = parse_log_line(line, source)
-                    if entry:
-                        entries.append(entry)
-            except Exception as e:
-                # Log error but don't fail completely
-                entries.append({
-                    "raw": f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - log_reader - ERROR - Error reading {file_path}: {str(e)}",
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "level": "ERROR",
-                    "logger": "log_reader",
-                    "message": f"Error reading {file_path}: {str(e)}",
-                    "source": "system",
-                })
-            return entries
-        
-        # Find all possible log files
-        log_files = []
-        
-        # Backend log files
-        backend_log_paths = [
-            "api.log",
-            "../api.log",
-            "backend/api.log",
-            "/app/api.log",
-            "/workspace/api.log",
-            os.path.join(os.getcwd(), "api.log"),
-        ]
-        
-        # Also check for other log files
-        other_log_paths = [
-            "rag_handler.log",
-            "logs/api.log",
-            "logs/backend.log",
-            "logs/frontend.log",
-            "../logs/api.log",
-            "/app/logs/api.log",
-        ]
-        
-        # Check for frontend logs
-        frontend_log_paths = [
-            "frontend.log",
-            "logs/frontend.log",
-            "../frontend.log",
-            "frontend/.next/trace",
-            "frontend/logs/frontend.log",
-        ]
-        
-        # Also check for rotated log files (api.log.1, api.log.2, etc. from RotatingFileHandler)
-        rotated_log_paths = []
-        for base_path in backend_log_paths[:3]:  # Check first few common paths
-            base_dir = os.path.dirname(base_path) if os.path.dirname(base_path) else '.'
-            base_name = os.path.basename(base_path)
-            if os.path.exists(base_dir) or base_dir == '.':
-                for i in range(1, 6):  # Check for .1 through .5 (backup files)
-                    rotated_path = os.path.join(base_dir, f"{base_name}.{i}") if base_dir != '.' else f"{base_name}.{i}"
-                    if os.path.exists(rotated_path):
-                        rotated_log_paths.append(rotated_path)
-        
-        all_paths = backend_log_paths + other_log_paths + frontend_log_paths + rotated_log_paths
-        
-        # Track seen files by absolute path to avoid duplicates
-        seen_files = {}
-        
-        for path in all_paths:
-            if os.path.exists(path) and os.path.isfile(path):
-                # Get absolute path to check for duplicates
-                abs_path = os.path.abspath(path)
-                
-                # Skip if we've already seen this file
-                if abs_path in seen_files:
-                    continue
-                
-                # Determine source
-                if "frontend" in path.lower():
-                    source = "frontend"
-                elif "backend" in path.lower() or "api.log" in path or "rag_handler" in path:
-                    source = "backend"
-                else:
-                    source = "system"
-                
-                seen_files[abs_path] = (path, source)
-                log_files.append((path, source))
-        
-        # Read all log files
-        all_entries = []
-        found_files = []
-        seen_entries = set()  # Track seen entries to avoid duplicates
-        
-        for file_path, source in log_files:
-            entries = read_log_file(file_path, source, max_lines=max_lines_per_file)
-            
-            # Deduplicate entries by creating a unique key
-            unique_entries = []
-            for entry in entries:
-                # Create a unique key from timestamp, level, logger, and message
-                entry_key = (
-                    entry.get("timestamp", ""),
-                    entry.get("level", ""),
-                    entry.get("logger", ""),
-                    entry.get("message", "")[:200]  # First 200 chars of message
-                )
-                
-                if entry_key not in seen_entries:
-                    seen_entries.add(entry_key)
-                    unique_entries.append(entry)
-            
-            all_entries.extend(unique_entries)
-            if unique_entries:
-                abs_path = os.path.abspath(file_path)
-                found_files.append({
-                    "path": abs_path,  # Use absolute path for display
-                    "source": source,
-                    "entries": len(unique_entries),
-                    "size": os.path.getsize(file_path) if os.path.exists(file_path) else 0,
-                })
-        
-        # If no logs found, return helpful message with debug info
-        if not all_entries:
-            # Add a test log entry to verify the endpoint is working
-            test_entry = {
-                "raw": f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - log_reader - INFO - Log endpoint accessed. No log entries found in checked files.",
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "level": "INFO",
-                "logger": "log_reader",
-                "message": f"Log endpoint accessed. No log entries found. Checked {len(log_files)} file(s).",
-                "source": "system",
-            }
-            
-            # Check current working directory
-            cwd = os.getcwd()
-            test_entry["message"] += f" Current working directory: {cwd}"
-            
-            return {
-                "logs": [test_entry],  # Return test entry so user knows endpoint is working
-                "total": 0,
-                "files_checked": [p for p, _ in log_files] if log_files else all_paths[:10],
-                "files_found": found_files,
-                "current_directory": cwd,
-                "message": f"No log entries found in {len(log_files)} checked file(s). Logs will appear here once the application starts generating them."
-            }
-        
-        # Sort by timestamp if available, otherwise by source and raw line
-        # Sort in reverse (newest first) for log viewing
-        def get_sort_key(entry):
-            if entry.get("timestamp"):
-                try:
-                    # Try to parse timestamp for sorting (reverse order - newest first)
-                    ts_str = entry["timestamp"].replace(",", ".")
-                    # For reverse sort, we'll use the timestamp as-is and sort in reverse
-                    # Timestamp format: "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS,mmm"
-                    # String comparison works for ISO format timestamps
-                    return (0, ts_str, entry.get("source", ""), entry["raw"])
-                except:
-                    pass
-            return (1, entry.get("source", ""), entry["raw"])
-        
-        # Sort by timestamp descending (newest first), then reverse the list
-        all_entries.sort(key=get_sort_key, reverse=True)
-        
-        # Filter by level if specified
-        if level:
-            level_upper = level.upper()
-            all_entries = [e for e in all_entries if e.get("level", "").upper() == level_upper]
-        
-        # Filter by search term if specified
-        if search:
-            search_lower = search.lower()
-            all_entries = [
-                e for e in all_entries
-                if search_lower in e["raw"].lower() or search_lower in e.get("message", "").lower()
-            ]
-        
-        # Get last N lines if tail is True
-        if tail:
-            all_entries = all_entries[-limit:] if len(all_entries) > limit else all_entries
-        else:
-            all_entries = all_entries[:limit] if len(all_entries) > limit else all_entries
-        
-        return {
-            "logs": all_entries,
-            "total": len(all_entries),
-            "files_found": found_files,
-            "total_files": len(found_files),
-        }
+    # NOTE: Removed duplicate file-based logs endpoint that was conflicting with the audit logs endpoint.
+    # The file-based endpoint was returning the wrong response format expected by the frontend.
+    # If file-based logging is needed in the future, it should be at a different path like /admin/system-logs.
 
     # ============================================================================
     # Analytics Endpoints
@@ -1050,6 +778,181 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         from ..utils.db import run_sync
         items = await run_sync(_fetch)
         return {"items": items}
+    
+    @router.get("/logs")
+    async def get_audit_logs(
+        admin: Dict[str, str] = Depends(get_current_admin),
+        page: int = Query(1, ge=1),
+        limit: int = Query(50, ge=1, le=200),
+        level: Optional[str] = Query(None),
+        event: Optional[str] = Query(None),
+        user_id: Optional[str] = Query(None),
+        start: Optional[str] = Query(None),
+        end: Optional[str] = Query(None),
+    ):
+        """
+        Get paginated audit logs (admin-only).
+        
+        Filters:
+        - level: Filter by log level (info, warning, error)
+        - event: Filter by event name
+        - user_id: Filter by user ID
+        - start: Start date (ISO format)
+        - end: End date (ISO format)
+        """
+        def _fetch():
+            with SessionLocal() as session:
+                # Debug: Check database file path
+                from ..utils.db import DEFAULT_DB_PATH
+                logger.info("audit_logs_query", database_path=DEFAULT_DB_PATH, message="Starting audit logs query")
+                
+                # Debug: Check if table exists and has data
+                inspector = inspect(session.bind)
+                tables = inspector.get_table_names()
+                logger.info("audit_logs_query", available_tables=tables, message="Checking for audit_logs table")
+                
+                if "audit_logs" not in tables:
+                    logger.warning("audit_logs_query", message="audit_logs table does NOT exist!")
+                    return {
+                        "logs": [],
+                        "page": page,
+                        "limit": limit,
+                        "total": 0,
+                        "total_pages": 1,
+                    }
+                
+                # Direct count query to verify data exists
+                try:
+                    direct_count = session.execute(text("SELECT COUNT(*) FROM audit_logs")).scalar()
+                    logger.info("audit_logs_query", direct_count=direct_count, message="Direct SQL COUNT query result")
+                    
+                    # Also try to fetch a few rows directly
+                    direct_rows = session.execute(text("SELECT id, event, timestamp FROM audit_logs ORDER BY timestamp DESC LIMIT 5")).fetchall()
+                    logger.info("audit_logs_query", direct_rows_count=len(direct_rows), message="Direct SQL SELECT result")
+                    for row in direct_rows:
+                        logger.info("audit_logs_query", row_id=row[0], event=row[1], timestamp=str(row[2]), message="Found audit log row")
+                except Exception as e:
+                    logger.error("audit_logs_query", error=str(e), exc_info=True, message="Direct SQL query failed")
+                
+                # Build query - use AuditLog model
+                query = select(AuditLog)
+                # Test if AuditLog is accessible
+                try:
+                    test_query = select(func.count()).select_from(AuditLog)
+                    test_count = session.execute(test_query).scalar()
+                    logger.info("audit_logs_query", test_count=test_count, message="Test query with AuditLog model works")
+                except Exception as e:
+                    logger.error("audit_logs_query", error=str(e), exc_info=True, message="AuditLog model query failed")
+                
+                # Apply filters
+                filters = []
+                
+                if level:
+                    filters.append(AuditLog.level == level.lower())
+                
+                if event:
+                    filters.append(AuditLog.event == event)
+                
+                if user_id:
+                    filters.append(AuditLog.user_id == user_id)
+                
+                if start:
+                    try:
+                        start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
+                        filters.append(AuditLog.timestamp >= start_dt)
+                    except Exception:
+                        pass
+                
+                if end:
+                    try:
+                        end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
+                        filters.append(AuditLog.timestamp <= end_dt)
+                    except Exception:
+                        pass
+                
+                if filters:
+                    query = query.where(and_(*filters))
+                
+                # Get total count
+                count_query = select(func.count()).select_from(AuditLog)
+                if filters:
+                    count_query = count_query.where(and_(*filters))
+                total = session.execute(count_query).scalar() or 0
+                
+                # Apply pagination and ordering
+                offset = (page - 1) * limit
+                query = query.order_by(desc(AuditLog.timestamp)).offset(offset).limit(limit)
+                
+                # Execute query
+                results = session.execute(query).scalars().all()
+                
+                # Debug: Log query results
+                logger.info("audit_logs_query", 
+                          results_count=len(results), 
+                          total_count=total,
+                          message=f"SQLAlchemy query returned {len(results)} audit logs (total count: {total})")
+                if len(results) > 0:
+                    logger.info("audit_logs_query", 
+                              first_event=results[0].event if hasattr(results[0], 'event') else str(results[0]),
+                              first_timestamp=str(results[0].timestamp) if hasattr(results[0], 'timestamp') else None,
+                              message="First log from SQLAlchemy query")
+                else:
+                    logger.warning("audit_logs_query", message="SQLAlchemy query returned 0 results, but direct SQL may have found rows")
+                
+                # Serialize results
+                logs = []
+                for log in results:
+                    # Handle metadata (could be JSON string or dict)
+                    # Note: event_metadata is the Python attribute name, but it maps to 'metadata' column in DB
+                    metadata = log.event_metadata
+                    if isinstance(metadata, str):
+                        try:
+                            metadata = json.loads(metadata)
+                        except Exception:
+                            metadata = {}
+                    elif metadata is None:
+                        metadata = {}
+                    
+                    logs.append({
+                        "id": log.id,
+                        "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                        "level": log.level,
+                        "event": log.event,
+                        "user_id": log.user_id,
+                        "role": log.role,
+                        "ip_address": log.ip_address,
+                        "metadata": metadata,
+                        "request_id": log.request_id,
+                    })
+                
+                # Calculate total pages
+                total_pages = (total + limit - 1) // limit if total > 0 else 1
+                
+                return {
+                    "logs": logs,
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "total_pages": total_pages,
+                }
+        
+        return await run_sync(_fetch)
+    
+    @router.post("/logs/test")
+    async def test_audit_log(
+        admin: Dict[str, str] = Depends(get_current_admin),
+        http_request: Request = None,
+    ):
+        """Test audit logging endpoint (admin-only)."""
+        await audit_log(
+            "test_event",
+            level="info",
+            user_id=admin.get("email"),
+            role=admin.get("role"),
+            metadata={"test": True, "admin": admin.get("email")},
+            request=http_request,
+        )
+        return {"status": "success", "message": "Test audit log created"}
 
     return router
 

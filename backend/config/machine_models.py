@@ -30,7 +30,8 @@ ALLOWED_MACHINE_MODELS: list[str] = [
     "DuraLink",
     "DuraBolt",
     "DuraCore",
-    "EZCut 330"
+    "EZCut 330",
+    "EZCut 350R"
 ]
 
 
@@ -126,9 +127,11 @@ def get_effective_machines_for_user(role: str, user_machine_models: list[str]) -
     Returns the effective list of machine models that this user should see.
     
     Rules:
-        - Admins and technicians: all machines (ALLOWED_MACHINE_MODELS)
-        - Customers: their assigned machine_models
-        - "GENERAL" is always included for all users
+        - If user has machine_models assigned: use those machines (for all roles including ADMIN)
+        - If user has NO machine_models assigned AND is ADMIN/TECHNICIAN: all machines (ALLOWED_MACHINE_MODELS)
+        - If user has NO machine_models assigned AND is CUSTOMER: empty list (admin must assign machines)
+        - "GENERAL" is ALWAYS included for ALL users (including customers with no assigned machines)
+        - Customers get: GENERAL + (admin-assigned machines)
         - If role is unknown: fall back to customer-like behavior
     
     Args:
@@ -136,24 +139,29 @@ def get_effective_machines_for_user(role: str, user_machine_models: list[str]) -
         user_machine_models: List of machine models assigned to the user
         
     Returns:
-        List of effective machine models (always includes GENERAL)
+        List of effective machine models (always includes GENERAL for all users)
     
-    NOTE: Ensure "GENERAL" is always included in the returned list.
+    NOTE: GENERAL is automatically included for all users - admin doesn't need to select it.
     """
     role_upper = role.upper() if role else ""
     
     # Normalize user_machine_models
     user_machine_models = normalize_machine_models(user_machine_models)
     
-    # Admins and technicians get full access to all machines
-    if role_upper in ["ADMIN", "TECHNICIAN"]:
-        effective_machines = ALLOWED_MACHINE_MODELS.copy()
-    else:
-        # Customers get only their assigned machines
-        # Normalize and filter to valid models
+    # If user has machine_models assigned, use those (for all roles including ADMIN)
+    if user_machine_models and len(user_machine_models) > 0:
         effective_machines = user_machine_models.copy()
+    else:
+        # User has no machine_models assigned
+        if role_upper in ["ADMIN", "TECHNICIAN"]:
+            # Admins and technicians without assigned machines get full access
+            effective_machines = ALLOWED_MACHINE_MODELS.copy()
+        else:
+            # Customers without assigned machines get no machine access (only GENERAL)
+            effective_machines = []
     
-    # Always ensure GENERAL is included (if it exists in allowed list)
+    # Always ensure GENERAL is included for ALL users (even customers with no other machines)
+    # GENERAL doesn't need to be selected by admin - it's automatically included
     if GENERAL_MACHINE in ALLOWED_MACHINE_MODELS and GENERAL_MACHINE not in effective_machines:
         effective_machines.append(GENERAL_MACHINE)
     

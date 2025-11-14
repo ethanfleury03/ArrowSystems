@@ -15,9 +15,11 @@ services:
       - SEED_TECH_EMAIL=${SEED_TECH_EMAIL:-}
       - SEED_TECH_PASSWORD=${SEED_TECH_PASSWORD:-}
       - HF_HOME=/app/.cache/huggingface
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}
+      - ENV=${ENV:-dev}
     volumes:
       - ./latest_model:/app/latest_model:ro
-      - ./data:/app/data:ro
+      - ./data:/app/data  # Removed :ro to allow writing document_metadata.json
       - ./logs:/app/logs
       - ./storage:/app/storage
       - hf_cache:/app/.cache/huggingface

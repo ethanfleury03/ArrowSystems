@@ -9,13 +9,18 @@ const SUMMARIZE_MIN_LENGTH = parseInt(process.env.QUERY_SUMMARIZE_MIN_LENGTH || 
  * Summarize a long query using the backend summarization endpoint.
  * Only called if query exceeds min_length threshold.
  */
-async function summarizeQuery(query: string, backendUrl: string): Promise<{ summary: string; wasSummarized: boolean; contentType?: string }> {
+async function summarizeQuery(query: string, backendUrl: string, authToken?: string | null): Promise<{ summary: string; wasSummarized: boolean; contentType?: string }> {
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    
     const response = await fetch(`${backendUrl}/summarize-query`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({ query }),
     });
 
@@ -47,9 +52,12 @@ export async function POST(request: NextRequest) {
     let query = body.query;
     let summarizationInfo = null;
     
+    // Extract JWT token from request headers (sent by frontend)
+    const authToken = request.headers.get('X-Auth-Token');
+    
     // Summarize long queries if enabled
     if (SUMMARIZE_ENABLED && query && query.length >= SUMMARIZE_MIN_LENGTH) {
-      const result = await summarizeQuery(query, BACKEND_URL);
+      const result = await summarizeQuery(query, BACKEND_URL, authToken);
       query = result.summary;
       if (result.wasSummarized) {
         summarizationInfo = {
@@ -69,11 +77,22 @@ export async function POST(request: NextRequest) {
     const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
     
     try {
+      // Extract JWT token from request headers (sent by frontend)
+      const authToken = request.headers.get('X-Auth-Token');
+      
+      // Build headers for backend request
+      const backendHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      
+      // Forward Authorization header to backend if token is present
+      if (authToken) {
+        backendHeaders['Authorization'] = `Bearer ${authToken}`;
+      }
+      
       const response = await fetch(`${BACKEND_URL}/query`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: backendHeaders,
         body: JSON.stringify(processedBody),
         signal: controller.signal,
       });

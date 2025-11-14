@@ -6,7 +6,7 @@ the entire dataset. Used for admin-controlled document onboarding.
 """
 
 import os
-import logging
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 from llama_index.core import Document, VectorStoreIndex, load_index_from_storage, StorageContext
@@ -20,8 +20,10 @@ from ..ingest import (
     NonTextExtractor
 )
 from .query_summarizer import QuerySummarizer
+from ..logging_config import get_logger
+from ..logging_context import get_user_id
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def ingest_single_file(
@@ -53,8 +55,21 @@ def ingest_single_file(
         }
     """
     file_path = Path(file_path)
+    user_id = get_user_id()
+    start_time = time.time()
+    
+    # Log ingestion start
+    logger.info(
+        "ingestion_start",
+        filename=file_path.name,
+        file_path=str(file_path),
+        storage_dir=storage_dir,
+        enable_rewriting=enable_rewriting,
+        user_id=user_id,
+    )
     
     if not file_path.exists():
+        logger.error("ingestion_file_not_found", filename=file_path.name, file_path=str(file_path))
         return {
             "success": False,
             "error": f"File not found: {file_path}",
@@ -66,12 +81,12 @@ def ingest_single_file(
     
     try:
         # Load existing index
-        logger.info(f"Loading existing index from {storage_dir}...")
+        logger.info("ingestion_loading_index", storage_dir=storage_dir)
         storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
         index = load_index_from_storage(storage_context)
         
         # Initialize components
-        logger.info("Initializing ingestion components...")
+        logger.info("ingestion_initializing_components")
         
         # Load config
         import yaml
@@ -100,7 +115,8 @@ def ingest_single_file(
         )
         
         # Step 1: Load the single file
-        logger.info(f"Loading document: {file_path.name}...")
+        logger.info("ingestion_loading_document", filename=file_path.name)
+        load_start_time = time.time()
         
         # Create a temporary data directory with just this file
         temp_data_dir = file_path.parent
@@ -127,6 +143,7 @@ def ingest_single_file(
         elif file_ext in {'.md', '.markdown'}:
             documents = loader._load_markdown(file_path)
         else:
+            logger.error("ingestion_unsupported_file_type", filename=file_path.name, file_ext=file_ext)
             return {
                 "success": False,
                 "error": f"Unsupported file type: {file_ext}",
@@ -136,7 +153,10 @@ def ingest_single_file(
                 "chunk_count": 0
             }
         
+        load_time_ms = (time.time() - load_start_time) * 1000
+        
         if not documents:
+            logger.error("ingestion_no_documents_extracted", filename=file_path.name)
             return {
                 "success": False,
                 "error": "No documents extracted from file",
@@ -148,10 +168,13 @@ def ingest_single_file(
         
         # Count pages (for PDF) or sections (for DOCX/MD)
         page_count = len(documents)
+        logger.info("ingestion_pages_extracted", filename=file_path.name, pages=page_count, load_time_ms=round(load_time_ms, 2))
         
         # Step 2: Preprocess documents
-        logger.info("Preprocessing documents...")
+        logger.info("ingestion_preprocessing", filename=file_path.name)
+        preprocess_start_time = time.time()
         preprocessed_docs = []
+        skipped_pages = 0
         for doc in documents:
             original_text = doc.text or ""
             cleaned_text = text_preprocessor.clean_text(original_text, metadata=doc.metadata)
@@ -163,11 +186,19 @@ def ingest_single_file(
                         metadata=doc.metadata
                     )
                     preprocessed_docs.append(new_doc)
+                else:
+                    skipped_pages += 1
+            else:
+                skipped_pages += 1
+        
+        preprocess_time_ms = (time.time() - preprocess_start_time) * 1000
+        logger.info("ingestion_preprocessing_complete", filename=file_path.name, preprocessed=len(preprocessed_docs), skipped=skipped_pages, latency_ms=round(preprocess_time_ms, 2))
         
         # Step 3: Extract non-text content (tables, images) - only for PDF
         non_text_nodes = []
         if file_ext == '.pdf':
-            logger.info("Extracting non-text content...")
+            logger.info("ingestion_extracting_non_text", filename=file_path.name)
+            extract_start_time = time.time()
             extractor = NonTextExtractor()
             tables = extractor.extract_tables_from_pdf(str(file_path))
             images = extractor.extract_images_from_pdf(str(file_path))
@@ -187,36 +218,59 @@ def ingest_single_file(
                         }
                     )
                     non_text_nodes.append(node)
+            
+            extract_time_ms = (time.time() - extract_start_time) * 1000
+            logger.info("ingestion_non_text_extracted", filename=file_path.name, tables=len(tables), images=len(images), captions=len(captions), nodes=len(non_text_nodes), latency_ms=round(extract_time_ms, 2))
         
         # Step 4: Smart chunking
-        logger.info("Chunking documents...")
+        logger.info("ingestion_chunking_start", filename=file_path.name)
+        chunk_start_time = time.time()
         text_nodes = smart_splitter.get_nodes_from_documents(preprocessed_docs, show_progress=False)
         
         # Filter nodes
         filtered_nodes = []
+        skipped_nodes = 0
         for node in text_nodes:
             should_skip, _ = text_preprocessor.should_skip_node(node.text, metadata=node.metadata)
             if not should_skip:
                 filtered_nodes.append(node)
+            else:
+                skipped_nodes += 1
+        
+        chunk_time_ms = (time.time() - chunk_start_time) * 1000
+        logger.info("ingestion_chunking_complete", filename=file_path.name, chunks=len(filtered_nodes), skipped=skipped_nodes, latency_ms=round(chunk_time_ms, 2))
         
         # Step 5: Optional Claude rewriting
         if enable_rewriting and claude_rewriter.enabled:
-            logger.info("Rewriting chunks with Claude...")
+            logger.info("ingestion_rewriting_start", filename=file_path.name)
+            rewrite_start_time = time.time()
             rewritten_nodes, _ = claude_rewriter.rewrite_nodes(filtered_nodes, show_progress=False)
             filtered_nodes = rewritten_nodes
+            rewrite_time_ms = (time.time() - rewrite_start_time) * 1000
+            logger.info("ingestion_rewriting_complete", filename=file_path.name, rewritten=len(filtered_nodes), latency_ms=round(rewrite_time_ms, 2))
         
         # Step 6: Generate summaries for chunks
-        logger.info("Generating chunk summaries...")
+        logger.info("ingestion_summarizing_chunks", filename=file_path.name, chunks=len(filtered_nodes))
+        summary_start_time = time.time()
+        summarized_count = 0
+        failed_summaries = 0
         for node in filtered_nodes:
             try:
                 # Generate summary for this chunk
                 summary, was_summarized, _ = query_summarizer.summarize(node.text)
                 # Summary is cached automatically by QuerySummarizer
+                if was_summarized:
+                    summarized_count += 1
             except Exception as e:
-                logger.warning(f"Failed to generate summary for chunk: {e}")
+                failed_summaries += 1
+                logger.warning("ingestion_summary_failed", filename=file_path.name, error=str(e))
+        
+        summary_time_ms = (time.time() - summary_start_time) * 1000
+        logger.info("ingestion_summarizing_complete", filename=file_path.name, summarized=summarized_count, failed=failed_summaries, latency_ms=round(summary_time_ms, 2))
         
         # Step 7: Generate embeddings and add to index
-        logger.info("Generating embeddings and adding to index...")
+        logger.info("ingestion_embedding_start", filename=file_path.name, nodes=len(filtered_nodes) + len(non_text_nodes))
+        embed_start_time = time.time()
         all_nodes = filtered_nodes + non_text_nodes
         
         if all_nodes:
@@ -230,7 +284,7 @@ def ingest_single_file(
                     model_name=embed_model_name,
                     cache_folder=cache_dir
                 )
-                logger.info(f"Initialized embedding model: {embed_model_name}")
+                logger.info("ingestion_embedding_model_initialized", model_name=embed_model_name)
             
             # Insert nodes into existing index (embeddings generated automatically)
             batch_size = 50
@@ -240,7 +294,9 @@ def ingest_single_file(
             
             # Persist the updated index
             index.storage_context.persist(persist_dir=storage_dir)
-            logger.info(f"Successfully added {len(all_nodes)} nodes to index")
+            
+            embed_time_ms = (time.time() - embed_start_time) * 1000
+            logger.info("ingestion_embedding_complete", filename=file_path.name, nodes=len(all_nodes), latency_ms=round(embed_time_ms, 2))
         
         # Get doc_id (use filename as doc_id)
         doc_id = file_path.name
@@ -251,7 +307,20 @@ def ingest_single_file(
         
         # Log if review is needed
         if meta_entry.get("requires_admin_review"):
-            logger.warning(f"Document {file_path.name} requires admin review (missing machine_model)")
+            logger.warning("ingestion_requires_review", filename=file_path.name, reason="missing machine_model")
+        
+        # Log ingestion complete
+        total_time_ms = (time.time() - start_time) * 1000
+        logger.info(
+            "ingestion_complete",
+            filename=file_path.name,
+            page_count=page_count,
+            chunk_count=len(all_nodes),
+            text_chunks=len(filtered_nodes),
+            non_text_chunks=len(non_text_nodes),
+            total_latency_ms=round(total_time_ms, 2),
+            user_id=user_id,
+        )
         
         return {
             "success": True,
@@ -265,7 +334,15 @@ def ingest_single_file(
         }
         
     except Exception as e:
-        logger.error(f"Error ingesting file {file_path}: {e}", exc_info=True)
+        total_time_ms = (time.time() - start_time) * 1000
+        logger.error(
+            "ingestion_failed",
+            filename=file_path.name,
+            error=str(e),
+            total_latency_ms=round(total_time_ms, 2),
+            user_id=user_id,
+            exc_info=True
+        )
         return {
             "success": False,
             "error": str(e),

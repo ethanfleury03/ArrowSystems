@@ -10,7 +10,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 import os
 import re
-import logging
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,9 +26,10 @@ from rank_bm25 import BM25Okapi
 import json
 import hashlib
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from .logging_config import get_logger
+from .logging_context import get_user_id, get_user_role
+
+logger = get_logger(__name__)
 
 
 # ============================================================================
@@ -47,7 +47,7 @@ class QueryCache:
         self.max_size = max_size
         self.hits = 0
         self.misses = 0
-        logger.info(f"💾 QueryCache initialized (max_size: {max_size})")
+        logger.info("query_cache_initialized", max_size=max_size)
     
     def _hash_query(self, query: str, top_k: int = 10, alpha: float = 0.5) -> str:
         """Create cache key from query parameters."""
@@ -61,15 +61,25 @@ class QueryCache:
         if key in self.cache:
             self.hits += 1
             hit_rate = self.hits / (self.hits + self.misses) * 100
-            logger.info(f"💾 ✅ CACHE HIT! Serving validated answer instantly")
-            logger.info(f"   Cache stats: {self.hits} hits / {self.misses} misses ({hit_rate:.1f}% hit rate)")
+            logger.info(
+                "query_cache_hit",
+                query=query[:200],
+                hits=self.hits,
+                misses=self.misses,
+                hit_rate=round(hit_rate, 2),
+            )
             return self.cache[key]
         
         self.misses += 1
         total = self.hits + self.misses
         hit_rate = self.hits / total * 100 if total > 0 else 0
-        logger.info(f"💾 ❌ Cache miss - will run full RAG")
-        logger.info(f"   Cache stats: {self.hits} hits / {self.misses} misses ({hit_rate:.1f}% hit rate)")
+        logger.info(
+            "query_cache_miss",
+            query=query[:200],
+            hits=self.hits,
+            misses=self.misses,
+            hit_rate=round(hit_rate, 2),
+        )
         return None
     
     def set(self, query: str, response, top_k: int = 10, alpha: float = 0.5):
@@ -77,22 +87,28 @@ class QueryCache:
         key = self._hash_query(query, top_k, alpha)
         
         # LRU eviction if cache is full
+        evicted = False
         if len(self.cache) >= self.max_size:
             # Remove oldest entry (first in dict)
             oldest = next(iter(self.cache))
             del self.cache[oldest]
-            logger.info(f"💾 Evicted oldest cache entry (cache was full)")
+            evicted = True
         
         self.cache[key] = response
-        logger.info(f"💾 ✅ CACHED validated answer (cache size: {len(self.cache)}/{self.max_size})")
-        logger.info(f"   This answer will be served instantly for future identical queries!")
+        logger.info(
+            "query_cache_set",
+            query=query[:200],
+            cache_size=len(self.cache),
+            max_size=self.max_size,
+            evicted=evicted,
+        )
     
     def remove(self, query: str, top_k: int = 10, alpha: float = 0.5):
         """Remove a cached response (e.g., if marked unhelpful later)."""
         key = self._hash_query(query, top_k, alpha)
         if key in self.cache:
             del self.cache[key]
-            logger.info(f"💾 Removed query from cache")
+            logger.info("query_cache_removed", query=query[:200], cache_size=len(self.cache))
             return True
         return False
     
@@ -128,7 +144,7 @@ class SemanticCache:
         self.threshold = threshold
         self.max_size = max_size
         self.entries = []  # list of dicts: {'emb': np.array, 'query': str, 'response': StructuredResponse}
-        logger.info(f"💾 SemanticCache initialized (threshold={threshold}, max_size={max_size})")
+        logger.info("semantic_cache_initialized", threshold=threshold, max_size=max_size)
     
     @staticmethod
     def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -155,10 +171,10 @@ class SemanticCache:
                 best_resp = entry['response']
         
         if best_score >= self.threshold and best_resp is not None:
-            logger.info(f"💾 ✅ SEMANTIC CACHE HIT (similarity={best_score:.2f})")
+            logger.info("semantic_cache_hit", similarity=round(best_score, 3), threshold=self.threshold, query=query[:200])
             return best_resp
         else:
-            logger.info(f"💾 ❌ Semantic cache miss (best={best_score:.2f} < {self.threshold})")
+            logger.debug("semantic_cache_miss", similarity=round(best_score, 3), threshold=self.threshold, query=query[:200])
             return None
     
     def set(self, query: str, response):
@@ -172,7 +188,7 @@ class SemanticCache:
         if len(self.entries) >= self.max_size:
             self.entries.pop(0)
         self.entries.append({'emb': q_emb, 'query': query, 'response': response})
-        logger.info(f"💾 ✅ Added to semantic cache (size: {len(self.entries)}/{self.max_size})")
+        logger.info("semantic_cache_added", cache_size=len(self.entries), max_size=self.max_size, query=query[:200])
     
     def remove(self, query: str):
         """Remove entries that match the exact query text."""
@@ -180,7 +196,7 @@ class SemanticCache:
         self.entries = [e for e in self.entries if e['query'] != query]
         after = len(self.entries)
         if after < before:
-            logger.info(f"💾 Removed {before-after} entry(ies) from semantic cache for query")
+            logger.info("semantic_cache_removed", query=query[:200], removed=before-after, cache_size=after)
 
 
 @dataclass
@@ -549,7 +565,7 @@ class ClaudeIntentClassifier:
                 logger.warning(f"Claude test request failed: {type(test_error).__name__}: {test_error}")
                 raise
             
-            logger.info(f"✅ Claude Intent Classifier initialized with model: {self.model_name}")
+            logger.info("claude_intent_classifier_initialized", model=self.model_name)
             
         except ImportError:
             logger.warning("⚠️ Anthropic package not installed. Using fallback pattern-matching.")
@@ -751,7 +767,7 @@ class HybridRetriever:
                 self.corpus_nodes = self.corpus_nodes[:1000]  # Limit to 1000
                 tokenized_corpus = [node.text.lower().split() for node in self.corpus_nodes]
                 self.bm25 = BM25Okapi(tokenized_corpus)
-                logger.info(f"✅ BM25 initialized with {len(self.corpus_nodes)} documents")
+                logger.info("bm25_initialized", documents=len(self.corpus_nodes))
             else:
                 logger.warning("⚠️ No documents found for BM25 initialization")
                 self.bm25 = None
@@ -1020,18 +1036,29 @@ class HybridRetriever:
             from .config.machine_models import get_effective_machines_for_user, GENERAL_MACHINE, ANY_MACHINE
             
             # Get effective machines for this user based on role
+            role_upper = (role or "").upper()
+            
+            # Log what machine_models were passed in (before normalization in get_effective_machines_for_user)
+            logger.info(
+                f"🔍 Machine filtering input: role={role}, raw_user_machine_models={user_machine_models}"
+            )
+            
             effective_machines = get_effective_machines_for_user(role or "CUSTOMER", user_machine_models or [])
             
-            # For backward compatibility: if customer has no machines, log warning and allow full access temporarily
-            role_upper = (role or "").upper()
-            if role_upper == "CUSTOMER" and (not user_machine_models or len(user_machine_models) == 0):
-                logger.warning(
-                    f"Customer with role '{role}' has no machine_models assigned; "
-                    f"treating as FULL ACCESS temporarily. Admin should assign machines via UI."
+            # For customers with no valid machines, they still get GENERAL (auto-included)
+            # The check below is just for logging purposes
+            if role_upper == "CUSTOMER" and len(effective_machines) == 1 and GENERAL_MACHINE in effective_machines:
+                logger.info(
+                    f"Customer with role '{role}' has no machine_models assigned. "
+                    f"Raw input was: {user_machine_models}. "
+                    f"User will have access to GENERAL documents only (admin should assign machines)."
                 )
-                # TODO: Once all customers have machines assigned, change this to return empty set
-                # For now, allow full access (includes GENERAL documents)
-                effective_machines = get_effective_machines_for_user("ADMIN", [])  # Full access
+            elif role_upper == "CUSTOMER" and len(effective_machines) > 1:
+                # Customer has machines assigned + GENERAL
+                logger.debug(
+                    f"Customer with role '{role}' has {len(effective_machines) - 1} machine(s) assigned "
+                    f"(plus GENERAL): {[m for m in effective_machines if m != GENERAL_MACHINE]}"
+                )
             
             # Load all document metadata
             all_metadata = load_metadata()
@@ -1160,8 +1187,35 @@ class HybridRetriever:
         Returns:
             Ranked list of nodes
         """
+        start_time = time.time()
+        user_id = get_user_id()
+        user_role = get_user_role() or role
+        
+        # Log hybrid search start
+        logger.info(
+            "hybrid_search_start",
+            query=query[:500],
+            top_k=top_k,
+            alpha=alpha,
+            user_id=user_id,
+            role=user_role,
+            machines=user_machine_models or [],
+        )
+        
         # Build allowed filenames based on user role and machine models (document-level pre-filtering)
+        filter_start_time = time.time()
         allowed_filenames = self._get_allowed_filenames(role=role, user_machine_models=user_machine_models)
+        filter_time_ms = (time.time() - filter_start_time) * 1000
+        
+        # Log document filtering
+        if allowed_filenames is not None:
+            logger.info(
+                "rag_filter_applied",
+                allowed_documents=len(allowed_filenames),
+                role=role,
+                machines=user_machine_models or [],
+                filter_time_ms=round(filter_time_ms, 2),
+            )
         
         # 🚀 FIRST: Try direct filename search for queries that look like they're asking for a specific document
         query_lower = query.lower()
@@ -1314,13 +1368,18 @@ class HybridRetriever:
         
         # Apply re-ranking if available (skip on CPU for performance)
         # Re-ranker adds ~90 seconds on CPU, only use on GPU
+        rerank_start_time = None
         if self.reranker and len(hybrid_results) > 1:
             import torch
             if torch.cuda.is_available():
                 # Only re-rank on GPU (fast) - skip on CPU (too slow)
+                rerank_start_time = time.time()
+                logger.info("reranker_start", query=query[:500], candidates=len(hybrid_results[:top_k * 2]))
                 hybrid_results = self._rerank(query, hybrid_results[:top_k * 2])
+                rerank_time_ms = (time.time() - rerank_start_time) * 1000
+                logger.info("reranker_complete", latency_ms=round(rerank_time_ms, 2), reranked_count=len(hybrid_results))
             else:
-                logger.debug("Skipping re-ranker on CPU for performance (would take ~90s)")
+                logger.debug("reranker_skipped", reason="CPU performance", message="Skipping re-ranker on CPU for performance (would take ~90s)")
         
         # NEW: Boost section number matches before returning
         hybrid_results = self._boost_section_matches(query, hybrid_results)
@@ -1331,6 +1390,18 @@ class HybridRetriever:
         
         # Re-sort after boosting
         hybrid_results.sort(key=lambda x: x.score, reverse=True)
+        
+        # Log hybrid search complete
+        total_time_ms = (time.time() - start_time) * 1000
+        logger.info(
+            "hybrid_search_complete",
+            query=query[:500],
+            retrieved=len(hybrid_results[:top_k]),
+            total_candidates=len(hybrid_results),
+            latency_ms=round(total_time_ms, 2),
+            user_id=user_id,
+            role=user_role,
+        )
         
         return hybrid_results[:top_k]
     
@@ -2724,7 +2795,12 @@ class ClaudeAnswerGenerator:
         Returns:
             Clean, technical answer with citations
         """
+        user_id = get_user_id()
+        user_role = get_user_role()
+        start_time = time.time()
+        
         if not self.claude_client or not documents:
+            logger.warning("llm_generation_skipped", reason="no_client_or_documents", query=query[:500])
             return self._fallback_answer(query, documents)
         
         # Create cache key
@@ -2732,10 +2808,21 @@ class ClaudeAnswerGenerator:
         
         # Check cache first
         if self.enable_caching and cache_key in self.answer_cache:
-            logger.debug("Using cached answer")
+            logger.debug("llm_cache_hit", query=query[:500])
             return self.answer_cache[cache_key]
         
         try:
+            # Log LLM generation start
+            logger.info(
+                "llm_generation_start",
+                query=query[:500],
+                chunks=len(documents),
+                intent_type=intent.intent_type,
+                chat_history_length=len(chat_history) if chat_history else 0,
+                user_id=user_id,
+                role=user_role,
+            )
+            
             # Prepare context from documents
             context = self._prepare_document_context(documents)
             
@@ -2751,7 +2838,7 @@ class ClaudeAnswerGenerator:
             # Final safety check: verify prompt doesn't exceed budget
             total_tokens = self._estimate_tokens(prompt)
             if total_tokens > self.MAX_INPUT_TOKENS:
-                logger.warning(f"Prompt exceeds budget after trimming ({total_tokens} tokens), using minimal context")
+                logger.warning("llm_prompt_trimmed", total_tokens=total_tokens, max_tokens=self.MAX_INPUT_TOKENS, message="Prompt exceeds budget after trimming, using minimal context")
                 # Fallback: use only current query with documents, no history
                 prompt = base_prompt
                 trimmed_history = []
@@ -2772,12 +2859,14 @@ class ClaudeAnswerGenerator:
             messages.append({"role": "user", "content": prompt})
             
             # Generate answer with Claude
+            llm_start_time = time.time()
             response = self.claude_client.messages.create(
                 model=self.model_name,
                 max_tokens=2000,  # Increased for more detailed technical answers
                 temperature=0.1,
                 messages=messages
             )
+            llm_time_ms = (time.time() - llm_start_time) * 1000
             
             answer = response.content[0].text
             
@@ -2803,6 +2892,22 @@ class ClaudeAnswerGenerator:
             if self.enable_caching:
                 self.answer_cache[cache_key] = answer
             
+            # Log LLM generation complete
+            total_time_ms = (time.time() - start_time) * 1000
+            logger.info(
+                "llm_generation_complete",
+                query=query[:500],
+                prompt_tokens=token_input,
+                completion_tokens=token_output,
+                total_tokens=token_total,
+                cost_usd=cost_usd,
+                latency_ms=round(llm_time_ms, 2),
+                total_latency_ms=round(total_time_ms, 2),
+                answer_length=len(answer),
+                user_id=user_id,
+                role=user_role,
+            )
+            
             # Return answer with token usage info
             # Store token usage in a way that can be accessed later
             # We'll attach it as metadata to the answer string (hacky but works)
@@ -2818,7 +2923,7 @@ class ClaudeAnswerGenerator:
             return answer
             
         except Exception as e:
-            logger.error(f"Claude answer generation failed: {e}")
+            logger.error("llm_generation_failed", query=query[:500], error=str(e), exc_info=True)
             return self._fallback_answer(query, documents)
     
     def _estimate_tokens(self, text: str) -> int:
@@ -3191,7 +3296,7 @@ class RAGOrchestrator:
                     trust_remote_code=True,
                     device=device
                 )
-                logger.info(f"✅ Embedding model loaded: {display_name} on {device}")
+                logger.info("embedding_model_loaded", model=display_name, device=device)
                 break
             except Exception as e:
                 logger.warning(f"Failed to load {display_name}: {str(e)[:100]}")
@@ -3205,7 +3310,7 @@ class RAGOrchestrator:
                             trust_remote_code=True,
                             device=device
                         )
-                        logger.info(f"✅ Embedding model loaded: {display_name} (with prefix) on {device}")
+                        logger.info("embedding_model_loaded", model=display_name, device=device, prefix=True)
                         break
                     except:
                         continue
@@ -3229,7 +3334,7 @@ class RAGOrchestrator:
                 cache_folder=self.cache_dir,
                 device=device
             )
-            logger.info(f"✅ Re-ranker loaded on {device}")
+            logger.info("reranker_loaded", device=device)
         except Exception as e:
             logger.warning(f"Re-ranker not available: {e}")
             self.reranker = None
@@ -3247,7 +3352,7 @@ class RAGOrchestrator:
 
         # Set global settings
         Settings.embed_model = self.embed_model
-        logger.info("✅ Models initialized successfully")
+        logger.info("models_initialized")
     
     def load_index(self, storage_dir="latest_model"):
         """Load existing index from latest_model/ directory."""
@@ -3279,7 +3384,7 @@ class RAGOrchestrator:
             document_evaluator=self.document_evaluator
         )
         
-        logger.info("✅ Index and retriever initialized")
+        logger.info("index_and_retriever_initialized")
         # Initialize glossary if configured
         self._load_glossary_index()
     

@@ -12,14 +12,13 @@ Author: Arrow Systems Inc
 from __future__ import annotations
 
 import os
-import logging
 import time
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -34,6 +33,14 @@ from .utils.feedback_manager import FeedbackManager
 from .utils.saved_response_manager import SavedResponseManager
 from .security import create_access_token
 from .routes.admin_routes import create_admin_router
+from .logging_config import configure_logging, get_logger
+from .middleware.logging_middleware import LoggingMiddleware
+from .logging_context import set_user_id, set_user_role, get_user_id, get_user_role
+from .utils.audit_log import audit_log
+
+# Configure structured logging early
+configure_logging(environment=os.getenv('ENV', os.getenv('NODE_ENV', 'dev')))
+logger = get_logger(__name__)
 
 
 # ============================================================================
@@ -61,63 +68,8 @@ async def run_blocking_rag_operation(func, *args, **kwargs):
         result = await asyncio.to_thread(func, *args, **kwargs)
         return result
     except Exception as e:
-        logger.error(f"Error in blocking RAG operation: {e}", exc_info=True)
+        logger.error("blocking_rag_operation_error", error=str(e), exc_info=True)
         raise
-
-# Configure logging
-# Determine log file path - try multiple locations
-log_file_path = None
-possible_log_paths = [
-    'api.log',  # Current directory
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'api.log'),  # Project root
-    os.path.join(os.getcwd(), 'api.log'),  # Current working directory
-    '/app/api.log',  # Docker
-    '/workspace/api.log',  # RunPod
-]
-
-for path in possible_log_paths:
-    try:
-        # Try to create/write to the file to test if it's writable
-        log_dir = os.path.dirname(path) if os.path.dirname(path) else '.'
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
-        # Test write
-        with open(path, 'a', encoding='utf-8') as f:
-            f.write('')  # Just test if we can write
-        log_file_path = path
-        break
-    except (OSError, PermissionError):
-        continue
-
-# If no path worked, use current directory
-if not log_file_path:
-    log_file_path = 'api.log'
-
-# Store log file path in module variable for use in main()
-_API_LOG_FILE_PATH = os.path.abspath(log_file_path)
-
-# Configure log rotation for 24/7 operation
-# Max file size: 10MB, keep 5 backup files (total ~50MB of logs)
-from logging.handlers import RotatingFileHandler
-
-max_bytes = 10 * 1024 * 1024  # 10 MB
-backup_count = 5
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        RotatingFileHandler(
-            log_file_path,
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding='utf-8'
-        ),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-logger.info(f"Logging initialized with rotation (max {max_bytes // (1024*1024)}MB, {backup_count} backups). Log file: {_API_LOG_FILE_PATH}")
 
 # Global variables for RAG pipeline and database
 rag_pipeline = None
@@ -241,7 +193,7 @@ class SessionManager:
         self._locks: Dict[str, asyncio.Lock] = {}
         self._locks_lock = asyncio.Lock()
         self.max_messages = max_messages
-        logger.info(f"SessionManager initialized (max {max_messages} messages per session)")
+        logger.info("session_manager_initialized", max_messages=max_messages)
     
     async def _get_lock(self, session_id: str) -> asyncio.Lock:
         """Get or create a lock for a session."""
@@ -377,35 +329,30 @@ async def lifespan(app: FastAPI):
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
     
     # Startup
-    logger.info("🚀 Starting FastAPI backend...")
+    environment = os.getenv('ENV', os.getenv('NODE_ENV', 'dev'))
+    logger.info("server_starting", environment=environment)
 
     # Ensure logs directory exists for feedback storage
     os.makedirs("logs", exist_ok=True)
     try:
         feedback_path = os.path.join("logs", "saved_answers.json")
         feedback_manager = FeedbackManager(feedback_path)
-        logger.info("✅ Feedback manager initialized")
+        logger.info("feedback_manager_initialized", path=feedback_path)
     except Exception as e:
         feedback_manager = None
-        logger.warning(f"⚠️ Feedback manager initialization failed: {e}")
+        logger.warning("feedback_manager_init_failed", error=str(e), exc_info=True)
 
     db_manager = DatabaseManager()
     saved_response_manager = SavedResponseManager(db_manager)
     await db_manager.seed_default_users()
-    logger.info("✅ SQLite database initialized at %s", DEFAULT_DB_PATH)
+    logger.info("database_initialized", path=DEFAULT_DB_PATH)
     
     # Check for multi-worker setup and warn about SQLite limitations
     gunicorn_workers = os.getenv("GUNICORN_WORKERS", "1")
     try:
         worker_count = int(gunicorn_workers)
         if worker_count > 1:
-            logger.warning("=" * 60)
-            logger.warning("⚠️  SQLITE MULTI-WORKER WARNING")
-            logger.warning("=" * 60)
-            logger.warning("SQLite has concurrency limitations with multiple workers.")
-            logger.warning("Concurrent writes may cause 'database is locked' errors.")
-            logger.warning("For production with multiple workers, consider migrating to PostgreSQL.")
-            logger.warning("=" * 60)
+            logger.warning("sqlite_multi_worker_warning", worker_count=worker_count, message="SQLite has concurrency limitations with multiple workers. Consider migrating to PostgreSQL.")
     except (ValueError, TypeError):
         pass  # Ignore if GUNICORN_WORKERS is not a valid integer
     
@@ -434,7 +381,7 @@ async def lifespan(app: FastAPI):
                 f"Checked paths: {possible_paths}"
             )
         
-        logger.info(f"Using storage path: {storage_path}")
+        logger.info("rag_pipeline_storage_path", storage_path=storage_path, checked_paths=possible_paths)
         
         # Use environment variable for cache directory if set
         cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface/hub')
@@ -447,10 +394,10 @@ async def lifespan(app: FastAPI):
             cache_dir=cache_dir,
             db_manager=db_manager
         )
-        logger.info("✅ RAG pipeline initialized successfully")
+        logger.info("rag_pipeline_initialized", storage_path=storage_path, cache_dir=cache_dir)
         
     except Exception as e:
-        logger.error(f"❌ Failed to initialize RAG pipeline: {e}")
+        logger.error("rag_pipeline_init_failed", error=str(e), exc_info=True)
         raise
     
     # Initialize query summarizer
@@ -459,18 +406,20 @@ async def lifespan(app: FastAPI):
             enabled=True,  # Enable by default
             min_length=500  # Summarize queries >500 chars
         )
-        logger.info("✅ Query summarizer initialized")
+        logger.info("query_summarizer_initialized", enabled=True, min_length=500)
     except Exception as e:
-        logger.warning(f"⚠️ Failed to initialize query summarizer: {e}")
+        logger.warning("query_summarizer_init_failed", error=str(e), exc_info=True)
         query_summarizer = None
     
     # Set startup time for uptime calculation
     app.state.start_time = time.time()
     
+    logger.info("server_started", environment=environment, startup_time=time.time())
+    
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down FastAPI backend...")
+    logger.info("server_shutting_down")
 
 
 # Create FastAPI app with lifespan
@@ -480,6 +429,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Add logging middleware FIRST (before CORS) to capture all requests
+app.add_middleware(LoggingMiddleware)
 
 # Add CORS middleware
 app.add_middleware(
@@ -707,14 +659,34 @@ async def health_check():
 
 
 @app.post("/auth/login", response_model=LoginResponse)
-async def auth_login(request: LoginRequest):
+async def auth_login(http_request: Request, login_request: LoginRequest):
     if not db_manager:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    user = await db_manager.authenticate_user(request.email, request.password)
+    user = await db_manager.authenticate_user(login_request.email, login_request.password)
     if not user:
+        # Audit failed login attempt
+        await audit_log(
+            "user_login_failed",
+            level="warning",
+            user_id=login_request.email,
+            metadata={"reason": "invalid_credentials"},
+            request=http_request,
+        )
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    
     token = create_access_token({"email": user["email"], "role": user["role"]})
+    
+    # Audit successful login
+    await audit_log(
+        "user_login",
+        level="info",
+        user_id=user["email"],
+        role=user["role"],
+        metadata={"user_id": str(user.get("id"))},
+        request=http_request,
+    )
+    
     return {"user": user, "token": token}
 
 
@@ -797,28 +769,46 @@ async def query_knowledge_base(request: QueryRequest):
         
         # Get chat history for this session (last 10 messages)
         chat_history = await session_manager.get_conversation_messages(session_id)
-        logger.info(f"Session {session_id}: {len(chat_history)} previous messages")
         
-        # Log incoming query
-        logger.info(f"📥 Received query: {request.query[:200]}{'...' if len(request.query) > 200 else ''}")
-        
-        # Get user information for role-based machine filtering
-        user_role = None
+        # Get user information from context (set by middleware)
+        from .logging_context import get_user_id, get_user_role
+        user_id = get_user_id()
+        user_role = get_user_role()
         user_machine_models = None
         
-        # TODO: When authentication is fully wired, get user from token/session
-        # For now, try to extract from Authorization header if available
-        # If no user info available, default to ADMIN role (full access) for backward compatibility
-        try:
-            from fastapi import Request, Header
-            # Try to get user from Authorization header if available
-            # This is a placeholder - actual implementation should use proper auth middleware
-            # For now, default to ADMIN (full access) if no user info
-            user_role = "ADMIN"  # Default to full access for backward compatibility
-            logger.debug("No user authentication available - using ADMIN role (full access)")
-        except Exception as e:
-            logger.debug(f"Could not get user info: {e} - using ADMIN role (full access)")
-            user_role = "ADMIN"  # Default to full access
+        # Get machine models for user if available
+        if user_id and db_manager:
+            try:
+                user = await db_manager.get_user_by_email(user_id)
+                if user:
+                    user_machine_models = user.get("machine_models", [])
+                    # Log retrieved machine models for debugging
+                    logger.debug(
+                        "user_machine_models_retrieved",
+                        user_id=user_id,
+                        machine_models=user_machine_models,
+                        user_role=user.get("role")
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to retrieve user machine models: {e}", exc_info=True)
+                pass
+        
+        # Default to ADMIN if no role available (for backward compatibility)
+        if not user_role:
+            user_role = "ADMIN"
+        
+        # Log query start with structured logging
+        logger.info(
+            "rag_query_start",
+            query=request.query[:500],  # First 500 chars
+            session_id=session_id,
+            chat_history_length=len(chat_history),
+            top_k=request.top_k,
+            alpha=request.alpha,
+            user_id=user_id,
+            role=user_role,
+            machines=user_machine_models or [],
+        )
         
         # Execute RAG query with chat history and machine filtering
         # Note: Retrieval uses only current query, but LLM gets chat history
@@ -836,6 +826,41 @@ async def query_knowledge_base(request: QueryRequest):
         )
         
         response_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Log query completion with structured logging
+        logger.info(
+            "rag_query_complete",
+            query=request.query[:500],
+            session_id=session_id,
+            total_latency_ms=response_time_ms,
+            chunks_retrieved=len(response.sources),
+            intent_type=response.intent.intent_type,
+            intent_confidence=response.intent.confidence,
+            confidence=response.confidence,
+            token_input=response.token_input,
+            token_output=response.token_output,
+            token_total=response.token_total,
+            cost_usd=response.cost_usd,
+            user_id=user_id,
+            role=user_role,
+        )
+        
+        # Audit log query (lightweight summary only)
+        # Note: We don't have direct access to Request here, but contextvars are set by middleware
+        await audit_log(
+            "rag_query",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "query": request.query[:200],  # First 200 chars only
+                "session_id": session_id,
+                "chunks_retrieved": len(response.sources),
+                "response_time_ms": response_time_ms,
+                "intent_type": response.intent.intent_type,
+            },
+            request=None,  # Request not available here, but contextvars are set by middleware
+        )
         
         # Store messages in session history
         await session_manager.add_message(session_id, "user", request.query)
@@ -871,7 +896,7 @@ async def query_knowledge_base(request: QueryRequest):
                 sources=response.sources
             )
         except Exception as e:
-            logger.warning(f"Failed to log query for analytics: {e}")
+            logger.warning("query_tracking_failed", error=str(e), exc_info=True)
         
         # Save to database if available
         # user_id already set above (or defaults to "api_user")
@@ -938,7 +963,7 @@ async def query_knowledge_base(request: QueryRequest):
 
 
 @app.post("/feedback", response_model=FeedbackResponse)
-async def submit_feedback(request: FeedbackRequest) -> FeedbackResponse:
+async def submit_feedback(http_request: Request, request: FeedbackRequest) -> FeedbackResponse:
     """
     Capture user feedback (thumbs up/down) for a given response.
     Persists to local JSON store, optional database, and updates caches.
@@ -947,6 +972,9 @@ async def submit_feedback(request: FeedbackRequest) -> FeedbackResponse:
 
     if not request.query.strip() or not request.answer.strip():
         raise HTTPException(status_code=400, detail="Query and answer are required for feedback.")
+
+    user_id = get_user_id() or request.user or "api_user"
+    user_role = get_user_role()
 
     saved_to_file = False
     saved_to_db = False
@@ -1019,6 +1047,21 @@ async def submit_feedback(request: FeedbackRequest) -> FeedbackResponse:
         except Exception as e:
             logger.warning(f"Failed to update caches based on feedback: {e}")
 
+    # Audit log feedback submission
+    await audit_log(
+        "user_feedback",
+        level="info",
+        user_id=user_id,
+        role=user_role,
+        metadata={
+            "is_helpful": request.is_helpful,
+            "query": request.query[:200],  # First 200 chars
+            "intent_type": request.intent_type,
+            "confidence": request.confidence,
+        },
+        request=http_request,
+    )
+
     status = "success"
     message = "Feedback recorded"
     if not saved_to_file and not saved_to_db:
@@ -1035,7 +1078,7 @@ async def submit_feedback(request: FeedbackRequest) -> FeedbackResponse:
 
 
 @app.post("/saved", response_model=SaveResponseResponse)
-async def toggle_saved_response(request: SaveResponseRequest) -> SaveResponseResponse:
+async def toggle_saved_response(http_request: Request, request: SaveResponseRequest) -> SaveResponseResponse:
     """
     Save or unsave a response (bookmark functionality).
     """
@@ -1044,7 +1087,8 @@ async def toggle_saved_response(request: SaveResponseRequest) -> SaveResponseRes
     if not request.query.strip() or not request.answer.strip():
         raise HTTPException(status_code=400, detail="Query and answer are required to save a response.")
 
-    user_id = request.user or "api_user"
+    user_id = get_user_id() or request.user or "api_user"
+    user_role = get_user_role()
     saved_to_file = False
     saved_to_db = False  # Dedicated DB storage not implemented
     cache_updated = False
@@ -1071,6 +1115,19 @@ async def toggle_saved_response(request: SaveResponseRequest) -> SaveResponseRes
             except Exception as e:
                 logger.warning(f"Failed to remove saved response locally: {e}")
         cache_updated = False
+
+    # Audit log save/unsave action
+    await audit_log(
+        "response_saved" if request.is_saved else "response_unsaved",
+        level="info",
+        user_id=user_id,
+        role=user_role,
+        metadata={
+            "query": request.query[:200],  # First 200 chars
+            "action": "save" if request.is_saved else "unsave",
+        },
+        request=http_request,
+    )
 
     status = "success"
     message = "Response saved" if request.is_saved else "Response unsaved"
@@ -1434,14 +1491,104 @@ async def get_all_documents():
                 if os.path.exists(file_path):
                     size_bytes = os.path.getsize(file_path)
                 
-                # Count chunks for this document
-                chunk_count = len(doc_chunks.get(filename, []))
+                # Count chunks for this document - try multiple methods for accuracy
+                chunk_count = 0
                 
-                # Get page count
-                page_count = len(doc_pages.get(filename, set()))
+                # Method 1: Query vector store directly for accurate count (source of truth)
+                if rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'vector_store'):
+                    try:
+                        vector_store = rag_pipeline.orchestrator.index.vector_store
+                        if vector_store:
+                            # Try to query vector store by metadata
+                            # For Qdrant, we can use scroll or query with filter
+                            if hasattr(vector_store, 'client') and hasattr(vector_store, 'collection_name'):
+                                # Qdrant vector store
+                                try:
+                                    from qdrant_client import models
+                                    qdrant_client = vector_store.client
+                                    collection_name = vector_store.collection_name
+                                    
+                                    # Query with metadata filter for this filename
+                                    # Use scroll to get all points with this filename
+                                    scroll_result = qdrant_client.scroll(
+                                        collection_name=collection_name,
+                                        scroll_filter=models.Filter(
+                                            must=[
+                                                models.FieldCondition(
+                                                    key="metadata.file_name",
+                                                    match=models.MatchValue(value=filename)
+                                                )
+                                            ]
+                                        ),
+                                        limit=10000,  # Large limit to get all chunks
+                                        with_payload=True,
+                                        with_vectors=False
+                                    )
+                                    # Count the points returned
+                                    # scroll_result is a tuple: (points, next_page_offset)
+                                    if scroll_result and len(scroll_result) >= 1:
+                                        points = scroll_result[0]  # First element is list of points
+                                        chunk_count = len(points) if points else 0
+                                        if chunk_count > 0:
+                                            logger.debug(f"Got chunk count {chunk_count} from Qdrant for {filename}")
+                                except ImportError:
+                                    logger.debug("qdrant_client not available for chunk counting")
+                                except Exception as e:
+                                    logger.debug(f"Failed to query Qdrant for chunk count {filename}: {e}")
+                    except Exception as e:
+                        logger.debug(f"Failed to get chunk count from vector store for {filename}: {e}")
+                
+                # Method 2: Fallback to corpus_nodes count if vector store query failed
+                if chunk_count == 0:
+                    chunk_count = len(doc_chunks.get(filename, []))
+                    if chunk_count > 0:
+                        logger.debug(f"Got chunk count {chunk_count} from corpus_nodes for {filename}")
+                
+                # If still 0, check if document exists in filesystem (it might just not be indexed yet)
+                if chunk_count == 0 and os.path.exists(file_path):
+                    logger.debug(f"Document {filename} exists but has 0 chunks - may not be indexed yet")
+                
+                # Get page count - try multiple methods for accuracy
+                page_count = 0
+                
+                # Method 1: Try to get actual page count from the file itself
+                if os.path.exists(file_path):
+                    try:
+                        if filename.lower().endswith('.pdf'):
+                            # For PDFs: use PyMuPDF to get actual page count
+                            import fitz  # PyMuPDF
+                            pdf_doc = fitz.open(file_path)
+                            page_count = len(pdf_doc)
+                            pdf_doc.close()
+                            logger.debug(f"Got page count {page_count} from PDF file for {filename}")
+                        elif filename.lower().endswith('.docx'):
+                            # For DOCX: estimate from paragraph count (rough approximation)
+                            try:
+                                from docx import Document as DocxDocument
+                                docx_doc = DocxDocument(file_path)
+                                # Rough estimate: ~20-30 paragraphs per page for technical docs
+                                paragraph_count = len(docx_doc.paragraphs)
+                                page_count = max(1, paragraph_count // 25)
+                                logger.debug(f"Got estimated page count {page_count} from DOCX file for {filename} ({paragraph_count} paragraphs)")
+                            except ImportError:
+                                logger.warning("python-docx not available for DOCX page count")
+                            except Exception as e:
+                                logger.warning(f"Failed to get page count from DOCX {filename}: {e}")
+                    except Exception as e:
+                        logger.warning(f"Failed to get page count from file {filename}: {e}")
+                        # Fall through to other methods
+                
+                # Method 2: Use page count from chunks if available (and file method didn't work)
                 if page_count == 0:
-                    # Fallback: estimate from chunk count or use 1
-                    page_count = max(1, chunk_count // 5)  # Rough estimate
+                    page_count = len(doc_pages.get(filename, set()))
+                    if page_count > 0:
+                        logger.debug(f"Got page count {page_count} from chunks for {filename}")
+                
+                # Method 3: Fallback estimate (only if both methods failed)
+                if page_count == 0:
+                    # Estimate from chunk count (rough: ~5 chunks per page)
+                    page_count = max(1, chunk_count // 5)
+                    logger.warning(f"Using estimated page count {page_count} for {filename} (from {chunk_count} chunks)")
                 
                 # Get file type
                 file_ext = os.path.splitext(filename)[1].lower()
@@ -1666,7 +1813,7 @@ async def get_document_chunks(filename: str):
 
 
 @app.post("/admin/documents/{filename}/toggle")
-async def toggle_document_status(filename: str, request: Dict[str, Any]):
+async def toggle_document_status(http_request: Request, filename: str, request: Dict[str, Any]):
     """
     Enable or disable a document.
     Inactive documents are excluded from search retrieval.
@@ -1675,6 +1822,9 @@ async def toggle_document_status(filename: str, request: Dict[str, Any]):
     
     if not rag_pipeline or not rag_pipeline.is_initialized():
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    user_id = get_user_id()
+    user_role = get_user_role()
     
     try:
         import urllib.parse
@@ -1691,6 +1841,20 @@ async def toggle_document_status(filename: str, request: Dict[str, Any]):
         
         status = "enabled" if is_active else "disabled"
         logger.info(f"Document {filename} {status}")
+        
+        # Audit log document toggle
+        await audit_log(
+            "document_toggled",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "filename": filename,
+                "is_active": is_active,
+                "status": status,
+            },
+            request=http_request,
+        )
         
         return {
             "status": "success",
@@ -1794,7 +1958,7 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
 
 
 @app.post("/admin/documents/{filename}/metadata")
-async def update_document_metadata_endpoint(filename: str, request: Dict[str, Any]):
+async def update_document_metadata_endpoint(http_request: Request, filename: str, request: Dict[str, Any]):
     """
     Update document metadata (machine_model, category, product_family, is_active).
     
@@ -1809,6 +1973,9 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
     
     if not rag_pipeline or not rag_pipeline.is_initialized():
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    user_id = get_user_id()
+    user_role = get_user_role()
     
     try:
         from .config.machine_models import is_valid_machine_model_list, get_allowed_machine_models, is_valid_machine_model
@@ -1863,6 +2030,19 @@ async def update_document_metadata_endpoint(filename: str, request: Dict[str, An
         
         from .utils.document_metadata import update_document_metadata
         update_document_metadata(filename, updates)
+        
+        # Audit log metadata update
+        await audit_log(
+            "document_metadata_updated",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "filename": filename,
+                "updates": updates,
+            },
+            request=http_request,
+        )
         
         logger.info(f"Updated metadata for {filename}: {updates}")
         
@@ -2099,10 +2279,13 @@ async def get_failed_queries_admin(
 
 
 @app.post("/admin/queries/mark_resolved")
-async def mark_query_resolved(request: Dict[str, Any]):
+async def mark_query_resolved(http_request: Request, request: Dict[str, Any]):
     """
     Mark a failed query as resolved.
     """
+    user_id = get_user_id()
+    user_role = get_user_role()
+    
     try:
         from utils.query_tracker import mark_query_resolved
         
@@ -2114,6 +2297,18 @@ async def mark_query_resolved(request: Dict[str, Any]):
         
         if not success:
             raise HTTPException(status_code=404, detail="Query not found")
+        
+        # Audit log query resolution
+        await audit_log(
+            "query_marked_resolved",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "query_id": query_id,
+            },
+            request=http_request,
+        )
         
         return {
             "status": "success",
@@ -2144,11 +2339,16 @@ async def get_query_stats():
 
 
 @app.post("/admin/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(http_request: Request, file: UploadFile = File(...)):
     """
     Upload a document (PDF or DOCX) and trigger single-file ingestion.
     Saves file to data/original_pdfs/ and ingests it into the existing index.
     """
+    # Get user from context
+    from .logging_context import get_user_id, get_user_role
+    user_id = get_user_id()
+    user_role = get_user_role()
+    
     # Security check
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
@@ -2156,6 +2356,16 @@ async def upload_document(file: UploadFile = File(...)):
     allowed_extensions = ['.pdf', '.docx', '.md', '.markdown']
     if not any(file.filename.lower().endswith(ext) for ext in allowed_extensions):
         raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}")
+    
+    # Audit log upload start
+    await audit_log(
+        "manual_upload_start",
+        level="info",
+        user_id=user_id,
+        role=user_role,
+        metadata={"filename": file.filename},
+        request=http_request,
+    )
     
     try:
         # Save file to data/original_pdfs/ directory
@@ -2168,6 +2378,7 @@ async def upload_document(file: UploadFile = File(...)):
         
         # Read file content
         content = await file.read()
+        file_size = len(content)
         
         # Save to both locations
         original_path = os.path.join(original_pdfs_dir, file.filename)
@@ -2179,7 +2390,7 @@ async def upload_document(file: UploadFile = File(...)):
         with open(data_path, "wb") as f:
             f.write(content)
         
-        logger.info(f"Uploaded file: {original_path} ({len(content)} bytes)")
+        logger.info("document_uploaded", filename=file.filename, size_bytes=file_size, path=original_path)
         
         # Import single-file ingestion utility
         from utils.single_file_ingestion import ingest_single_file
@@ -2212,7 +2423,7 @@ async def upload_document(file: UploadFile = File(...)):
             cache_dir = os.path.join(cache_dir, 'hub')
         
         # Ingest the single file
-        logger.info(f"Starting ingestion for {file.filename}...")
+        logger.info("ingestion_starting", filename=file.filename)
         result = ingest_single_file(
             file_path=data_path,  # Use data/ path for ingestion
             storage_dir=storage_path,
@@ -2221,10 +2432,37 @@ async def upload_document(file: UploadFile = File(...)):
         )
         
         if not result["success"]:
+            # Audit log ingestion error
+            await audit_log(
+                "manual_ingest_error",
+                level="error",
+                user_id=user_id,
+                role=user_role,
+                metadata={
+                    "filename": file.filename,
+                    "error": result.get('error', 'Unknown error'),
+                },
+                request=http_request,
+            )
             raise HTTPException(
                 status_code=500,
                 detail=f"Ingestion failed: {result.get('error', 'Unknown error')}"
             )
+        
+        # Audit log ingestion complete
+        await audit_log(
+            "manual_ingest_complete",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "filename": file.filename,
+                "page_count": result.get("page_count", 0),
+                "chunk_count": result.get("chunk_count", 0),
+                "size_bytes": file_size,
+            },
+            request=http_request,
+        )
         
         # Reload RAG pipeline to pick up new document
         global rag_pipeline
@@ -2257,7 +2495,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @app.post("/admin/chunks/{chunk_id}/regenerate-summary")
-async def regenerate_chunk_summary(chunk_id: str):
+async def regenerate_chunk_summary(http_request: Request, chunk_id: str):
     """Regenerate summary for a specific chunk."""
     global rag_pipeline, query_summarizer
     
@@ -2266,6 +2504,9 @@ async def regenerate_chunk_summary(chunk_id: str):
     
     if not rag_pipeline or not rag_pipeline.is_initialized():
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    user_id = get_user_id()
+    user_role = get_user_role()
     
     try:
         # Find the chunk
@@ -2287,6 +2528,19 @@ async def regenerate_chunk_summary(chunk_id: str):
         
         # Generate summary
         summary, was_summarized, _ = query_summarizer.summarize(chunk_text)
+        
+        # Audit log chunk summary regeneration
+        await audit_log(
+            "chunk_summary_regenerated",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "chunk_id": chunk_id,
+                "was_summarized": was_summarized,
+            },
+            request=http_request,
+        )
         
         return {
             "status": "success",

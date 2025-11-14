@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
+import { Toaster } from "@/components/ui/toaster";
 import type { ReactNode } from "react";
 import { Menu, Users, FileText, Activity, ArrowLeft, X, BarChart3 } from "lucide-react";
 
@@ -236,6 +237,7 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
           </div>
         </main>
       </div>
+      <Toaster />
     </div>
   );
 }

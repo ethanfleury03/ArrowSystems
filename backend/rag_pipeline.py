@@ -17,13 +17,11 @@ warnings.filterwarnings("ignore", message=".*validate_default.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 import os
-import logging
 from typing import List, Optional, Dict, Any
 from .orchestrator import RAGOrchestrator, StructuredResponse
+from .logging_config import get_logger
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class RAGPipeline:
@@ -60,10 +58,10 @@ class RAGPipeline:
             storage_dir: Directory containing the vector index
         """
         if self._initialized:
-            logger.info("RAG Pipeline already initialized")
+            logger.info("rag_pipeline_already_initialized", storage_dir=storage_dir)
             return
             
-        logger.info("🚀 Initializing RAG Pipeline...")
+        logger.info("rag_pipeline_initializing", storage_dir=storage_dir)
         
         # Initialize models
         self.orchestrator.initialize_models()
@@ -72,7 +70,7 @@ class RAGPipeline:
         self.orchestrator.load_index(storage_dir=storage_dir)
         
         self._initialized = True
-        logger.info("✅ RAG Pipeline initialized successfully")
+        logger.info("rag_pipeline_initialized", storage_dir=storage_dir)
     
     def query(
         self,
