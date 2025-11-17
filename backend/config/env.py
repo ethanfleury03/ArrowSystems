@@ -33,6 +33,9 @@ class Settings:
         
         # CORS Configuration
         self._load_cors_origins()
+        
+        # Rate Limiting Configuration
+        self._load_rate_limit_config()
     
     def _load_jwt_secret(self) -> None:
         """Load and validate JWT secret key."""
@@ -103,6 +106,23 @@ class Settings:
                     "http://localhost:3000",
                     "http://127.0.0.1:3000",
                 ]
+    
+    def _load_rate_limit_config(self) -> None:
+        """Load and validate rate limiting configuration."""
+        # Rate limiting enabled flag
+        rate_limit_enabled_str = os.getenv("RATE_LIMIT_ENABLED", "true").lower()
+        self.RATE_LIMIT_ENABLED = rate_limit_enabled_str in {"true", "1", "yes", "on"}
+        
+        # Global rate limit (applies to all endpoints unless overridden)
+        # Format: "number/period" (e.g., "100/minute", "20/second")
+        self.RATE_LIMIT_GLOBAL = os.getenv("RATE_LIMIT_GLOBAL", "100/minute")
+        
+        # Per-endpoint rate limits
+        # Login endpoint: stricter limit to prevent brute force attacks
+        self.RATE_LIMIT_LOGIN = os.getenv("RATE_LIMIT_LOGIN", "5/minute")
+        
+        # Query endpoint: moderate limit to prevent abuse
+        self.RATE_LIMIT_QUERY = os.getenv("RATE_LIMIT_QUERY", "10/minute")
 
 
 # Global settings instance

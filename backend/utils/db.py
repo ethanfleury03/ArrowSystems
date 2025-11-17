@@ -154,9 +154,9 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    name = Column(String(255))
+    name = Column(String(255), nullable=False)  # NOT NULL after migration
     role = Column(String(50), default="technician", nullable=False)
-    password_hash = Column(String(255))
+    password_hash = Column(String(255), nullable=False, server_default="")  # NOT NULL after migration
     company_name = Column(String(255))
     contact_name = Column(String(255))
     contact_phone = Column(String(50))
@@ -179,6 +179,7 @@ class QueryHistory(Base):
     response_time_ms = Column(Integer)
     metadata_json = Column("metadata", JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
     # Analytics columns
     machine_name = Column(String(255), nullable=True)
@@ -202,6 +203,7 @@ class Feedback(Base):
     confidence = Column(Float)
     intent_type = Column(String(100))
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     user = relationship("User", back_populates="feedback")
     query = relationship("QueryHistory", back_populates="feedback")
