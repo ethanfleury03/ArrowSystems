@@ -79,6 +79,7 @@ export interface QueryParams {
   alpha?: number;
   dynamic_windowing?: boolean;
   machine_confirmation?: boolean;
+  selected_machine?: string;
 }
 
 export interface UserInfo {
@@ -101,6 +102,7 @@ export async function sendQuery(query: string, params?: QueryParams): Promise<Qu
       alpha: params?.alpha ?? 0.5,
       dynamic_windowing: params?.dynamic_windowing ?? true,
       machine_confirmation: params?.machine_confirmation,
+      selected_machine: params?.selected_machine,
     });
     
     return response.data;
@@ -267,6 +269,35 @@ export async function toggleSavedResponse(payload: SaveResponsePayload): Promise
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to save response';
+      throw new Error(errorMessage);
+    }
+    throw error;
+  }
+}
+
+export interface Document {
+  filename: string;
+  size_bytes: number;
+  uploaded_date?: string;
+  chunk_count: number;
+  page_count: number;
+  file_path: string;
+  file_type: string;
+  machine_model?: string[] | null;
+}
+
+export interface DocumentsResponse {
+  documents: Document[];
+  total: number;
+}
+
+export async function getUserDocuments(): Promise<DocumentsResponse> {
+  try {
+    const response = await apiClient.get<DocumentsResponse>('/documents');
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to get documents';
       throw new Error(errorMessage);
     }
     throw error;

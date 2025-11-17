@@ -4,7 +4,7 @@ import { User, Sparkles, ThumbsUp, ThumbsDown, Bookmark, ExternalLink } from "lu
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { useState } from "react"
+import { useState, useEffect, useMemo } from "react"
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { submitFeedback, toggleSavedResponse } from "@/lib/api"
@@ -21,7 +21,32 @@ export function ChatMessage({ message }: ChatMessageProps) {
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false)
   const [isSaved, setIsSaved] = useState(message.metadata?.isSaved ?? false)
   const [isSaving, setIsSaving] = useState(false)
+  const [userRole, setUserRole] = useState<string | null>(null)
   const { toast } = useToast()
+
+  // Get user role from JWT token
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem("auth_token")
+      if (token) {
+        const payloadBase64 = token.split(".")[1]
+        if (payloadBase64) {
+          const payloadJson = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"))
+          const payload = JSON.parse(payloadJson)
+          setUserRole(payload?.role || null)
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to parse auth token for role:", error)
+    }
+  }, [])
+
+  // Check if user is admin or technician (should show thumbs up/down)
+  const showFeedbackButtons = useMemo(() => {
+    if (!userRole) return false
+    const roleUpper = userRole.toUpperCase()
+    return roleUpper === "ADMIN" || roleUpper === "TECHNICIAN"
+  }, [userRole])
 
   const handleFeedback = async (type: "up" | "down") => {
     if (!message.metadata) {
@@ -208,24 +233,28 @@ export function ChatMessage({ message }: ChatMessageProps) {
               </div>
             )}
             <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn("h-7 w-7", feedback === "up" && "bg-accent text-primary")}
-                disabled={isSubmittingFeedback}
-                onClick={() => handleFeedback("up")}
-              >
-                <ThumbsUp className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn("h-7 w-7", feedback === "down" && "bg-accent text-destructive")}
-                disabled={isSubmittingFeedback}
-                onClick={() => handleFeedback("down")}
-              >
-                <ThumbsDown className="h-3.5 w-3.5" />
-              </Button>
+              {showFeedbackButtons && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={cn("h-7 w-7", feedback === "up" && "bg-accent text-primary")}
+                    disabled={isSubmittingFeedback}
+                    onClick={() => handleFeedback("up")}
+                  >
+                    <ThumbsUp className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={cn("h-7 w-7", feedback === "down" && "bg-accent text-destructive")}
+                    disabled={isSubmittingFeedback}
+                    onClick={() => handleFeedback("down")}
+                  >
+                    <ThumbsDown className="h-3.5 w-3.5" />
+                  </Button>
+                </>
+              )}
               <Button
                 variant="ghost"
                 size="icon"
