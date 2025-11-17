@@ -21,6 +21,7 @@ export function ChatInterface() {
   const [isLoading, setIsLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [machineConfirmation, setMachineConfirmation] = useState(false)
+  const [selectedMachine, setSelectedMachine] = useState<string | null>(null)
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null)
   const onboardingShownRef = useRef(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -55,10 +56,11 @@ export function ChatInterface() {
           
           const companyName = user.company_name || "Customer"
           
-          // Format machine list as bullet points
+          // Format machine list as Markdown bullet points
           let machineListText = ""
           if (filteredMachines.length > 0) {
-            machineListText = filteredMachines.map(m => `• ${m}`).join("\n")
+            // Use Markdown list syntax (- for bullet points)
+            machineListText = filteredMachines.map(m => `- ${m}`).join("\n")
           } else {
             machineListText = "No machines assigned"
           }
@@ -66,7 +68,7 @@ export function ChatInterface() {
           const onboardingMessage: Message = {
             id: `onboarding-${Date.now()}`,
             role: "assistant",
-            content: `Hello ${companyName}, let's try to solve your problem.\n\nAccording to our records, you have the following machines:\n${machineListText}\n\nIs that correct?`,
+            content: `Hello ${companyName}, let's try to solve your problem.\n\nAccording to our records, you have the following machines:\n\n${machineListText}\n\nIs that correct?`,
             timestamp: new Date(),
           }
           
@@ -93,25 +95,60 @@ export function ChatInterface() {
       timestamp: new Date(),
     }
 
-    setMessages((prev) => [...prev, userMessage])
     const userInput = input.trim().toLowerCase()
+    const originalInput = input.trim()
     setInput("")
     setIsLoading(true)
 
     // Handle machine confirmation for customers
     if (userInfo?.role?.toUpperCase() === "CUSTOMER" && !machineConfirmation) {
+      // Add user message first
+      setMessages((prev) => [...prev, userMessage])
+      
       if (userInput === "yes" || userInput === "y") {
         // User confirmed machines
-        const confirmMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "Perfect. What can I help you with today?",
-          timestamp: new Date(),
+        const filteredMachines = userInfo.machine_models && userInfo.machine_models.length > 0
+          ? userInfo.machine_models.filter(m => m !== "GENERAL")
+          : []
+        
+        if (filteredMachines.length === 0) {
+          // No machines assigned, just confirm
+          const confirmMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: "assistant",
+            content: "Perfect. What can I help you with today?",
+            timestamp: new Date(),
+          }
+          setMessages((prev) => [...prev, confirmMessage])
+          setMachineConfirmation(true)
+          setIsLoading(false)
+          return
+        } else if (filteredMachines.length === 1) {
+          // Only one machine, auto-select it
+          const confirmMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: "assistant",
+            content: `Perfect! I'll help you with your ${filteredMachines[0]}. What can I help you with today?`,
+            timestamp: new Date(),
+          }
+          setMessages((prev) => [...prev, confirmMessage])
+          setMachineConfirmation(true)
+          setSelectedMachine(filteredMachines[0])
+          setIsLoading(false)
+          return
+        } else {
+          // Multiple machines - direct to sidebar selection
+          const confirmMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: "assistant",
+            content: "Perfect! Select the machine you would like to query in the sidebar and go ahead and get started.",
+            timestamp: new Date(),
+          }
+          setMessages((prev) => [...prev, confirmMessage])
+          setMachineConfirmation(true)
+          setIsLoading(false)
+          return
         }
-        setMessages((prev) => [...prev, confirmMessage])
-        setMachineConfirmation(true)
-        setIsLoading(false)
-        return
       } else if (userInput === "no" || userInput === "n") {
         // User said machines are wrong
         const rejectMessage: Message = {
@@ -128,7 +165,7 @@ export function ChatInterface() {
         const blockMessage: Message = {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: "Please confirm your machines first.",
+          content: "Please confirm your machines first by replying 'yes' or 'no'.",
           timestamp: new Date(),
         }
         setMessages((prev) => [...prev, blockMessage])
@@ -136,6 +173,31 @@ export function ChatInterface() {
         return
       }
     }
+
+    // Block queries until machine is selected (for customers with multiple machines)
+    // Check if user has multiple machines and hasn't selected one yet
+    if (userInfo?.role?.toUpperCase() === "CUSTOMER" && machineConfirmation) {
+      const filteredMachines = userInfo.machine_models && userInfo.machine_models.length > 0
+        ? userInfo.machine_models.filter(m => m !== "GENERAL")
+        : []
+      
+      // If multiple machines and none selected, block queries and direct to sidebar
+      if (filteredMachines.length > 1 && !selectedMachine) {
+        setMessages((prev) => [...prev, userMessage])
+        const blockMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: "Please select a machine from the sidebar first before asking questions.",
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, blockMessage])
+        setIsLoading(false)
+        return
+      }
+    }
+
+    // Add user message to chat (only if we're proceeding to RAG query)
+    setMessages((prev) => [...prev, userMessage])
 
     // Call RAG backend API
     try {
@@ -145,6 +207,7 @@ export function ChatInterface() {
         alpha: currentSettings.alpha,
         dynamic_windowing: currentSettings.dynamicWindowing,
         machine_confirmation: machineConfirmation || undefined,
+        selected_machine: selectedMachine || undefined,
       })
       const structuredSources = (response.sources ?? []).map((source) => ({
         id: source.id,
@@ -277,6 +340,9 @@ export function ChatInterface() {
         onNewConversationReady={handleNewConversationReady}
         onSettingsChange={handleSettingsChange}
         onLoadConversation={handleLoadConversation}
+        selectedMachine={selectedMachine}
+        onMachineChange={setSelectedMachine}
+        userInfo={userInfo}
       />
 
       <div className="flex flex-1 flex-col relative">

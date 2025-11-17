@@ -64,5 +64,21 @@
       "DuraFlex_Command Line Interface-Supplimental_V1.0_29April2025.pdf"
     ],
     "feedback_type": "positive"
+  },
+  {
+    "id": "20251117151730319088",
+    "timestamp": "2025-11-17T15:17:30.319110",
+    "user": "api_user",
+    "query": "What are the duraflex system requirements?",
+    "answer": "Definition: Mechanical Controller PCA: PCA board controlling motors and sensors on all DuraFlex modules\n\nBased on the provided documents, I cannot find specific information about \"DuraFlex system requirements\" for either the DuraBolt or EZCut 350R machines that you own.\n\nThe documents contain various technical specifications and requirements for your machines, but none specifically reference a \"DuraFlex\" system. The available documentation includes:\n\n**For the EZCut 350R:**\n- Space requirements (floor size) specifications [3]\n- Environmental conditions including humidity requirements of 30~90% [3]\n- Machine handling requirements noting wheels at the bottom for movement and forklift compatibility [3]\n- Camera system parameters that are factory-debugged and require no changes [1]\n- Motion system maintenance requirements including slide rail cleaning procedures [2]\n\n**General System Information:**\nThe documents reference various other systems and components, but do not contain specific \"DuraFlex\" system requirements or specifications.\n\n**Conclusion:**\nThe term \"DuraFlex\" does not appear in the provided technical documentation for your DuraBolt and EZCut 350R machines. To obtain accurate DuraFlex system requirements, you may need to consult additional technical documentation specific to that system, or contact technical support for clarification on whether this system is applicable to your particular machine models.\n\nIf you are referring to a different system or component by a similar name, please provide additional context so I can locate the relevant specifications in your machine documentation.",
+    "is_helpful": false,
+    "confidence": 0.7328941830485478,
+    "intent_type": "lookup",
+    "sources": [
+      "EZCut 350R Manual (1).docx.pdf",
+      "Unknown",
+      "print_quality_artefacts_reference_guide.pdf"
+    ],
+    "feedback_type": "negative"
   }
 ]

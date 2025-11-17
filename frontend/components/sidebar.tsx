@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { useState, useEffect, useMemo } from "react"
 import { useRouter, usePathname } from "next/navigation"
-import { getChatHistory, ChatHistoryItem, getHealth, getSavedResponses, SavedResponse } from "@/lib/api"
+import { getChatHistory, ChatHistoryItem, getHealth, getSavedResponses, SavedResponse, getUserDocuments, Document, getCurrentUser, UserInfo } from "@/lib/api"
 import type { Message as ChatMessage, MessageSource } from "@/types/message"
 
 interface SidebarProps {
@@ -17,6 +17,9 @@ interface SidebarProps {
   onNewConversationReady?: (adder: (conversation: ChatHistoryItem) => void) => void
   onSettingsChange?: (settings: QuerySettings) => void
   onLoadConversation?: (messages: ChatMessage[]) => void
+  selectedMachine?: string | null
+  onMachineChange?: (machine: string | null) => void
+  userInfo?: UserInfo | null
 }
 
 export interface QuerySettings {
@@ -27,15 +30,18 @@ export interface QuerySettings {
 
 // Removed mock data - will use real data from API
 
-export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsChange, onLoadConversation }: SidebarProps) {
-  const [activeTab, setActiveTab] = useState<"options" | "saved" | "history" | "settings">("options")
+export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsChange, onLoadConversation, selectedMachine, onMachineChange, userInfo }: SidebarProps) {
+  const [activeTab, setActiveTab] = useState<"options" | "saved" | "history" | "settings" | "documents">("options")
   const [searchQuery, setSearchQuery] = useState("")
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([])
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [showChatHistory, setShowChatHistory] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showDocuments, setShowDocuments] = useState(false)
   const [savedResponses, setSavedResponses] = useState<SavedResponse[]>([])
   const [isLoadingSaved, setIsLoadingSaved] = useState(false)
+  const [documents, setDocuments] = useState<Document[]>([])
+  const [isLoadingDocuments, setIsLoadingDocuments] = useState(false)
   const [userProfile, setUserProfile] = useState<{ name?: string | null; email?: string | null; role?: string | null } | null>(null)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   
@@ -101,6 +107,14 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, currentUserEmail])
 
+  // Fetch documents when showing documents tab
+  useEffect(() => {
+    if (showDocuments && documents.length === 0 && !isLoadingDocuments) {
+      fetchDocuments()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDocuments])
+
   useEffect(() => {
     const handler = () => fetchSavedResponses(currentUserEmail)
     window.addEventListener("saved-responses:refresh", handler)
@@ -135,6 +149,19 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
       setSavedResponses([])
     } finally {
       setIsLoadingSaved(false)
+    }
+  }
+
+  const fetchDocuments = async () => {
+    setIsLoadingDocuments(true)
+    try {
+      const response = await getUserDocuments()
+      setDocuments(response.documents)
+    } catch (error) {
+      console.error('Failed to fetch documents:', error)
+      setDocuments([])
+    } finally {
+      setIsLoadingDocuments(false)
     }
   }
 
@@ -315,6 +342,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
 
   const handleSettingsClick = () => {
     setShowSettings(true)
+    setShowDocuments(false)
     setActiveTab("settings")
     checkSystemStatus()
   }
@@ -322,6 +350,65 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   const handleBackFromSettings = () => {
     setShowSettings(false)
     setActiveTab("options")
+  }
+
+  const handleDocumentsClick = () => {
+    setShowDocuments(true)
+    setShowSettings(false)
+    setActiveTab("documents")
+    if (documents.length === 0) {
+      fetchDocuments()
+    }
+  }
+
+  const handleBackFromDocuments = () => {
+    setShowDocuments(false)
+    setActiveTab("options")
+  }
+
+  const handleDocumentClick = async (document: Document) => {
+    try {
+      // Get backend URL and auth token
+      const { resolveApiBaseUrl } = await import('@/config/api')
+      const backendUrl = resolveApiBaseUrl()
+      const authToken = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null
+      
+      // Fetch document with authentication
+      const headers: Record<string, string> = {}
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`
+      }
+      
+      const response = await fetch(`${backendUrl}/documents/${encodeURIComponent(document.filename)}`, {
+        headers,
+      })
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch document')
+      }
+      
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      window.open(url, '_blank')
+      
+      // Clean up the blob URL after a delay
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (error) {
+      console.error('Failed to open document:', error)
+      // Fallback: try opening directly (may require authentication on backend)
+      const { resolveApiBaseUrl } = await import('@/config/api')
+      const backendUrl = resolveApiBaseUrl()
+      const documentUrl = `${backendUrl}/documents/${encodeURIComponent(document.filename)}`
+      window.open(documentUrl, '_blank')
+    }
+  }
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return '0 B'
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
   }
 
   const updateQuerySettings = (updates: Partial<QuerySettings>) => {
@@ -547,9 +634,10 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                 setActiveTab("options")
                 setShowChatHistory(false)
                 setShowSettings(false)
+                setShowDocuments(false)
               }}
               className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === "options" && !showChatHistory && !showSettings
+                activeTab === "options" && !showChatHistory && !showSettings && !showDocuments
                   ? "border-b-2 border-primary text-foreground"
                   : "text-muted-foreground hover:text-foreground"
               }`}
@@ -561,9 +649,10 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                 setActiveTab("saved")
                 setShowChatHistory(false)
                 setShowSettings(false)
+                setShowDocuments(false)
               }}
               className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === "saved" && !showChatHistory && !showSettings
+                activeTab === "saved" && !showChatHistory && !showSettings && !showDocuments
                   ? "border-b-2 border-primary text-foreground"
                   : "text-muted-foreground hover:text-foreground"
               }`}
@@ -689,29 +778,160 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                   </div>
                 </div>
               ) : (
-                <nav className="space-y-1 p-4">
-                  <Button 
-                    variant="ghost" 
-                    className="w-full justify-start gap-3"
-                    onClick={handleChatHistoryClick}
-                  >
-                    <History className="h-4 w-4" />
-                    Chat History
-                  </Button>
-                  <Button variant="ghost" className="w-full justify-start gap-3">
-                    <FileText className="h-4 w-4" />
-                    Documents
-                  </Button>
-                  <Button 
-                    variant="ghost" 
-                    className="w-full justify-start gap-3"
-                    onClick={handleSettingsClick}
-                  >
-                    <Settings className="h-4 w-4" />
-                    Settings
-                  </Button>
-                </nav>
+                <div className="flex flex-col">
+                  {/* Machine Selector (for customers with multiple machines) */}
+                  {userInfo?.role?.toUpperCase() === "CUSTOMER" && userInfo.machine_models && userInfo.machine_models.filter(m => m !== "GENERAL").length > 1 && (
+                    <div className="border-b border-border p-4 bg-muted/30">
+                      <Label className="text-sm font-semibold text-foreground mb-2 block">
+                        Select Machine:
+                      </Label>
+                      {!selectedMachine && (
+                        <p className="text-xs text-muted-foreground mb-3 p-2 rounded bg-background border border-border">
+                          Please select a machine to filter your queries.
+                        </p>
+                      )}
+                      <div className="space-y-1">
+                        {userInfo.machine_models.filter(m => m !== "GENERAL").map((machine) => (
+                          <Button
+                            key={machine}
+                            variant={selectedMachine === machine ? "default" : "outline"}
+                            size="sm"
+                            className="w-full justify-start text-xs"
+                            onClick={() => onMachineChange?.(machine)}
+                          >
+                            {machine}
+                            {selectedMachine === machine && (
+                              <CheckCircle2 className="h-3 w-3 ml-auto" />
+                            )}
+                          </Button>
+                        ))}
+                      </div>
+                      {selectedMachine && (
+                        <p className="text-xs text-muted-foreground mt-2 p-2 rounded bg-primary/10 text-primary">
+                          Filtering to: <span className="font-medium">{selectedMachine}</span> + General documents
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  
+                  <nav className="space-y-1 p-4">
+                    <Button 
+                      variant="ghost" 
+                      className="w-full justify-start gap-3"
+                      onClick={handleChatHistoryClick}
+                    >
+                      <History className="h-4 w-4" />
+                      Chat History
+                    </Button>
+                    <Button 
+                      variant="ghost" 
+                      className="w-full justify-start gap-3"
+                      onClick={handleDocumentsClick}
+                    >
+                      <FileText className="h-4 w-4" />
+                      Documents
+                    </Button>
+                    <Button 
+                      variant="ghost" 
+                      className="w-full justify-start gap-3"
+                      onClick={handleSettingsClick}
+                    >
+                      <Settings className="h-4 w-4" />
+                      Settings
+                    </Button>
+                  </nav>
+                </div>
               )}
+            </div>
+          ) : showDocuments ? (
+            <div className="flex-1 overflow-y-auto flex flex-col">
+              {/* Documents Header */}
+              <div className="border-b border-border p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-4 w-4 text-primary" />
+                    <h3 className="font-semibold text-sm">Documents</h3>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleBackFromDocuments}
+                    className="h-7 px-2"
+                  >
+                    Back
+                  </Button>
+                </div>
+                {isLoadingDocuments && (
+                  <p className="text-xs text-muted-foreground">Loading documents...</p>
+                )}
+                {!isLoadingDocuments && documents.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {documents.length} {documents.length === 1 ? "document" : "documents"} available
+                  </p>
+                )}
+              </div>
+
+              {/* Documents List */}
+              <div className="flex-1 overflow-y-auto p-4">
+                {isLoadingDocuments ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="text-sm text-muted-foreground">Loading...</div>
+                  </div>
+                ) : documents.length > 0 ? (
+                  <div className="space-y-2">
+                    {documents.map((doc) => (
+                      <button
+                        key={doc.filename}
+                        className="w-full rounded-lg border border-border bg-card p-3 text-left transition-colors hover:bg-accent hover:border-primary/50 group"
+                        onClick={() => handleDocumentClick(doc)}
+                      >
+                        <div className="flex items-start gap-2">
+                          <FileText className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5 group-hover:text-primary transition-colors" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-foreground line-clamp-1 leading-relaxed">
+                              {doc.filename}
+                            </p>
+                            <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                              {doc.page_count > 0 && (
+                                <span className="text-xs text-muted-foreground">
+                                  {doc.page_count} {doc.page_count === 1 ? "page" : "pages"}
+                                </span>
+                              )}
+                              {doc.size_bytes > 0 && (
+                                <span className="text-xs text-muted-foreground">
+                                  {formatFileSize(doc.size_bytes)}
+                                </span>
+                              )}
+                              {doc.file_type && (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase">
+                                  {doc.file_type}
+                                </span>
+                              )}
+                            </div>
+                            {doc.machine_model && doc.machine_model.length > 0 && (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                {doc.machine_model.map((machine, idx) => (
+                                  <span key={idx} className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">
+                                    {machine}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <FileText className="h-12 w-12 text-muted-foreground/30 mb-3" />
+                    <p className="text-sm font-medium text-foreground mb-1">No documents available</p>
+                    <p className="text-xs text-muted-foreground">
+                      Documents matching your account will appear here
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
           ) : showSettings ? (
             <div className="flex-1 overflow-y-auto flex flex-col">

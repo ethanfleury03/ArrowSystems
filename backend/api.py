@@ -456,6 +456,7 @@ class QueryRequest(BaseModel):
     metadata_filters: Optional[Dict[str, Any]] = Field(None, description="Optional metadata filters")
     dynamic_windowing: bool = Field(True, description="Enable dynamic context windowing")
     machine_confirmation: Optional[bool] = Field(None, description="Whether user has confirmed their machine list (for customers)")
+    selected_machine: Optional[str] = Field(None, description="Selected machine for this session (hybrid approach - filters to this machine + GENERAL)")
 
 
 class SourceInfo(BaseModel):
@@ -827,6 +828,23 @@ async def query_knowledge_base(request: QueryRequest):
                     detail="Please confirm your machines first."
                 )
         
+        # Hybrid approach: If selected_machine is provided, use only that machine + GENERAL
+        # Otherwise, use all assigned machines (backward compatibility)
+        effective_machine_models = user_machine_models
+        if request.selected_machine:
+            # Validate that selected_machine is in user's assigned machines
+            if user_machine_models and request.selected_machine not in user_machine_models:
+                logger.warning(
+                    f"User {user_id} selected machine '{request.selected_machine}' not in their assigned machines: {user_machine_models}"
+                )
+                # Still allow it - might be a GENERAL case or edge case
+            # Use only selected machine + GENERAL for filtering
+            from .config.machine_models import GENERAL_MACHINE
+            effective_machine_models = [request.selected_machine, GENERAL_MACHINE]
+            logger.info(
+                f"Using hybrid approach: filtering to selected machine '{request.selected_machine}' + GENERAL"
+            )
+        
         # Log query start with structured logging
         logger.info(
             "rag_query_start",
@@ -837,7 +855,8 @@ async def query_knowledge_base(request: QueryRequest):
             alpha=request.alpha,
             user_id=user_id,
             role=user_role,
-            machines=user_machine_models or [],
+            machines=effective_machine_models or [],
+            selected_machine=request.selected_machine,
         )
         
         # Execute RAG query with chat history and machine filtering
@@ -852,7 +871,7 @@ async def query_knowledge_base(request: QueryRequest):
             dynamic_windowing=request.dynamic_windowing,
             chat_history=chat_history,  # Pass chat history to pipeline
             role=user_role,  # Pass user role for machine-based filtering
-            user_machine_models=user_machine_models,  # Pass machine models for filtering
+            user_machine_models=effective_machine_models,  # Pass effective machine models (selected + GENERAL or all)
             machine_confirmation=request.machine_confirmation or False  # Pass machine confirmation
         )
         
@@ -1409,6 +1428,164 @@ async def get_machine_models_for_selection_endpoint():
 # This is a placeholder for future implementation of CRUD operations for machine models
 # The actual list is currently managed in backend/config/machine_models.py
 # Future endpoint: GET/POST/PUT/DELETE /admin/machine_models/manage
+
+
+@app.get("/documents")
+async def get_user_documents():
+    """
+    Get documents available to the current user based on their machine models.
+    For customers: returns documents for their assigned machines + GENERAL documents.
+    For admins/technicians: returns all documents.
+    """
+    global rag_pipeline, db_manager
+    
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    try:
+        # Get user information from context
+        from .logging_context import get_user_id, get_user_role
+        user_id = get_user_id()
+        user_role = get_user_role()
+        user_machine_models = None
+        
+        # Get machine models for user if available
+        if user_id and db_manager:
+            try:
+                user = await db_manager.get_user_by_email(user_id)
+                if user:
+                    user_machine_models = user.get("machine_models", [])
+            except Exception as e:
+                logger.warning(f"Failed to retrieve user machine models: {e}", exc_info=True)
+        
+        # Default to ADMIN if no role available
+        if not user_role:
+            user_role = "ADMIN"
+        
+        # Get effective machines for this user
+        from .config.machine_models import get_effective_machines_for_user, GENERAL_MACHINE, ANY_MACHINE
+        effective_machines = get_effective_machines_for_user(user_role, user_machine_models or [])
+        
+        # Get all documents (reuse logic from admin endpoint)
+        from .utils.document_metadata import get_document_metadata
+        
+        documents = []
+        
+        # Group chunks by document filename
+        doc_chunks = {}
+        doc_pages = {}
+        seen_filenames = set()
+        
+        if hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
+            retriever = rag_pipeline.orchestrator.retriever
+            if hasattr(retriever, 'corpus_nodes') and retriever.corpus_nodes:
+                for node_wrapper in retriever.corpus_nodes:
+                    node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+                    if hasattr(node, 'metadata') and node.metadata:
+                        filename = node.metadata.get('file_name', 'Unknown')
+                        if filename and filename != 'Unknown':
+                            seen_filenames.add(filename)
+                            if filename not in doc_chunks:
+                                doc_chunks[filename] = []
+                                doc_pages[filename] = set()
+                            doc_chunks[filename].append(node)
+                            page_label = node.metadata.get('page_label')
+                            if page_label:
+                                try:
+                                    page_num = int(str(page_label).split('.')[0])
+                                    doc_pages[filename].add(page_num)
+                                except:
+                                    pass
+        
+        # Get from filesystem
+        data_dir = "data"
+        if os.path.exists(data_dir):
+            for filename in os.listdir(data_dir):
+                if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+                    file_path = os.path.join(data_dir, filename)
+                    if os.path.isfile(file_path):
+                        seen_filenames.add(filename)
+        
+        # Process each document and filter by machine models
+        for filename in seen_filenames:
+            try:
+                file_path = os.path.join("data", filename)
+                size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                
+                # Get metadata
+                doc_metadata = get_document_metadata(filename)
+                machine_model = doc_metadata.get("machine_model")
+                
+                # Normalize machine_model to list
+                if isinstance(machine_model, str):
+                    machine_model = [machine_model]
+                elif machine_model is None:
+                    machine_model = []
+                
+                # Filter: include document if:
+                # 1. It has no machine_model (None or empty list) - include for all
+                # 2. It has "GENERAL" in machine_model - always include
+                # 3. It has "Any" in machine_model - always include
+                # 4. Any of its machine_models are in the user's effective_machines
+                should_include = False
+                
+                if not machine_model or len(machine_model) == 0:
+                    # No machine model assigned - include for all users
+                    should_include = True
+                elif GENERAL_MACHINE in machine_model or ANY_MACHINE in machine_model:
+                    # GENERAL or Any - always include
+                    should_include = True
+                else:
+                    # Check if any machine_model matches user's effective machines
+                    should_include = any(m in effective_machines for m in machine_model)
+                
+                if not should_include:
+                    continue  # Skip this document
+                
+                # Count chunks
+                chunk_count = len(doc_chunks.get(filename, []))
+                
+                # Get page count
+                page_count = len(doc_pages.get(filename, set()))
+                if page_count == 0 and os.path.exists(file_path):
+                    try:
+                        if filename.lower().endswith('.pdf'):
+                            import fitz
+                            pdf_doc = fitz.open(file_path)
+                            page_count = len(pdf_doc)
+                            pdf_doc.close()
+                    except:
+                        pass
+                
+                # Get file type
+                file_ext = os.path.splitext(filename)[1].lower()
+                file_type = file_ext[1:] if file_ext else 'pdf'
+                
+                documents.append({
+                    "filename": filename,
+                    "size_bytes": size_bytes,
+                    "uploaded_date": doc_metadata.get("last_ingestion_date"),
+                    "chunk_count": chunk_count,
+                    "page_count": page_count,
+                    "file_path": file_path,
+                    "file_type": file_type,
+                    "machine_model": machine_model if machine_model else None,
+                })
+            except Exception as e:
+                logger.debug(f"Error processing document {filename}: {e}")
+                continue
+        
+        # Sort by filename
+        documents.sort(key=lambda x: x['filename'])
+        
+        return {
+            "documents": documents,
+            "total": len(documents),
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching user documents: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
 
 
 @app.get("/admin/documents")

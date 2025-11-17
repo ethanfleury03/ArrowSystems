@@ -2854,14 +2854,14 @@ class ClaudeAnswerGenerator:
             # Build messages list with trimmed chat history + current query
             messages = []
             
-            # Add system message with machine list if confirmed
+            # Build system message with machine list if confirmed (Claude uses separate system parameter)
+            system_message = None
             if machine_confirmation and user_machine_models:
                 # Filter out GENERAL from the list for display
                 display_machines = [m for m in user_machine_models if m != "GENERAL"]
                 if display_machines:
                     machine_list_str = ", ".join(display_machines)
                     system_message = f"This customer owns the following machines: {machine_list_str}.\n\nAll retrieval must be restricted to these machines.\nDo not reference any other machines."
-                    messages.append({"role": "system", "content": system_message})
             
             # Add trimmed chat history (excluding current query)
             if trimmed_history:
@@ -2877,12 +2877,19 @@ class ClaudeAnswerGenerator:
             
             # Generate answer with Claude
             llm_start_time = time.time()
-            response = self.claude_client.messages.create(
-                model=self.model_name,
-                max_tokens=2000,  # Increased for more detailed technical answers
-                temperature=0.1,
-                messages=messages
-            )
+            # Build request parameters
+            request_params = {
+                "model": self.model_name,
+                "max_tokens": 2000,  # Increased for more detailed technical answers
+                "temperature": 0.1,
+                "messages": messages
+            }
+            
+            # Add system parameter if we have a system message (Claude requires it as top-level param, not in messages)
+            if system_message:
+                request_params["system"] = system_message
+            
+            response = self.claude_client.messages.create(**request_params)
             llm_time_ms = (time.time() - llm_start_time) * 1000
             
             answer = response.content[0].text
