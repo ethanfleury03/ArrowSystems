@@ -803,8 +803,9 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         def _fetch():
             with SessionLocal() as session:
                 # Debug: Check database file path
-                from ..utils.db import DEFAULT_DB_PATH
-                logger.info("audit_logs_query", database_path=DEFAULT_DB_PATH, message="Starting audit logs query")
+                from ..utils.db import DEFAULT_DB_PATH, _is_sqlite, DATABASE_URL
+                db_path = DEFAULT_DB_PATH if _is_sqlite(DATABASE_URL) and DEFAULT_DB_PATH else "production_database"
+                logger.info("audit_logs_query", database_path=db_path, message="Starting audit logs query")
                 
                 # Debug: Check if table exists and has data
                 inspector = inspect(session.bind)

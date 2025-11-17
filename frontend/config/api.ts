@@ -1,3 +1,5 @@
+import { isDev, isProd } from '@/lib/env';
+
 const DEFAULT_SERVER_BACKEND = 'http://backend:8000';
 const DEFAULT_CLIENT_BACKEND = 'http://localhost:8000';
 
@@ -9,7 +11,18 @@ const SERVER_BACKEND =
 // Get client backend URL - detect from current hostname when accessed from network
 // This function is called at runtime, not at module load time, so it can access window
 const getClientBackendUrl = (): string => {
-  // First check environment variables (these are set at build time)
+  // Production: NEXT_PUBLIC_API_URL must be provided (validated at build time)
+  if (isProd) {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (!apiUrl) {
+      // This should never happen if build-time validation worked, but provide fallback
+      console.error('NEXT_PUBLIC_API_URL is required in production but was not set');
+      throw new Error('API URL not configured. NEXT_PUBLIC_API_URL must be set in production.');
+    }
+    return apiUrl;
+  }
+
+  // Development: Allow env var override, otherwise auto-detect
   if (process.env.NEXT_PUBLIC_API_URL) {
     return process.env.NEXT_PUBLIC_API_URL;
   }
@@ -37,17 +50,34 @@ const getClientBackendUrl = (): string => {
 };
 
 const getRuntimeOverride = (): string | null => {
+  // Production: Disable localStorage overrides for security
+  if (isProd) {
+    // Clean up any existing overrides
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('apiBaseUrlOverride');
+      window.localStorage.removeItem('useLocalBackend');
+    }
+    return null;
+  }
+
+  // Development: Allow localStorage overrides
   if (typeof window === 'undefined') {
     return null;
   }
 
   const useLocal = window.localStorage.getItem('useLocalBackend');
   if (useLocal === 'true') {
+    if (isDev) {
+      console.warn('[DEV] Using localStorage override: useLocalBackend=true');
+    }
     return DEFAULT_CLIENT_BACKEND;
   }
 
   const manualOverride = window.localStorage.getItem('apiBaseUrlOverride');
   if (manualOverride) {
+    if (isDev) {
+      console.warn('[DEV] Using localStorage override:', manualOverride);
+    }
     return manualOverride;
   }
 

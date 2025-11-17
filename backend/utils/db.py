@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -19,25 +20,127 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
     inspect,
     text,
 )
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, declarative_base, relationship, scoped_session, sessionmaker
 
+from ..config.env import settings
+
+logger = logging.getLogger(__name__)
+
 _backend_dir = Path(__file__).resolve().parent.parent
-_env_db_path = os.getenv("SQLITE_DB_PATH")
-if _env_db_path:
-    DEFAULT_DB_PATH = str(Path(_env_db_path).resolve())
+
+
+def _get_database_url() -> str:
+    """
+    Get database URL based on environment (dev vs prod).
+    
+    - Dev: Uses SQLite (default or SQLITE_DB_PATH)
+    - Prod: Requires DATABASE_URL, fails if SQLite detected
+    """
+    if settings.is_dev:
+        # Development: use SQLite
+        _env_db_path = os.getenv("SQLITE_DB_PATH")
+        if _env_db_path:
+            default_db_path = str(Path(_env_db_path).resolve())
+        else:
+            default_db_path = str((_backend_dir / "database.sqlite").resolve())
+        return f"sqlite:///{default_db_path}"
+    
+    # Production: require DATABASE_URL
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL environment variable is required in production. "
+            "Set ENV=prod and provide a valid database connection string."
+        )
+    
+    # Fail fast if SQLite is detected in production
+    if database_url.startswith("sqlite://") or database_url.startswith("sqlite:///"):
+        raise RuntimeError(
+            "SQLite cannot be used in production. "
+            "Provide a production database (e.g., PostgreSQL) via DATABASE_URL. "
+            f"Received: {database_url[:50]}..."
+        )
+    
+    return database_url
+
+
+def _is_sqlite(url: str) -> bool:
+    """Check if database URL is SQLite."""
+    return url.startswith("sqlite://")
+
+
+def _configure_sqlite_pragmas(dbapi_conn: Any, connection_record: Any) -> None:
+    """
+    Configure SQLite PRAGMAs for better performance and safety.
+    Only applies in dev mode.
+    
+    Args:
+        dbapi_conn: Raw DBAPI connection (sqlite3.Connection)
+        connection_record: SQLAlchemy connection record
+    """
+    if not settings.is_dev:
+        return
+    
+    cursor = dbapi_conn.cursor()
+    # Enable foreign key constraints
+    cursor.execute("PRAGMA foreign_keys=ON")
+    
+    # Enable WAL mode for better concurrency
+    cursor.execute("PRAGMA journal_mode=WAL")
+    
+    # Set synchronous mode to NORMAL (balance between safety and performance)
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    
+    # Set busy timeout to 5 seconds (retry locked database for 5s)
+    cursor.execute("PRAGMA busy_timeout=5000")
+    
+    cursor.close()
+    logger.debug("SQLite PRAGMAs configured: foreign_keys=ON, journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000")
+
+
+def get_engine() -> Engine:
+    """
+    Get database engine with proper configuration.
+    Handles dev vs prod database selection.
+    """
+    database_url = _get_database_url()
+    is_sqlite_db = _is_sqlite(database_url)
+    
+    # Configure connection args based on database type
+    connect_args = {}
+    if is_sqlite_db:
+        # SQLite-specific connection args
+        connect_args["check_same_thread"] = False
+    
+    engine = create_engine(
+        database_url,
+        connect_args=connect_args,
+        future=True,
+    )
+    
+    # Add SQLite PRAGMA configuration event listener (dev only)
+    if is_sqlite_db and settings.is_dev:
+        @event.listens_for(engine, "connect")
+        def set_sqlite_pragmas(dbapi_conn, connection_record):
+            _configure_sqlite_pragmas(dbapi_conn, connection_record)
+    
+    return engine
+
+
+# Initialize engine
+DATABASE_URL = _get_database_url()
+engine = get_engine()
+
+# Compute DEFAULT_DB_PATH for backward compatibility (SQLite only)
+if _is_sqlite(DATABASE_URL):
+    DEFAULT_DB_PATH = DATABASE_URL.replace("sqlite:///", "")
 else:
-    DEFAULT_DB_PATH = str((_backend_dir / "database.sqlite").resolve())
-
-DATABASE_URL = f"sqlite:///{DEFAULT_DB_PATH}"
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    future=True,
-)
+    DEFAULT_DB_PATH = None  # Not applicable for non-SQLite databases
 
 SessionLocal = scoped_session(
     sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
@@ -247,8 +350,45 @@ def ensure_user_columns() -> None:
             connection.execute(text("ALTER TABLE users ADD COLUMN machine_models TEXT DEFAULT '[]'"))
 
 
+def check_database_integrity() -> tuple[bool, str]:
+    """
+    Check database integrity using PRAGMA integrity_check.
+    Only works for SQLite.
+    
+    Returns:
+        Tuple of (is_healthy, message)
+    """
+    if not _is_sqlite(DATABASE_URL):
+        # For non-SQLite databases, assume healthy (PostgreSQL has its own checks)
+        return True, "Integrity check not available for non-SQLite databases"
+    
+    try:
+        with engine.connect() as connection:
+            result = connection.execute(text("PRAGMA integrity_check")).scalar()
+            if result == "ok":
+                return True, "ok"
+            else:
+                return False, str(result) or "Integrity check failed"
+    except Exception as e:
+        logger.error(f"Database integrity check failed: {e}", exc_info=True)
+        return False, f"Integrity check error: {str(e)}"
+
+
 def init_db() -> None:
-    os.makedirs(os.path.dirname(DEFAULT_DB_PATH) or ".", exist_ok=True)
+    """Initialize database: create tables and run migrations."""
+    # Get database path for SQLite (for directory creation)
+    if _is_sqlite(DATABASE_URL):
+        db_path = DATABASE_URL.replace("sqlite:///", "")
+        # Ensure parent directory exists
+        parent_dir = os.path.dirname(db_path)
+        if parent_dir:  # Only create if there's a parent directory
+            try:
+                os.makedirs(parent_dir, exist_ok=True)
+            except (OSError, PermissionError) as e:
+                logger.warning(f"Could not create database directory {parent_dir}: {e}. Continuing anyway.")
+        # Ensure the database file's parent directory is writable
+        if not os.access(parent_dir if parent_dir else ".", os.W_OK):
+            raise RuntimeError(f"Database directory is not writable: {parent_dir or '.'}")
     
     # First ensure audit_logs table exists (manual creation to handle migrations)
     # This must be done BEFORE Base.metadata.create_all() to avoid conflicts

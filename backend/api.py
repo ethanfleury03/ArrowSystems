@@ -27,7 +27,7 @@ import uvicorn
 from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from .orchestrator import StructuredResponse, QueryIntent
 from .utils.database_manager import DatabaseManager
-from .utils.db import DEFAULT_DB_PATH
+from .utils.db import DEFAULT_DB_PATH, engine, check_database_integrity, _is_sqlite, DATABASE_URL
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
 from .utils.saved_response_manager import SavedResponseManager
@@ -37,10 +37,24 @@ from .logging_config import configure_logging, get_logger
 from .middleware.logging_middleware import LoggingMiddleware
 from .logging_context import set_user_id, set_user_role, get_user_id, get_user_role
 from .utils.audit_log import audit_log
+from .config.env import settings
 
-# Configure structured logging early
-configure_logging(environment=os.getenv('ENV', os.getenv('NODE_ENV', 'dev')))
+# Configure structured logging early (using centralized settings)
+configure_logging(environment=settings.ENV)
 logger = get_logger(__name__)
+
+
+def get_error_detail(error: Exception, generic_message: str) -> str:
+    """
+    Get error detail message based on environment.
+    
+    In dev: returns full error message for debugging.
+    In prod: returns generic message, full error is logged server-side.
+    """
+    if settings.is_prod:
+        return generic_message
+    else:
+        return f"{generic_message}: {str(error)}"
 
 
 # ============================================================================
@@ -329,8 +343,7 @@ async def lifespan(app: FastAPI):
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
     
     # Startup
-    environment = os.getenv('ENV', os.getenv('NODE_ENV', 'dev'))
-    logger.info("server_starting", environment=environment)
+    logger.info("server_starting", environment=settings.ENV)
 
     # Ensure logs directory exists for feedback storage
     os.makedirs("logs", exist_ok=True)
@@ -342,19 +355,34 @@ async def lifespan(app: FastAPI):
         feedback_manager = None
         logger.warning("feedback_manager_init_failed", error=str(e), exc_info=True)
 
-    db_manager = DatabaseManager()
-    saved_response_manager = SavedResponseManager(db_manager)
-    await db_manager.seed_default_users()
-    logger.info("database_initialized", path=DEFAULT_DB_PATH)
-    
-    # Check for multi-worker setup and warn about SQLite limitations
+    # Check for unsafe multi-worker SQLite usage in production
     gunicorn_workers = os.getenv("GUNICORN_WORKERS", "1")
     try:
         worker_count = int(gunicorn_workers)
-        if worker_count > 1:
+        if worker_count > 1 and settings.is_prod and _is_sqlite(DATABASE_URL):
+            raise RuntimeError(
+                "SQLite cannot be used in production with multiple workers. "
+                "Either use a single worker (GUNICORN_WORKERS=1) or migrate to PostgreSQL."
+            )
+        elif worker_count > 1 and settings.is_dev and _is_sqlite(DATABASE_URL):
             logger.warning("sqlite_multi_worker_warning", worker_count=worker_count, message="SQLite has concurrency limitations with multiple workers. Consider migrating to PostgreSQL.")
     except (ValueError, TypeError):
         pass  # Ignore if GUNICORN_WORKERS is not a valid integer
+    
+    # Initialize database
+    db_manager = DatabaseManager()
+    saved_response_manager = SavedResponseManager(db_manager)
+    await db_manager.seed_default_users()
+    db_path = DEFAULT_DB_PATH if _is_sqlite(DATABASE_URL) and DEFAULT_DB_PATH else "production_database"
+    logger.info("database_initialized", path=db_path)
+    
+    # Run database integrity check (SQLite only)
+    if _is_sqlite(DATABASE_URL):
+        is_healthy, integrity_message = check_database_integrity()
+        if not is_healthy:
+            logger.error("database_integrity_check_failed", message=integrity_message)
+            raise RuntimeError(f"Database integrity check failed: {integrity_message}")
+        logger.info("database_integrity_check_passed", message=integrity_message)
     
     # Initialize RAG pipeline
     try:
@@ -414,12 +442,20 @@ async def lifespan(app: FastAPI):
     # Set startup time for uptime calculation
     app.state.start_time = time.time()
     
-    logger.info("server_started", environment=environment, startup_time=time.time())
+    logger.info("server_started", environment=settings.ENV, startup_time=time.time())
     
     yield
     
     # Shutdown
     logger.info("server_shutting_down")
+    
+    # Cleanup database connections
+    try:
+        # Dispose of all database connections
+        engine.dispose()
+        logger.info("database_connections_closed")
+    except Exception as e:
+        logger.warning("database_shutdown_error", error=str(e), exc_info=True)
 
 
 # Create FastAPI app with lifespan
@@ -433,10 +469,10 @@ app = FastAPI(
 # Add logging middleware FIRST (before CORS) to capture all requests
 app.add_middleware(LoggingMiddleware)
 
-# Add CORS middleware
+# Add CORS middleware (configured via centralized settings)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=settings.CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -555,6 +591,8 @@ class HealthResponse(BaseModel):
     status: str
     rag_pipeline_initialized: bool
     database_connected: bool
+    database_query_success: Optional[bool] = None
+    database_error: Optional[str] = None
     uptime_seconds: float
 
 
@@ -653,12 +691,122 @@ async def health_check():
     """Health check endpoint."""
     global rag_pipeline, db_manager
     
-    return HealthResponse(
-        status="healthy" if rag_pipeline and rag_pipeline.is_initialized() else "unhealthy",
+    # Test database connection with a lightweight query
+    database_query_success = None
+    database_error = None
+    if db_manager is not None:
+        try:
+            from .utils.db import engine, text
+            with engine.connect() as connection:
+                result = connection.execute(text("SELECT 1")).scalar()
+                database_query_success = result == 1
+        except Exception as e:
+            database_query_success = False
+            database_error = str(e) if settings.is_dev else "Database connection failed"
+    
+    is_healthy = (
+        rag_pipeline is not None 
+        and rag_pipeline.is_initialized() 
+        and db_manager is not None
+        and (database_query_success is None or database_query_success)
+    )
+    
+    response = HealthResponse(
+        status="healthy" if is_healthy else "unhealthy",
         rag_pipeline_initialized=rag_pipeline is not None and rag_pipeline.is_initialized(),
         database_connected=db_manager is not None,
+        database_query_success=database_query_success,
         uptime_seconds=time.time() - app.state.start_time if hasattr(app.state, 'start_time') else 0
     )
+    
+    # Only include error details in dev mode
+    if settings.is_dev:
+        response.database_error = database_error
+    
+    return response
+
+
+class DatabaseHealthResponse(BaseModel):
+    """Database health check response model."""
+    status: str
+    database_type: str
+    sqlite_version: Optional[str] = None
+    integrity_check: Optional[str] = None
+    integrity_status: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    wal_checkpoint_status: Optional[str] = None
+    test_query_success: bool
+    error: Optional[str] = None
+
+
+@app.get("/admin/db/health", response_model=DatabaseHealthResponse)
+async def database_health_check():
+    """
+    Detailed database health check endpoint.
+    Provides SQLite-specific information in dev mode.
+    """
+    from .utils.db import engine, text, _is_sqlite, DATABASE_URL, check_database_integrity
+    
+    database_type = "sqlite" if _is_sqlite(DATABASE_URL) else "postgresql"
+    sqlite_version = None
+    integrity_check = None
+    integrity_status = None
+    file_size_bytes = None
+    wal_checkpoint_status = None
+    test_query_success = False
+    error = None
+    
+    try:
+        # Test basic query
+        with engine.connect() as connection:
+            result = connection.execute(text("SELECT 1")).scalar()
+            test_query_success = result == 1
+        
+        # SQLite-specific checks
+        if _is_sqlite(DATABASE_URL):
+            with engine.connect() as connection:
+                # Get SQLite version
+                sqlite_version = connection.execute(text("SELECT sqlite_version()")).scalar()
+                
+                # Run integrity check
+                is_healthy, integrity_message = check_database_integrity()
+                integrity_status = "ok" if is_healthy else "failed"
+                integrity_check = integrity_message
+                
+                # Get file size
+                db_path = DATABASE_URL.replace("sqlite:///", "")
+                if os.path.exists(db_path):
+                    file_size_bytes = os.path.getsize(db_path)
+                    
+                    # Check WAL file if it exists
+                    wal_path = f"{db_path}-wal"
+                    if os.path.exists(wal_path):
+                        wal_size = os.path.getsize(wal_path)
+                        wal_checkpoint_status = f"WAL file exists ({wal_size} bytes)"
+                    else:
+                        wal_checkpoint_status = "No WAL file (not in WAL mode or no pending writes)"
+        
+        status = "healthy" if test_query_success else "unhealthy"
+        
+    except Exception as e:
+        status = "error"
+        test_query_success = False
+        error = str(e) if settings.is_dev else "Database health check failed"
+        logger.error("database_health_check_failed", error=str(e), exc_info=True)
+    
+    response = DatabaseHealthResponse(
+        status=status,
+        database_type=database_type,
+        sqlite_version=sqlite_version if settings.is_dev else None,
+        integrity_check=integrity_check if settings.is_dev else None,
+        integrity_status=integrity_status if settings.is_dev else None,
+        file_size_bytes=file_size_bytes if settings.is_dev else None,
+        wal_checkpoint_status=wal_checkpoint_status if settings.is_dev else None,
+        test_query_success=test_query_success,
+        error=error if settings.is_dev else None,
+    )
+    
+    return response
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -1008,7 +1156,7 @@ async def query_knowledge_base(request: QueryRequest):
         logger.error(f"Error processing query: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Error processing query: {str(e)}"
+            detail=get_error_detail(e, "An internal error occurred while processing your request")
         )
 
 
@@ -1585,7 +1733,7 @@ async def get_user_documents():
         
     except Exception as e:
         logger.error(f"Error fetching user documents: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching documents"))
 
 
 @app.get("/admin/documents")
@@ -1854,7 +2002,7 @@ async def get_all_documents():
         
     except Exception as e:
         logger.error(f"Error fetching documents: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching documents"))
 
 
 @app.get("/admin/chunks")
@@ -1927,7 +2075,7 @@ async def get_all_chunks(page: int = 1, page_size: int = 50):
         
     except Exception as e:
         logger.error(f"Error fetching chunks: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch chunks: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching chunks"))
 
 
 @app.get("/admin/chunks/{chunk_id}")
@@ -1977,7 +2125,7 @@ async def get_chunk_detail(chunk_id: str):
         raise
     except Exception as e:
         logger.error(f"Error fetching chunk detail: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch chunk: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching chunk"))
 
 
 @app.get("/admin/documents/{filename}/chunks")
@@ -2017,7 +2165,7 @@ async def get_document_chunks(filename: str):
         
     except Exception as e:
         logger.error(f"Error fetching document chunks: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch document chunks: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching document chunks"))
 
 
 @app.post("/admin/documents/{filename}/toggle")
@@ -2074,7 +2222,7 @@ async def toggle_document_status(http_request: Request, filename: str, request: 
         raise
     except Exception as e:
         logger.error(f"Error toggling document status: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to toggle document status: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while toggling document status"))
 
 
 @app.patch("/admin/documents/{filename}/machine_model")
@@ -2162,7 +2310,7 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
         raise
     except Exception as e:
         logger.error(f"Error updating machine_model: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update machine_model: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while updating machine model"))
 
 
 @app.post("/admin/documents/{filename}/metadata")
@@ -2264,7 +2412,7 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
         raise
     except Exception as e:
         logger.error(f"Error updating metadata: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while updating metadata"))
 
 
 @app.delete("/admin/documents/{filename}")
@@ -2411,7 +2559,7 @@ async def delete_document(filename: str):
         raise
     except Exception as e:
         logger.error(f"Error deleting document: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while deleting document"))
 
 
 # =============================================================================
@@ -2452,7 +2600,7 @@ async def get_all_queries_admin(
         
     except Exception as e:
         logger.error(f"Error fetching queries: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch queries: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching queries"))
 
 
 @app.get("/admin/queries/failed")
@@ -2483,7 +2631,7 @@ async def get_failed_queries_admin(
         
     except Exception as e:
         logger.error(f"Error fetching failed queries: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch failed queries: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching failed queries"))
 
 
 @app.post("/admin/queries/mark_resolved")
@@ -2527,7 +2675,7 @@ async def mark_query_resolved(http_request: Request, request: Dict[str, Any]):
         raise
     except Exception as e:
         logger.error(f"Error marking query as resolved: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to mark query as resolved: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while marking query as resolved"))
 
 
 @app.get("/admin/queries/stats")
@@ -2543,7 +2691,7 @@ async def get_query_stats():
         
     except Exception as e:
         logger.error(f"Error fetching query stats: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch query stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching query stats"))
 
 
 @app.post("/admin/documents/upload")
@@ -2699,7 +2847,7 @@ async def upload_document(http_request: Request, file: UploadFile = File(...)):
         raise
     except Exception as e:
         logger.error(f"Error uploading/ingesting document: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to upload/ingest document: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while uploading/ingesting document"))
 
 
 @app.post("/admin/chunks/{chunk_id}/regenerate-summary")
@@ -2761,7 +2909,7 @@ async def regenerate_chunk_summary(http_request: Request, chunk_id: str):
         raise
     except Exception as e:
         logger.error(f"Error regenerating summary: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to regenerate summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while regenerating summary"))
 
 
 @app.delete("/admin/chunks/{chunk_id}")
@@ -2823,7 +2971,7 @@ async def get_missing_summaries():
         
     except Exception as e:
         logger.error(f"Error fetching missing summaries: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch missing summaries: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching missing summaries"))
 
 
 @app.post("/admin/summaries/generate-batch")
@@ -2873,7 +3021,7 @@ async def generate_batch_summaries():
         
     except Exception as e:
         logger.error(f"Error generating batch summaries: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to generate batch summaries: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while generating batch summaries"))
 
 
 @app.post("/admin/search-sandbox", response_model=SearchSandboxResponse)
@@ -2925,7 +3073,7 @@ async def search_sandbox(request: SearchSandboxRequest):
         
     except Exception as e:
         logger.error(f"Error in search sandbox: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred during search"))
 
 
 # Startup time is now set in lifespan handler above
@@ -2945,8 +3093,8 @@ def main():
     args = parser.parse_args()
     
     # Configure uvicorn logging to also write to file
-    # Use the log file path that was determined during logging setup
-    log_file_path = _API_LOG_FILE_PATH
+    # Default log file path (can be overridden via environment variable)
+    log_file_path = os.getenv("API_LOG_FILE_PATH", "api.log")
     
     # Create a custom log config for uvicorn that writes to both file and console
     # Uvicorn access logs use a special format, so we use the default access format
@@ -3041,11 +3189,34 @@ def main():
         if not args.dev:
             logger.warning("⚠️  Running with --reload flag. For production, use Gunicorn with multiple workers.")
         logger.info("🔧 Running in development mode with Uvicorn (single worker)")
+        
+        # Configure reload directories to avoid watching large mounted volumes
+        # This prevents memory issues with the file watcher in Docker
+        reload_dirs = ["backend"] if os.path.exists("backend") else None
+        reload_excludes = [
+            "*.pyc",
+            "__pycache__",
+            ".git",
+            ".cache",
+            "node_modules",
+            "*.log",
+            "*.sqlite",
+            "*.sqlite-*",
+            "*.db",
+            "latest_model",
+            "storage",
+            "data",
+            "logs",
+            ".next",
+        ]
+        
         uvicorn.run(
             "backend.api:app",
             host=args.host,
             port=args.port,
             reload=args.reload,
+            reload_dirs=reload_dirs,
+            reload_excludes=reload_excludes,
             log_level="info",
             log_config=log_config,
         )

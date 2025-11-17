@@ -1,3 +1,6 @@
+# DEPRECATED — use docker-compose.dev.yml or docker-compose.prod.yml instead.
+# This file is kept for backward compatibility but should not be used for new deployments.
+
 services:
   # FastAPI Backend
   backend:

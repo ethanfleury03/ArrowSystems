@@ -4,9 +4,19 @@
  */
 
 import { NextRequest } from 'next/server';
+import { isProd } from './env';
 
 export function getBackendUrl(request?: NextRequest | Request | { headers: Headers | { get: (name: string) => string | null } }): string {
-  // First check environment variables (highest priority)
+  // Production: NEXT_PUBLIC_API_URL must be provided (validated at build time)
+  if (isProd) {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL;
+    if (!apiUrl) {
+      throw new Error('NEXT_PUBLIC_API_URL is required in production but was not set');
+    }
+    return apiUrl;
+  }
+
+  // Development: Check environment variables first
   if (process.env.BACKEND_URL) {
     return process.env.BACKEND_URL;
   }
@@ -57,7 +67,7 @@ export function getBackendUrl(request?: NextRequest | Request | { headers: Heade
     }
   }
   
-  // Fallback to localhost
+  // Fallback to localhost for development
   return 'http://localhost:8000';
 }
 

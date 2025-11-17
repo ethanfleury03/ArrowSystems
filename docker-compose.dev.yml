@@ -1,0 +1,91 @@
+version: '3.8'
+
+# Development Docker Compose Configuration
+# Fast iteration with hot reload for both backend and frontend
+#
+# IMPORTANT: BuildKit must be enabled for proper dependency caching.
+# Set these environment variables before running docker-compose:
+#   PowerShell: $env:DOCKER_BUILDKIT = "1"; $env:COMPOSE_DOCKER_CLI_BUILD = "1"
+#   Bash: export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
+# Or run: .\enable-buildkit.ps1 (PowerShell) or source docker-build.env (Bash)
+
+services:
+  # FastAPI Backend - Development Mode
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.backend
+      args:
+        BUILD_ENV: development
+    container_name: rag-backend-dev
+    ports:
+      - "8000:8000"
+    environment:
+      - ENV=dev
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SQLITE_DB_PATH=/app/backend/database.sqlite
+      - SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-admin@example.com}
+      - SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD:-admin123}
+      - SEED_TECH_EMAIL=${SEED_TECH_EMAIL:-}
+      - SEED_TECH_PASSWORD=${SEED_TECH_PASSWORD:-}
+      - HF_HOME=/app/.cache/huggingface
+    volumes:
+      # Mount code for hot reload
+      - ./backend:/app/backend
+      - ./latest_model:/app/latest_model:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./storage:/app/storage
+      - hf_cache:/app/.cache/huggingface
+      # Mount database file location (directory mount allows file creation)
+      - ./backend:/app/db_data
+    command: python -m backend.api --host 0.0.0.0 --port 8000 --dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - rag-network
+
+  # Next.js Frontend - Development Mode
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+      args:
+        NODE_ENV: development
+    container_name: rag-frontend-dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - SESSION_SECRET=${SESSION_SECRET:-dev-session-secret-not-for-production}
+      - BACKEND_URL=http://backend:8000
+      - NEXT_PUBLIC_SERVER_BACKEND_URL=http://backend:8000
+      - SERVER_BACKEND_URL=http://backend:8000
+    volumes:
+      # Mount code for hot reload
+      - ./frontend:/app
+      - /app/node_modules
+      # Note: .next is NOT mounted to allow fresh builds and avoid chunk errors
+    command: npm run dev
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  hf_cache:
+    driver: local
+

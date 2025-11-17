@@ -6,7 +6,10 @@ from typing import Any, Dict, Optional
 
 import jwt
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-this-secret")
+from .config.env import settings
+
+# Use JWT secret from centralized settings (validated at startup)
+JWT_SECRET_KEY = settings.JWT_SECRET_KEY
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 

@@ -2,19 +2,65 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from sqlalchemy import select, func, desc
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, OperationalError
 
 import os
 
 import bcrypt
 
-from .db import SessionLocal, User, QueryHistory, Feedback, SavedResponse, init_db
+from .db import SessionLocal, User, QueryHistory, Feedback, SavedResponse, init_db, _is_sqlite, DATABASE_URL
 from .db import run_sync
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def _retry_on_locked(func: Callable[..., T], max_retries: int = 5, *args: Any, **kwargs: Any) -> T:
+    """
+    Retry a database operation on SQLite "database is locked" errors.
+    Uses exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms
+    
+    Only retries for SQLite and only on OperationalError with "database is locked".
+    """
+    if not _is_sqlite(DATABASE_URL):
+        # No retry needed for non-SQLite databases
+        return func(*args, **kwargs)
+    
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except OperationalError as e:
+            error_str = str(e).lower()
+            if "database is locked" in error_str or "database locked" in error_str:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 100ms * 2^attempt
+                    wait_time = 0.1 * (2 ** attempt)
+                    logger.warning(
+                        f"Database locked, retrying in {wait_time:.3f}s (attempt {attempt + 1}/{max_retries})",
+                        exc_info=False
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"Database locked after {max_retries} attempts",
+                        exc_info=True
+                    )
+            else:
+                # Not a locking error, re-raise immediately
+                raise
+        except Exception as e:
+            # Not an OperationalError or not a locking error, re-raise immediately
+            raise
+    
+    # If we get here, all retries failed
+    raise last_exception or RuntimeError("Database operation failed after retries")
 
 
 class DatabaseManager:
@@ -35,7 +81,7 @@ class DatabaseManager:
             password_hash="",
         )
         session.add(user)
-        session.commit()
+        _retry_on_locked(session.commit)
         session.refresh(user)
         return user.id
 
@@ -124,7 +170,7 @@ class DatabaseManager:
                     machine_models=machine_models_list,
                 )
                 session.add(user)
-                session.commit()
+                _retry_on_locked(session.commit)
                 session.refresh(user)
                 return self._serialize_user(user)
 
@@ -191,7 +237,7 @@ class DatabaseManager:
                     from ..config.machine_models import normalize_machine_models
                     user.machine_models = normalize_machine_models(machine_models)
 
-                session.commit()
+                _retry_on_locked(session.commit)
                 session.refresh(user)
                 return self._serialize_user(user)
 
@@ -227,7 +273,7 @@ class DatabaseManager:
                 if not user:
                     return False
                 session.delete(user)
-                session.commit()
+                _retry_on_locked(session.commit)
                 return True
 
         return await run_sync(_delete)
@@ -320,7 +366,7 @@ class DatabaseManager:
                         sources_json=sources_json_str,
                     )
                     session.add(record)
-                    session.commit()
+                    _retry_on_locked(session.commit)
                     session.refresh(record)
                     return str(record.id)
             except SQLAlchemyError as exc:  # pragma: no cover
@@ -388,7 +434,7 @@ class DatabaseManager:
                     intent_type=intent_type,
                 )
                 session.add(feedback)
-                session.commit()
+                _retry_on_locked(session.commit)
                 return True
 
         return await run_sync(_save)
@@ -438,7 +484,7 @@ class DatabaseManager:
                 if existing:
                     existing.answer_text = answer_text
                     existing.sources = sources or []
-                    session.commit()
+                    _retry_on_locked(session.commit)
                     return True
 
                 saved = SavedResponse(
@@ -448,7 +494,7 @@ class DatabaseManager:
                     sources=sources or [],
                 )
                 session.add(saved)
-                session.commit()
+                _retry_on_locked(session.commit)
                 return True
 
         return await run_sync(_upsert)
@@ -469,7 +515,7 @@ class DatabaseManager:
                 if not record:
                     return False
                 session.delete(record)
-                session.commit()
+                _retry_on_locked(session.commit)
                 return True
 
         return await run_sync(_remove)

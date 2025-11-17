@@ -1,7 +1,10 @@
 /**
  * Frontend logging utility
  * Writes logs to a file on the server side via API route
+ * Respects NEXT_PUBLIC_LOG_LEVEL environment variable
  */
+
+import { getLogLevel, shouldLog, isDev } from './env';
 
 export enum LogLevel {
   DEBUG = 'DEBUG',
@@ -92,24 +95,43 @@ class Logger {
   }
 
   async debug(message: string, metadata?: Record<string, any>): Promise<void> {
+    if (!shouldLog('debug')) {
+      return;
+    }
     const entry = this.formatMessage(LogLevel.DEBUG, message, metadata);
-    console.debug(`[${this.loggerName}] ${message}`, metadata || '');
+    // Only log to console in dev mode
+    if (isDev) {
+      console.debug(`[${this.loggerName}] ${message}`, metadata || '');
+    }
     await this.writeLog(entry);
   }
 
   async info(message: string, metadata?: Record<string, any>): Promise<void> {
+    if (!shouldLog('info')) {
+      return;
+    }
     const entry = this.formatMessage(LogLevel.INFO, message, metadata);
-    console.info(`[${this.loggerName}] ${message}`, metadata || '');
+    // Only log to console in dev mode
+    if (isDev) {
+      console.info(`[${this.loggerName}] ${message}`, metadata || '');
+    }
     await this.writeLog(entry);
   }
 
   async warning(message: string, metadata?: Record<string, any>): Promise<void> {
+    if (!shouldLog('warn')) {
+      return;
+    }
     const entry = this.formatMessage(LogLevel.WARNING, message, metadata);
+    // Always log warnings to console
     console.warn(`[${this.loggerName}] ${message}`, metadata || '');
     await this.writeLog(entry);
   }
 
   async error(message: string, error?: Error | any, metadata?: Record<string, any>): Promise<void> {
+    if (!shouldLog('error')) {
+      return;
+    }
     const errorMessage = error instanceof Error ? `${message}: ${error.message}` : message;
     const errorMetadata = {
       ...metadata,
@@ -120,11 +142,13 @@ class Logger {
       } : error,
     };
     const entry = this.formatMessage(LogLevel.ERROR, errorMessage, errorMetadata);
+    // Always log errors to console
     console.error(`[${this.loggerName}] ${errorMessage}`, errorMetadata);
     await this.writeLog(entry);
   }
 
   async critical(message: string, error?: Error | any, metadata?: Record<string, any>): Promise<void> {
+    // Critical errors are always logged
     const errorMessage = error instanceof Error ? `${message}: ${error.message}` : message;
     const errorMetadata = {
       ...metadata,
@@ -135,6 +159,7 @@ class Logger {
       } : error,
     };
     const entry = this.formatMessage(LogLevel.CRITICAL, errorMessage, errorMetadata);
+    // Always log critical errors to console
     console.error(`[${this.loggerName}] [CRITICAL] ${errorMessage}`, errorMetadata);
     await this.writeLog(entry);
     // Flush immediately for critical errors
