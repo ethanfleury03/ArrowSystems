@@ -81,7 +81,8 @@ class RAGPipeline:
         dynamic_windowing: bool = True,
         chat_history: Optional[List[Dict[str, str]]] = None,
         role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
-        user_machine_models: Optional[List[str]] = None  # Machine models for document-level filtering
+        user_machine_models: Optional[List[str]] = None,  # Machine models for document-level filtering
+        machine_confirmation: bool = False  # Whether user has confirmed their machine list
     ) -> StructuredResponse:
         """
         Execute RAG query with full orchestration.
@@ -109,7 +110,8 @@ class RAGPipeline:
             dynamic_windowing=dynamic_windowing,
             chat_history=chat_history,
             role=role,
-            user_machine_models=user_machine_models
+            user_machine_models=user_machine_models,
+            machine_confirmation=machine_confirmation
         )
     
     def format_response(self, response: StructuredResponse) -> str:

@@ -455,6 +455,7 @@ class QueryRequest(BaseModel):
     alpha: float = Field(0.5, description="Hybrid search weight (0=BM25 only, 1=dense only)", ge=0.0, le=1.0)
     metadata_filters: Optional[Dict[str, Any]] = Field(None, description="Optional metadata filters")
     dynamic_windowing: bool = Field(True, description="Enable dynamic context windowing")
+    machine_confirmation: Optional[bool] = Field(None, description="Whether user has confirmed their machine list (for customers)")
 
 
 class SourceInfo(BaseModel):
@@ -623,6 +624,7 @@ class UserResponse(BaseModel):
     email: str
     name: Optional[str] = None
     role: str
+    company_name: Optional[str] = None
     machine_models: Optional[List[str]] = None  # List of machine model strings
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -688,6 +690,25 @@ async def auth_login(http_request: Request, login_request: LoginRequest):
     )
     
     return {"user": user, "token": token}
+
+
+@app.get("/auth/me", response_model=UserResponse)
+async def auth_get_current_user():
+    """Get current authenticated user information."""
+    if not db_manager:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    from .logging_context import get_user_id
+    user_id = get_user_id()
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # user_id is the email from the JWT token
+    user = await db_manager.get_user_by_email(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
@@ -797,6 +818,15 @@ async def query_knowledge_base(request: QueryRequest):
         if not user_role:
             user_role = "ADMIN"
         
+        # Check machine confirmation for customers
+        # Customers must confirm their machine list before querying
+        if user_role and user_role.upper() == "CUSTOMER":
+            if request.machine_confirmation is not True:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Please confirm your machines first."
+                )
+        
         # Log query start with structured logging
         logger.info(
             "rag_query_start",
@@ -822,7 +852,8 @@ async def query_knowledge_base(request: QueryRequest):
             dynamic_windowing=request.dynamic_windowing,
             chat_history=chat_history,  # Pass chat history to pipeline
             role=user_role,  # Pass user role for machine-based filtering
-            user_machine_models=user_machine_models  # Pass machine models for filtering
+            user_machine_models=user_machine_models,  # Pass machine models for filtering
+            machine_confirmation=request.machine_confirmation or False  # Pass machine confirmation
         )
         
         response_time_ms = int((time.time() - start_time) * 1000)

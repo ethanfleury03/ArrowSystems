@@ -78,6 +78,18 @@ export interface QueryParams {
   top_k?: number;
   alpha?: number;
   dynamic_windowing?: boolean;
+  machine_confirmation?: boolean;
+}
+
+export interface UserInfo {
+  id: string;
+  email: string;
+  name?: string;
+  role: string;
+  company_name?: string;
+  machine_models?: string[];
+  created_at?: string;
+  updated_at?: string;
 }
 
 export async function sendQuery(query: string, params?: QueryParams): Promise<QueryResponse> {
@@ -88,12 +100,26 @@ export async function sendQuery(query: string, params?: QueryParams): Promise<Qu
       top_k: params?.top_k ?? 10,
       alpha: params?.alpha ?? 0.5,
       dynamic_windowing: params?.dynamic_windowing ?? true,
+      machine_confirmation: params?.machine_confirmation,
     });
     
     return response.data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to get response';
+      throw new Error(errorMessage);
+    }
+    throw error;
+  }
+}
+
+export async function getCurrentUser(): Promise<UserInfo> {
+  try {
+    const response = await apiClient.get<UserInfo>('/auth/me');
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to get user info';
       throw new Error(errorMessage);
     }
     throw error;

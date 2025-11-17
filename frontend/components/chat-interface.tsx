@@ -11,7 +11,7 @@ import { Sidebar } from "@/components/sidebar"
 import { DocumentsPanel } from "@/components/documents-panel"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Send, Sparkles, Menu, MessageSquare, FileText } from "lucide-react"
-import { sendQuery, getChatHistory, ChatHistoryItem } from "@/lib/api"
+import { sendQuery, getChatHistory, ChatHistoryItem, getCurrentUser, UserInfo } from "@/lib/api"
 import type { Message, MessageSource } from "@/types/message"
 import { QuerySettings } from "@/components/sidebar"
 
@@ -20,6 +20,9 @@ export function ChatInterface() {
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [machineConfirmation, setMachineConfirmation] = useState(false)
+  const [userInfo, setUserInfo] = useState<UserInfo | null>(null)
+  const onboardingShownRef = useRef(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const addNewConversationRef = useRef<((conversation: ChatHistoryItem) => void) | null>(null)
@@ -37,6 +40,48 @@ export function ChatInterface() {
     scrollToBottom()
   }, [messages])
 
+  // Fetch user info and show onboarding message on mount
+  useEffect(() => {
+    const fetchUserAndShowOnboarding = async () => {
+      try {
+        const user = await getCurrentUser()
+        setUserInfo(user)
+        
+        // Only show onboarding for customers and if not already shown and no messages
+        if (user.role?.toUpperCase() === "CUSTOMER" && !onboardingShownRef.current && messages.length === 0) {
+          const filteredMachines = user.machine_models && user.machine_models.length > 0
+            ? user.machine_models.filter(m => m !== "GENERAL")
+            : []
+          
+          const companyName = user.company_name || "Customer"
+          
+          // Format machine list as bullet points
+          let machineListText = ""
+          if (filteredMachines.length > 0) {
+            machineListText = filteredMachines.map(m => `• ${m}`).join("\n")
+          } else {
+            machineListText = "No machines assigned"
+          }
+          
+          const onboardingMessage: Message = {
+            id: `onboarding-${Date.now()}`,
+            role: "assistant",
+            content: `Hello ${companyName}, let's try to solve your problem.\n\nAccording to our records, you have the following machines:\n${machineListText}\n\nIs that correct?`,
+            timestamp: new Date(),
+          }
+          
+          setMessages([onboardingMessage])
+          onboardingShownRef.current = true
+        }
+      } catch (error) {
+        console.error("Failed to fetch user info:", error)
+        // Don't block the UI if user fetch fails
+      }
+    }
+    
+    fetchUserAndShowOnboarding()
+  }, [messages.length]) // Re-check when messages change (e.g., when loading a conversation)
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!input.trim() || isLoading) return
@@ -49,8 +94,48 @@ export function ChatInterface() {
     }
 
     setMessages((prev) => [...prev, userMessage])
+    const userInput = input.trim().toLowerCase()
     setInput("")
     setIsLoading(true)
+
+    // Handle machine confirmation for customers
+    if (userInfo?.role?.toUpperCase() === "CUSTOMER" && !machineConfirmation) {
+      if (userInput === "yes" || userInput === "y") {
+        // User confirmed machines
+        const confirmMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: "Perfect. What can I help you with today?",
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, confirmMessage])
+        setMachineConfirmation(true)
+        setIsLoading(false)
+        return
+      } else if (userInput === "no" || userInput === "n") {
+        // User said machines are wrong
+        const rejectMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: "Understood. Your machine list can only be updated by your company's administrator.\n\nPlease contact your admin if something needs to be changed.",
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, rejectMessage])
+        setIsLoading(false)
+        return
+      } else {
+        // User tried to ask a question before confirming
+        const blockMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: "Please confirm your machines first.",
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, blockMessage])
+        setIsLoading(false)
+        return
+      }
+    }
 
     // Call RAG backend API
     try {
@@ -59,6 +144,7 @@ export function ChatInterface() {
         top_k: currentSettings.topK,
         alpha: currentSettings.alpha,
         dynamic_windowing: currentSettings.dynamicWindowing,
+        machine_confirmation: machineConfirmation || undefined,
       })
       const structuredSources = (response.sources ?? []).map((source) => ({
         id: source.id,
@@ -169,9 +255,17 @@ export function ChatInterface() {
       return
     }
 
-    setMessages((prev) => [...prev, ...loadedMessages])
+    setMessages(loadedMessages)
     setSidebarOpen(false)
     setInput("")
+    // Reset confirmation state when loading a conversation
+    // Check if confirmation was already done in the loaded messages
+    const hasConfirmation = loadedMessages.some(
+      msg => msg.role === "assistant" && 
+      (msg.content.includes("Perfect. What can I help you with today?") || 
+       msg.content.includes("What can I help you with today?"))
+    )
+    setMachineConfirmation(hasConfirmation)
     textareaRef.current?.focus()
   }
 
