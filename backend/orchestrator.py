@@ -1617,7 +1617,9 @@ class ResponseGenerator:
         intent: QueryIntent,
         answer_generator=None,
         chat_history: Optional[List[Dict[str, str]]] = None,
-        matched_machine_name: Optional[str] = None
+        matched_machine_name: Optional[str] = None,
+        user_machine_models: Optional[List[str]] = None,
+        machine_confirmation: bool = False
     ) -> StructuredResponse:
         """Generate structured response with answer, reasoning, and sources."""
         
@@ -1625,7 +1627,7 @@ class ResponseGenerator:
         self.source_counter = 1
         
         # Build answer from context (with LLM if available, including chat history)
-        answer = self._build_answer(query, context, intent, answer_generator, chat_history or [])
+        answer = self._build_answer(query, context, intent, answer_generator, chat_history or [], user_machine_models, machine_confirmation)
         
         # Capture token usage from answer generator if available
         token_input = None
@@ -1668,7 +1670,9 @@ class ResponseGenerator:
         context: RetrievalContext,
         intent: QueryIntent,
         answer_generator=None,
-        chat_history: Optional[List[Dict[str, str]]] = None
+        chat_history: Optional[List[Dict[str, str]]] = None,
+        user_machine_models: Optional[List[str]] = None,
+        machine_confirmation: bool = False
     ) -> str:
         """Build answer from retrieved context using LLM or fallback to chunk-based."""
         
@@ -1685,7 +1689,9 @@ class ResponseGenerator:
                     query=query,
                     documents=context.nodes,
                     intent=intent,
-                    chat_history=chat_history or []
+                    chat_history=chat_history or [],
+                    user_machine_models=user_machine_models,
+                    machine_confirmation=machine_confirmation
                 )
                 return llm_answer
             except Exception as e:
@@ -2782,7 +2788,9 @@ class ClaudeAnswerGenerator:
         query: str, 
         documents: List[NodeWithScore],
         intent: QueryIntent,
-        chat_history: Optional[List[Dict[str, str]]] = None
+        chat_history: Optional[List[Dict[str, str]]] = None,
+        user_machine_models: Optional[List[str]] = None,
+        machine_confirmation: bool = False
     ) -> str:
         """
         Generate a clean, ChatGPT-style answer from retrieved documents.
@@ -2827,13 +2835,13 @@ class ClaudeAnswerGenerator:
             context = self._prepare_document_context(documents)
             
             # Build base prompt template (without history) to estimate fixed token usage
-            base_prompt = self._build_answer_prompt(query, context, intent, chat_history=None)
+            base_prompt = self._build_answer_prompt(query, context, intent, chat_history=None, user_machine_models=user_machine_models, machine_confirmation=machine_confirmation)
             
             # Trim chat history to fit within token budget (removes oldest first)
             trimmed_history = self._trim_chat_history(chat_history or [], query, context, base_prompt)
             
             # Build final prompt with trimmed history
-            prompt = self._build_answer_prompt(query, context, intent, trimmed_history)
+            prompt = self._build_answer_prompt(query, context, intent, trimmed_history, user_machine_models=user_machine_models, machine_confirmation=machine_confirmation)
             
             # Final safety check: verify prompt doesn't exceed budget
             total_tokens = self._estimate_tokens(prompt)
@@ -2845,6 +2853,15 @@ class ClaudeAnswerGenerator:
             
             # Build messages list with trimmed chat history + current query
             messages = []
+            
+            # Add system message with machine list if confirmed
+            if machine_confirmation and user_machine_models:
+                # Filter out GENERAL from the list for display
+                display_machines = [m for m in user_machine_models if m != "GENERAL"]
+                if display_machines:
+                    machine_list_str = ", ".join(display_machines)
+                    system_message = f"This customer owns the following machines: {machine_list_str}.\n\nAll retrieval must be restricted to these machines.\nDo not reference any other machines."
+                    messages.append({"role": "system", "content": system_message})
             
             # Add trimmed chat history (excluding current query)
             if trimmed_history:
@@ -2982,7 +2999,7 @@ class ClaudeAnswerGenerator:
         
         return "\n".join(context_parts)
     
-    def _build_answer_prompt(self, query: str, context: str, intent: QueryIntent, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
+    def _build_answer_prompt(self, query: str, context: str, intent: QueryIntent, chat_history: Optional[List[Dict[str, str]]] = None, user_machine_models: Optional[List[str]] = None, machine_confirmation: bool = False) -> str:
         """Build prompt for technical answer generation."""
         
         intent_guidance = {
@@ -2994,6 +3011,14 @@ class ClaudeAnswerGenerator:
         }
         
         guidance = intent_guidance.get(intent.intent_type, "Provide a comprehensive technical answer.")
+        
+        # Add machine restriction note if confirmed
+        machine_restriction = ""
+        if machine_confirmation and user_machine_models:
+            display_machines = [m for m in user_machine_models if m != "GENERAL"]
+            if display_machines:
+                machine_list_str = ", ".join(display_machines)
+                machine_restriction = f"\n\nIMPORTANT: This customer owns the following machines: {machine_list_str}. All retrieval must be restricted to these machines. Do not reference any other machines."
         
         # Add chat history context if available
         history_context = ""
@@ -3008,7 +3033,7 @@ class ClaudeAnswerGenerator:
                     history_context += f"Assistant: {content}\n"
             history_context += "\nUse the conversation history to understand context, corrections, or follow-up questions.\n"
         
-        return f"""TASK: Generate a clean, technical answer to the user's query using ONLY the provided documents.{history_context}
+        return f"""TASK: Generate a clean, technical answer to the user's query using ONLY the provided documents.{machine_restriction}{history_context}
 
 CONSTRAINTS:
 - Use ONLY information from the provided documents
@@ -3397,7 +3422,8 @@ class RAGOrchestrator:
         dynamic_windowing: bool = True,
         chat_history: Optional[List[Dict[str, str]]] = None,
         role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
-        user_machine_models: Optional[List[str]] = None  # Machine models for document-level filtering
+        user_machine_models: Optional[List[str]] = None,  # Machine models for document-level filtering
+        machine_confirmation: bool = False  # Whether user has confirmed their machine list
     ) -> StructuredResponse:
         """
         Main orchestration method - handles complete RAG pipeline.
@@ -3818,7 +3844,9 @@ class RAGOrchestrator:
             intent=intent,
             answer_generator=self.answer_generator,
             chat_history=chat_history or [],
-            matched_machine_name=matched_machine_name
+            matched_machine_name=matched_machine_name,
+            user_machine_models=user_machine_models,
+            machine_confirmation=machine_confirmation
         )
 
         # Optionally preface with a short glossary definition if we found one
