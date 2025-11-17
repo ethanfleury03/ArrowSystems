@@ -1,0 +1,92 @@
+version: '3.8'
+
+# Production Docker Compose Configuration
+# Optimized for production deployment with no hot reload
+# Code is baked into images, suitable for Cloud Run or VM deployment
+#
+# IMPORTANT: BuildKit must be enabled for proper dependency caching.
+# Set these environment variables before running docker-compose:
+#   PowerShell: $env:DOCKER_BUILDKIT = "1"; $env:COMPOSE_DOCKER_CLI_BUILD = "1"
+#   Bash: export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
+# Or run: .\enable-buildkit.ps1 (PowerShell) or source docker-build.env (Bash)
+
+services:
+  # FastAPI Backend - Production Mode
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.backend
+      args:
+        BUILD_ENV: production
+    container_name: rag-backend-prod
+    ports:
+      - "8000:8000"
+    environment:
+      - ENV=prod
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - SQLITE_DB_PATH=/app/database.sqlite
+      - SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-}
+      - SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD:-}
+      - SEED_TECH_EMAIL=${SEED_TECH_EMAIL:-}
+      - SEED_TECH_PASSWORD=${SEED_TECH_PASSWORD:-}
+      - HF_HOME=/app/.cache/huggingface
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-300}
+    # NO volume mounts - code is baked into image
+    volumes:
+      # Only mount data directories for persistence
+      - ./latest_model:/app/latest_model:ro
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+      - ./storage:/app/storage
+      - hf_cache:/app/.cache/huggingface
+      - ./backend/database.sqlite:/app/database.sqlite
+    command: gunicorn backend.api:app -k uvicorn.workers.UvicornWorker -w ${GUNICORN_WORKERS:-2} --bind 0.0.0.0:8000 --timeout ${GUNICORN_TIMEOUT:-300} --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile - --error-logfile -
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks:
+      - rag-network
+
+  # Next.js Frontend - Production Mode
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        NODE_ENV: production
+    container_name: rag-frontend-prod
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - BACKEND_URL=http://backend:8000
+      - NEXT_PUBLIC_SERVER_BACKEND_URL=http://backend:8000
+      - SERVER_BACKEND_URL=http://backend:8000
+    # NO volume mounts - code is baked into image
+    command: npm run start
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  hf_cache:
+    driver: local
+

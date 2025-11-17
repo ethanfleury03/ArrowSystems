@@ -1,18 +1,65 @@
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { unsealData, sealData } from 'iron-session';
+import { isProd } from './env';
+import { getBackendUrl } from './backend-url';
 
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// Get backend URL (validated based on environment)
+const BACKEND_URL = (() => {
+  try {
+    return getBackendUrl();
+  } catch {
+    // Fallback for server-side usage where request is not available
+    return process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  }
+})();
 
 export interface SessionData {
   userId?: string;
 }
 
+// Get session secret with validation
+const getSessionSecret = (): string => {
+  const envSecret = process.env.SESSION_SECRET;
+  
+  if (isProd) {
+    // Production: require SESSION_SECRET
+    if (!envSecret) {
+      throw new Error(
+        'SESSION_SECRET environment variable is required in production. ' +
+        'Set a secure random string of at least 32 characters.'
+      );
+    }
+    
+    // Check for unsafe defaults
+    const unsafeDefaults = [
+      'change-this-to-a-random-string-at-least-32-characters-long',
+      'dev-session-secret-not-for-production',
+      'secret',
+      'password',
+      'default-secret',
+    ];
+    
+    if (unsafeDefaults.includes(envSecret) || envSecret.length < 32) {
+      throw new Error(
+        'SESSION_SECRET is set to an unsafe default or is too short. ' +
+        'In production, SESSION_SECRET must be at least 32 characters ' +
+        'and not be a common default value.'
+      );
+    }
+    
+    return envSecret;
+  }
+  
+  // Development: allow fallback to dev secret
+  return envSecret || 'dev-session-secret-not-for-production-use-only';
+};
+
 // Session configuration
 // Secure flag: only true if explicitly set via env var AND we're on HTTPS
 // For local network access (IP addresses), allow HTTP cookies
 export const sessionOptions = {
-  password: process.env.SESSION_SECRET || 'change-this-to-a-random-string-at-least-32-characters-long',
+  password: getSessionSecret(),
   cookieName: 'app_session',
   cookieOptions: {
     // Only use secure cookies if explicitly enabled AND on HTTPS

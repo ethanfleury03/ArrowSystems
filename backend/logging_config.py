@@ -5,12 +5,13 @@ Configures structlog for JSON output in production and pretty output in developm
 Automatically includes request_id, user_id, and role from context variables.
 """
 
-import os
 import sys
 import logging
-from typing import Any, Dict, Optional
+from typing import Optional
 import structlog
 from structlog.contextvars import merge_contextvars
+
+from .config.env import settings
 
 
 def configure_logging(environment: Optional[str] = None) -> None:
@@ -19,10 +20,10 @@ def configure_logging(environment: Optional[str] = None) -> None:
     
     Args:
         environment: Environment name ('prod', 'dev', 'local', etc.)
-                    If None, tries to detect from ENV or NODE_ENV env vars.
+                    If None, uses centralized settings.ENV.
     """
     if environment is None:
-        environment = os.getenv('ENV', os.getenv('NODE_ENV', 'dev')).lower()
+        environment = settings.ENV
     
     # Configure standard library logging
     logging.basicConfig(

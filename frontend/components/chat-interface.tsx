@@ -14,6 +14,7 @@ import { Send, Sparkles, Menu, MessageSquare, FileText } from "lucide-react"
 import { sendQuery, getChatHistory, ChatHistoryItem, getCurrentUser, UserInfo } from "@/lib/api"
 import type { Message, MessageSource } from "@/types/message"
 import { QuerySettings } from "@/components/sidebar"
+import { ErrorBoundary } from "@/components/ErrorBoundary"
 
 export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([])
@@ -334,17 +335,20 @@ export function ChatInterface() {
 
   return (
     <div className="flex h-screen">
-      <Sidebar 
-        isOpen={sidebarOpen} 
-        onToggle={() => setSidebarOpen(!sidebarOpen)}
-        onNewConversationReady={handleNewConversationReady}
+      <ErrorBoundary>
+        <Sidebar 
+          isOpen={sidebarOpen} 
+          onToggle={() => setSidebarOpen(!sidebarOpen)}
+          onNewConversationReady={handleNewConversationReady}
         onSettingsChange={handleSettingsChange}
         onLoadConversation={handleLoadConversation}
         selectedMachine={selectedMachine}
         onMachineChange={setSelectedMachine}
         userInfo={userInfo}
       />
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <div className="flex flex-1 flex-col relative">
         {/* Header */}
         <header className="border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 relative z-10">
@@ -468,6 +472,7 @@ export function ChatInterface() {
           </div>
         </div>
       </div>
+      </ErrorBoundary>
     </div>
   )
 }

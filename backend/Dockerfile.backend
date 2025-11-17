@@ -47,14 +47,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         && rm -rf /var/lib/apt/lists/*
 
 # Copy only backend requirements first for better layer caching
-COPY backend/requirements.txt ./requirements.txt
+# This COPY command creates a layer that only invalidates when requirements.txt changes
+COPY backend/requirements.txt /tmp/requirements.txt
+
+# Upgrade pip in a separate cached RUN command
+# This layer will be cached unless pip itself needs updating
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip
 
 # Install Python dependencies with BuildKit cache mount
+# This layer will only rebuild when requirements.txt changes (due to COPY above)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install -r /tmp/requirements.txt
 
 # Conditionally install development dependencies
+# This layer only rebuilds when BUILD_ENV changes or dependencies stage is invalidated
 RUN if [ "$BUILD_ENV" = "development" ]; then \
         pip install watchdog python-dotenv; \
     fi
@@ -69,6 +76,8 @@ ARG BUILD_ENV=production
 
 # Set as ENV so it's available at runtime
 ENV BUILD_ENV=${BUILD_ENV}
+# ENV can be overridden at runtime via docker-compose or docker run
+ENV ENV=${ENV:-dev}
 
 # Set HuggingFace cache directory (models download here at runtime)
 ENV HF_HOME=/app/.cache/huggingface
