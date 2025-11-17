@@ -110,6 +110,118 @@ npm run dev
 
 Then open http://localhost:3000
 
+---
+
+## 🧪 Testing
+
+The backend includes a comprehensive test suite using pytest.
+
+### Setup
+
+```bash
+# IMPORTANT: Install production dependencies first (required for integration tests)
+pip install -r backend/requirements.txt
+
+# Then install development dependencies (includes pytest and testing tools)
+pip install -r backend/requirements-dev.txt
+```
+
+**Note:** Integration tests import the FastAPI app, which requires all production dependencies. Unit tests may work without them, but it's recommended to install both.
+
+### Running Tests
+
+```bash
+# Run all tests
+python -m pytest
+
+# Run only unit tests
+python -m pytest backend/tests/unit/
+
+# Run only integration tests
+python -m pytest backend/tests/integration/
+
+# Run with verbose output
+python -m pytest -v
+
+# Run with coverage report (requires pytest-cov)
+python -m pytest --cov=backend --cov-report=html
+```
+
+### Test Structure
+
+```
+backend/tests/
+├── unit/              # Unit tests for individual components
+│   ├── test_config.py      # Configuration tests
+│   └── test_security.py    # Security and authentication tests
+└── integration/       # Integration tests for API endpoints
+    └── test_health_endpoint.py  # Health check endpoint tests
+```
+
+### Writing Tests
+
+- All tests use pure pytest (no unittest)
+- Unit tests should be fast and isolated
+- Integration tests may require database or external services
+- Mark slow tests with `@pytest.mark.slow`
+
+For more information, see the test files in `backend/tests/` for examples.
+
+---
+
+## 🚦 Rate Limiting
+
+The API includes rate limiting to prevent abuse and ensure fair usage. Rate limiting is enabled by default and can be configured via environment variables.
+
+### Configuration
+
+Rate limiting is controlled by the following environment variables:
+
+- **`RATE_LIMIT_ENABLED`** (default: `true`)
+  - Enable or disable rate limiting globally
+  - Set to `false` to disable rate limiting (not recommended for production)
+
+- **`RATE_LIMIT_GLOBAL`** (default: `100/minute`)
+  - Global rate limit applied to all endpoints (unless overridden)
+  - Format: `"number/period"` (e.g., `"100/minute"`, `"20/second"`)
+
+- **`RATE_LIMIT_LOGIN`** (default: `5/minute`)
+  - Rate limit for `/auth/login` endpoint
+  - Stricter limit to prevent brute force attacks
+
+- **`RATE_LIMIT_QUERY`** (default: `10/minute`)
+  - Rate limit for `/query` endpoint
+  - Moderate limit to prevent abuse of the RAG pipeline
+
+### Rate Limit Behavior
+
+- **Rate limit exceeded**: Returns HTTP 429 (Too Many Requests) with a JSON error message
+- **Rate limit key**: Based on client IP address (using `X-Forwarded-For` header if available)
+- **Storage**: Uses in-memory storage by default (no Redis required)
+- **Excluded endpoints**: `/health` endpoint is **not rate limited** for monitoring purposes
+
+### Example Configuration
+
+```bash
+# Enable rate limiting with custom limits
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_GLOBAL=200/minute
+RATE_LIMIT_LOGIN=10/minute
+RATE_LIMIT_QUERY=20/minute
+```
+
+### Disabling Rate Limiting
+
+To disable rate limiting (e.g., for development):
+
+```bash
+RATE_LIMIT_ENABLED=false
+```
+
+**Note**: Disabling rate limiting is not recommended for production deployments.
+
+---
+
 ### Command Line Interface
 
 #### Installation

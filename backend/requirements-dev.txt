@@ -1,0 +1,19 @@
+# Development and Testing Dependencies
+# Install with: pip install -r backend/requirements-dev.txt
+
+# Testing framework
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0  # Optional: for coverage reports
+
+# HTTP client for integration tests
+httpx>=0.27.0
+
+# FastAPI test client
+# Note: TestClient is included with FastAPI, but httpx is needed for async tests
+
+# Code quality tools (optional, for future use)
+# black>=24.0.0
+# ruff>=0.1.0
+# mypy>=1.8.0
+

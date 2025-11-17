@@ -23,11 +23,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from .orchestrator import StructuredResponse, QueryIntent
 from .utils.database_manager import DatabaseManager
 from .utils.db import DEFAULT_DB_PATH, engine, check_database_integrity, _is_sqlite, DATABASE_URL
+from .utils.migration_runner import run_migrations, check_pending_migrations, check_migration_status
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
 from .utils.saved_response_manager import SavedResponseManager
@@ -369,6 +373,35 @@ async def lifespan(app: FastAPI):
     except (ValueError, TypeError):
         pass  # Ignore if GUNICORN_WORKERS is not a valid integer
     
+    # Run database migrations
+    if settings.is_dev:
+        # Development: auto-run migrations
+        # NOTE: Migrations only run if there are pending changes. Once applied, 
+        # this is just a quick check (milliseconds). The slow part is only when
+        # actual schema changes need to be applied (first time or after new migrations).
+        logger.info("running_migrations", environment="dev")
+        success, message = run_migrations()
+        if not success:
+            logger.error("migration_failed", message=message)
+            raise RuntimeError(f"Database migration failed: {message}")
+        logger.info("migrations_completed", message=message)
+    else:
+        # Production: check for pending migrations and fail fast
+        if check_pending_migrations():
+            status = check_migration_status()
+            logger.error(
+                "pending_migrations_detected",
+                current_revision=status.get("current_revision"),
+                head_revision=status.get("head_revision"),
+            )
+            raise RuntimeError(
+                "Database schema is outdated. Pending migrations detected. "
+                "Run migrations manually before starting the application. "
+                f"Current: {status.get('current_revision') or 'none'}, "
+                f"Expected: {status.get('head_revision') or 'none'}"
+            )
+        logger.info("migration_check_passed", message="Database is up to date")
+    
     # Initialize database
     db_manager = DatabaseManager()
     saved_response_manager = SavedResponseManager(db_manager)
@@ -466,6 +499,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Initialize rate limiter if enabled
+limiter = None
+if settings.RATE_LIMIT_ENABLED:
+    limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Add logging middleware FIRST (before CORS) to capture all requests
 app.add_middleware(LoggingMiddleware)
 
@@ -477,6 +517,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Note: Global rate limit is applied via decorators on individual endpoints
+# Endpoints with specific limits (like /auth/login and /query) will use those limits
+# Other endpoints should have the global limit decorator applied
+# The /health endpoint is intentionally not rate limited
 
 # Register admin routes
 app.include_router(create_admin_router(get_db_manager_instance))
@@ -593,6 +638,9 @@ class HealthResponse(BaseModel):
     database_connected: bool
     database_query_success: Optional[bool] = None
     database_error: Optional[str] = None
+    migration_current: Optional[str] = None
+    migration_head: Optional[str] = None
+    migration_pending: Optional[bool] = None
     uptime_seconds: float
 
 
@@ -674,8 +722,17 @@ class LoginResponse(BaseModel):
     token: str
 
 
+# Helper function to conditionally apply rate limiting
+def apply_rate_limit(limit_str: str):
+    """Conditionally apply rate limit decorator if rate limiting is enabled."""
+    if settings.RATE_LIMIT_ENABLED and limiter:
+        return limiter.limit(limit_str)
+    return lambda f: f  # No-op decorator if rate limiting is disabled
+
+
 # API Endpoints
 @app.get("/", response_model=Dict[str, str])
+@apply_rate_limit(settings.RATE_LIMIT_GLOBAL)
 async def root():
     """Root endpoint with API information."""
     return {
@@ -687,6 +744,7 @@ async def root():
 
 
 @app.get("/health", response_model=HealthResponse)
+# Note: /health endpoint is NOT rate limited for monitoring purposes
 async def health_check():
     """Health check endpoint."""
     global rag_pipeline, db_manager
@@ -704,11 +762,24 @@ async def health_check():
             database_query_success = False
             database_error = str(e) if settings.is_dev else "Database connection failed"
     
+    # Get migration status
+    migration_current = None
+    migration_head = None
+    migration_pending = None
+    try:
+        migration_status = check_migration_status()
+        migration_current = migration_status.get("current_revision")
+        migration_head = migration_status.get("head_revision")
+        migration_pending = migration_status.get("pending_migrations")
+    except Exception:
+        pass  # Migration check failed, but don't fail health check
+    
     is_healthy = (
         rag_pipeline is not None 
         and rag_pipeline.is_initialized() 
         and db_manager is not None
         and (database_query_success is None or database_query_success)
+        and (migration_pending is None or not migration_pending)  # Fail if migrations pending
     )
     
     response = HealthResponse(
@@ -716,6 +787,9 @@ async def health_check():
         rag_pipeline_initialized=rag_pipeline is not None and rag_pipeline.is_initialized(),
         database_connected=db_manager is not None,
         database_query_success=database_query_success,
+        migration_current=migration_current if settings.is_dev else None,
+        migration_head=migration_head if settings.is_dev else None,
+        migration_pending=migration_pending,
         uptime_seconds=time.time() - app.state.start_time if hasattr(app.state, 'start_time') else 0
     )
     
@@ -736,6 +810,9 @@ class DatabaseHealthResponse(BaseModel):
     file_size_bytes: Optional[int] = None
     wal_checkpoint_status: Optional[str] = None
     test_query_success: bool
+    migration_current: Optional[str] = None
+    migration_head: Optional[str] = None
+    migration_pending: Optional[bool] = None
     error: Optional[str] = None
 
 
@@ -754,7 +831,19 @@ async def database_health_check():
     file_size_bytes = None
     wal_checkpoint_status = None
     test_query_success = False
+    migration_current = None
+    migration_head = None
+    migration_pending = None
     error = None
+    
+    try:
+        # Get migration status
+        migration_status = check_migration_status()
+        migration_current = migration_status.get("current_revision")
+        migration_head = migration_status.get("head_revision")
+        migration_pending = migration_status.get("pending_migrations")
+    except Exception as e:
+        logger.warning("migration_status_check_failed", error=str(e))
     
     try:
         # Test basic query
@@ -803,6 +892,9 @@ async def database_health_check():
         file_size_bytes=file_size_bytes if settings.is_dev else None,
         wal_checkpoint_status=wal_checkpoint_status if settings.is_dev else None,
         test_query_success=test_query_success,
+        migration_current=migration_current if settings.is_dev else None,
+        migration_head=migration_head if settings.is_dev else None,
+        migration_pending=migration_pending,
         error=error if settings.is_dev else None,
     )
     
@@ -810,7 +902,9 @@ async def database_health_check():
 
 
 @app.post("/auth/login", response_model=LoginResponse)
+@apply_rate_limit(settings.RATE_LIMIT_LOGIN)
 async def auth_login(http_request: Request, login_request: LoginRequest):
+    """Login endpoint with rate limiting."""
     if not db_manager:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
@@ -912,7 +1006,8 @@ async def summarize_query_endpoint(request: Dict[str, Any]):
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query_knowledge_base(request: QueryRequest):
+@apply_rate_limit(settings.RATE_LIMIT_QUERY)
+async def query_knowledge_base(http_request: Request, request: QueryRequest):
     """
     Query the knowledge base using RAG pipeline with session-based chat memory.
     

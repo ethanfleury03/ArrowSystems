@@ -36,6 +36,7 @@ anthropic==0.71.0
 # -----------------------------
 bcrypt==4.2.0
 sqlalchemy==2.0.25
+alembic==1.13.1
 
 # -----------------------------
 # FastAPI Backend
@@ -46,6 +47,7 @@ uvicorn[standard]==0.38.0
 gunicorn==21.2.0
 pydantic==2.12.3
 email-validator==2.2.0
+slowapi==0.1.8
 
 # -----------------------------
 # Document Processing
