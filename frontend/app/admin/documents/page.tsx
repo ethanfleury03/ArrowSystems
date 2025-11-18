@@ -19,6 +19,9 @@ interface Document {
   requires_admin_review?: boolean;
   category?: string | null;
   product_family?: string | null;
+  ingestion_status?: string | null;
+  ingestion_metadata_id?: string | null;
+  ingestion_error?: string | null;
 }
 
 type SortField = keyof Pick<Document, "filename" | "chunk_count" | "page_count" | "is_active">;
@@ -30,6 +33,31 @@ const formatFileSize = (bytes: number): string => {
   const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+};
+
+// Helper function to get status label
+const getStatusLabel = (status: string | null | undefined): string => {
+  if (!status) return '';
+  switch (status) {
+    case 'PENDING_INGESTION':
+      return 'Pending';
+    case 'CHUNKING':
+      return 'Processing (chunking)';
+    case 'READY_FOR_EMBEDDING':
+      return 'Ready for embeddings';
+    case 'EMBEDDING':
+      return 'Processing (embedding)';
+    case 'COMPLETE':
+      return 'Complete';
+    case 'DELETING':
+      return 'Deleting…';
+    case 'REBUILDING_INDEX':
+      return 'Rebuilding index…';
+    case 'FAILED':
+      return 'Failed';
+    default:
+      return status;
+  }
 };
 
 export default function AdminDocumentsPage() {
@@ -215,6 +243,40 @@ export default function AdminDocumentsPage() {
     }
   }, [fetchDocuments, fetchAllowedMachineModels]);
 
+  // Poll for documents with active ingestion status (only when page is visible)
+  useEffect(() => {
+    if (!authToken) return;
+
+    const activeStatuses = ['PENDING_INGESTION', 'CHUNKING', 'READY_FOR_EMBEDDING', 'EMBEDDING', 'DELETING', 'REBUILDING_INDEX'];
+    
+    // Check if there are any active ingestions
+    const checkActiveIngestions = () => {
+      return documents.some(
+        doc => doc.ingestion_status && activeStatuses.includes(doc.ingestion_status)
+      );
+    };
+
+    const hasActiveIngestion = checkActiveIngestions();
+
+    if (!hasActiveIngestion) {
+      // No active ingestion, don't poll
+      return;
+    }
+
+    // Poll every 5 seconds (reduced frequency to be less annoying)
+    const interval = setInterval(() => {
+      // Only poll if page is visible
+      if (document.hidden) {
+        return;
+      }
+      
+      // Fetch documents - the effect will re-run and check if polling should continue
+      fetchDocuments(authToken);
+    }, 5000); // Increased to 5 seconds
+
+    return () => clearInterval(interval);
+  }, [documents, authToken, fetchDocuments]);
+
   const filteredDocuments = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
     if (!term) return documents;
@@ -326,11 +388,29 @@ export default function AdminDocumentsPage() {
 
   const submitUpload = async () => {
     if (!authToken || !uploadFile) return;
+    
+    // Validate machine model is selected
+    if (!editMachineModel || editMachineModel.length === 0) {
+      showToast("Please select at least one machine model", "error");
+      return;
+    }
+    
     setActionSubmitting(true);
     setUploadProgress("Uploading file...");
     try {
       const formData = new FormData();
       formData.append("file", uploadFile);
+      
+      // Append machine model (use first one if array, or the string value)
+      const machineModelValue = Array.isArray(editMachineModel) 
+        ? editMachineModel[0] 
+        : editMachineModel;
+      formData.append("machine_model", machineModelValue);
+      
+      // Append description if provided
+      if (editProductFamily && editProductFamily.trim()) {
+        formData.append("description", editProductFamily.trim());
+      }
 
       setUploadProgress("Uploading file to server...");
       const response = await fetch(`${apiBaseUrl}/admin/documents/upload`, {
@@ -435,20 +515,38 @@ export default function AdminDocumentsPage() {
     }
     setActionSubmitting(true);
     try {
-      const encodedFilename = encodeURIComponent(selectedDocument.filename);
-      const response = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
+      // Use Phase 4 delete endpoint if metadata_id is available, otherwise use old endpoint
+      let response;
+      if (selectedDocument.ingestion_metadata_id) {
+        // Phase 4: Use metadata_id endpoint for safe delete with reindex
+        response = await fetch(`${apiBaseUrl}/admin/documents/metadata/${selectedDocument.ingestion_metadata_id}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+      } else {
+        // Fallback to old endpoint
+        const encodedFilename = encodeURIComponent(selectedDocument.filename);
+        response = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+      }
+      
       if (!response.ok) {
         const detail = await response.json().catch(() => null);
         throw new Error(extractApiError(detail) || "Failed to delete document");
       }
-      showToast("✅ Document deleted");
-      await fetchDocuments(authToken);
+      
+      // Close modal immediately and reset state
       closeAllModals();
+      setDeleteConfirmation("");
+      
+      showToast("✅ Document deletion started. The index is rebuilding in the background.");
+      await fetchDocuments(authToken);
     } catch (err) {
       console.error("Delete document failed:", err);
       showToast(err instanceof Error ? err.message : "Failed to delete document", "error");
@@ -530,6 +628,9 @@ export default function AdminDocumentsPage() {
                   {sortField === "chunk_count" && (sortDirection === "asc" ? " ↑" : " ↓")}
                 </th>
                 <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Ingestion Status
+                </th>
+                <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Actions
                 </th>
               </tr>
@@ -537,19 +638,19 @@ export default function AdminDocumentsPage() {
             <tbody>
               {loadingTable ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-6 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-4 py-6 text-center text-muted-foreground">
                     Loading documents...
                   </td>
                 </tr>
               ) : error ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-6 text-center text-destructive">
+                  <td colSpan={8} className="px-4 py-6 text-center text-destructive">
                     {error}
                   </td>
                 </tr>
               ) : sortedDocuments.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-6 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-4 py-6 text-center text-muted-foreground">
                     {searchTerm ? "No documents match your search." : "No documents found. Upload a document to get started."}
                   </td>
                 </tr>
@@ -612,6 +713,30 @@ export default function AdminDocumentsPage() {
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{doc.page_count}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{doc.chunk_count}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm">
+                      {doc.ingestion_status ? (
+                        <div className="flex flex-col gap-1">
+                          <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+                            doc.ingestion_status === 'FAILED'
+                              ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400'
+                              : doc.ingestion_status === 'PENDING_INGESTION'
+                              ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
+                              : doc.ingestion_status === 'COMPLETE'
+                              ? 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-400'
+                              : 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400'
+                          }`}>
+                            {getStatusLabel(doc.ingestion_status)}
+                          </span>
+                          {doc.ingestion_error && (
+                            <span className="text-xs text-red-600 dark:text-red-400 truncate max-w-xs" title={doc.ingestion_error}>
+                              {doc.ingestion_error.substring(0, 40)}...
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">—</span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-sm">
                       <div className="flex items-center gap-2">
                         <Button
                           variant="outline"
@@ -667,7 +792,7 @@ export default function AdminDocumentsPage() {
             </div>
             <div className="space-y-4">
               <div>
-                <label className="mb-2 block text-sm font-medium">File (PDF, DOCX, MD)</label>
+                <label className="mb-2 block text-sm font-medium">File (PDF, DOCX, MD) *</label>
                 <input
                   type="file"
                   accept=".pdf,.docx,.md,.markdown"
@@ -679,6 +804,39 @@ export default function AdminDocumentsPage() {
                   The document will be automatically ingested into the index after upload.
                 </p>
               </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">Machine Model *</label>
+                <select
+                  value={Array.isArray(editMachineModel) && editMachineModel.length > 0 ? editMachineModel[0] : ""}
+                  onChange={(e) => setEditMachineModel([e.target.value])}
+                  className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                  disabled={actionSubmitting || allowedMachineModels.length === 0}
+                  required
+                >
+                  <option value="">Select a machine model</option>
+                  {allowedMachineModels.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+                {allowedMachineModels.length === 0 && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    No machine models available. Please add one first.
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">Description (Optional)</label>
+                <textarea
+                  value={editProductFamily || ""}
+                  onChange={(e) => setEditProductFamily(e.target.value)}
+                  placeholder="Optional description for this document"
+                  className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm min-h-[80px] outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                  disabled={actionSubmitting}
+                  rows={3}
+                />
+              </div>
               {uploadProgress && (
                 <div className="rounded-md bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-line">
                   {uploadProgress}
@@ -688,7 +846,10 @@ export default function AdminDocumentsPage() {
                 <Button variant="outline" onClick={closeAllModals} disabled={actionSubmitting}>
                   Cancel
                 </Button>
-                <Button onClick={submitUpload} disabled={!uploadFile || actionSubmitting}>
+                <Button 
+                  onClick={submitUpload} 
+                  disabled={!uploadFile || !editMachineModel || (Array.isArray(editMachineModel) && editMachineModel.length === 0) || actionSubmitting}
+                >
                   {actionSubmitting ? "Uploading..." : "Upload"}
                 </Button>
               </div>

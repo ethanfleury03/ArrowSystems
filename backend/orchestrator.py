@@ -3388,12 +3388,39 @@ class RAGOrchestrator:
     
     def load_index(self, storage_dir="latest_model"):
         """Load existing index from latest_model/ directory."""
-        if not os.path.exists(storage_dir):
-            raise FileNotFoundError(
-                f"Index not found at {storage_dir}. "
-                f"Run 'python -m backend.ingest' to build the index first, "
-                f"or pull from git if using pre-built index."
-            )
+        from backend.utils.test_mode import is_test_mode
+        
+        # Check if directory exists or if docstore.json exists
+        docstore_path = os.path.join(storage_dir, "docstore.json")
+        index_exists = os.path.exists(storage_dir) and os.path.exists(docstore_path)
+        
+        # If directory doesn't exist or is empty, create a new index instead of raising error
+        # This allows test mode to work with empty directories
+        if not index_exists:
+            if is_test_mode():
+                # In test mode, create empty index if directory doesn't exist
+                logger.info(f"test_mode_index_not_found_creating_new", storage_dir=storage_dir)
+                from llama_index.core import VectorStoreIndex
+                os.makedirs(storage_dir, exist_ok=True)
+                self.index = VectorStoreIndex(nodes=[], show_progress=False)
+                # Persist the empty index so it can be loaded next time
+                self.index.storage_context.persist(persist_dir=storage_dir)
+                # Initialize retriever with empty index
+                # Note: HybridRetriever is defined in this same module, so we can reference it directly
+                self.retriever = HybridRetriever(
+                    index=self.index,
+                    embed_model=self.embed_model,
+                    reranker=self.reranker,
+                    document_evaluator=self.document_evaluator
+                )
+                logger.info("test_mode_empty_index_created")
+                return
+            else:
+                raise FileNotFoundError(
+                    f"Index not found at {storage_dir}. "
+                    f"Run 'python -m backend.ingest' to build the index first, "
+                    f"or pull from git if using pre-built index."
+                )
         
         logger.info("🔄 Loading index...")
         

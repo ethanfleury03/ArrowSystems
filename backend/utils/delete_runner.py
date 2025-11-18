@@ -20,7 +20,8 @@ from llama_index.core.schema import TextNode
 
 from backend.utils.db import SessionLocal, DocumentIngestionMetadata
 from backend.utils.query_summarizer import QuerySummarizer
-from backend.utils.logging_context import get_logger
+from backend.logging_config import get_logger
+from backend.utils.test_mode import get_chunks_dir, get_original_pdfs_dir, get_index_dir, get_temp_index_dir
 
 logger = get_logger(__name__)
 
@@ -39,8 +40,8 @@ def run_delete_and_reindex(metadata_id: str) -> None:
         metadata_id: The ID of the DocumentIngestionMetadata record to delete
     """
     session: Optional[Session] = None
-    temp_index_dir = "latest_model_tmp"
-    original_index_dir = "latest_model"
+    temp_index_dir = get_temp_index_dir()
+    original_index_dir = get_index_dir()
     
     try:
         # Load metadata record
@@ -66,7 +67,7 @@ def run_delete_and_reindex(metadata_id: str) -> None:
         
         # B. Remove the target document
         # Delete chunk file
-        chunks_file = Path("data/chunks") / f"{metadata_id}.json"
+        chunks_file = Path(get_chunks_dir()) / f"{metadata_id}.json"
         if chunks_file.exists():
             try:
                 chunks_file.unlink()
@@ -81,6 +82,16 @@ def run_delete_and_reindex(metadata_id: str) -> None:
                 logger.info(f"delete_original_file_removed", metadata_id=metadata_id, file_path=metadata.file_path)
             except Exception as e:
                 logger.warning(f"delete_original_file_remove_failed", metadata_id=metadata_id, error=str(e))
+        
+        # Also check and delete from the original_pdfs directory (in case file_path is different)
+        original_pdfs_dir = get_original_pdfs_dir()
+        original_file_path = os.path.join(original_pdfs_dir, filename)
+        if os.path.exists(original_file_path):
+            try:
+                os.remove(original_file_path)
+                logger.info(f"delete_original_file_removed_from_dir", metadata_id=metadata_id, file_path=original_file_path)
+            except Exception as e:
+                logger.warning(f"delete_original_file_remove_failed_from_dir", metadata_id=metadata_id, error=str(e))
         
         # Delete metadata row
         session.delete(metadata)
@@ -160,7 +171,7 @@ def run_delete_and_reindex(metadata_id: str) -> None:
         for remaining_meta in remaining_metadata:
             try:
                 # Load chunks from JSON file
-                remaining_chunks_file = Path("data/chunks") / f"{remaining_meta.id}.json"
+                remaining_chunks_file = Path(get_chunks_dir()) / f"{remaining_meta.id}.json"
                 if not remaining_chunks_file.exists():
                     logger.warning(f"delete_chunks_file_missing", metadata_id=remaining_meta.id, skipping=True)
                     failed_count += 1

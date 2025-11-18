@@ -452,26 +452,6 @@
     "last_ingestion_date": null,
     "requires_admin_review": false
   },
-  "Arrow Any-002 Manual.pdf": {
-    "is_active": true,
-    "machine_model": [
-      "ANYTRON Any-002"
-    ],
-    "category": null,
-    "product_family": null,
-    "last_ingestion_date": null,
-    "requires_admin_review": false
-  },
-  "ANYJET User Guide V1.1.pdf": {
-    "is_active": true,
-    "machine_model": [
-      "Anytron AnyJet"
-    ],
-    "category": null,
-    "product_family": null,
-    "last_ingestion_date": null,
-    "requires_admin_review": false
-  },
   "anyCUTIII User Manual_ver1.1_ENG_Ana (2).pdf": {
     "is_active": true,
     "machine_model": [
@@ -506,6 +486,46 @@
     "is_active": true,
     "machine_model": [
       "2800 Series Mini Laser Pro"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DURABOLTTEST.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "DuraCore"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DURABOLTTEST_20251118_191240.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "DuraLink"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DURABOLTTEST_20251118_191754.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "2800 Series Mini Laser Pro"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "DURABOLTTEST_20251118_192013.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Duraflex"
     ],
     "category": null,
     "product_family": null,
