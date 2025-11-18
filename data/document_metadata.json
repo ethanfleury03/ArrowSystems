@@ -531,5 +531,25 @@
     "product_family": null,
     "last_ingestion_date": null,
     "requires_admin_review": false
+  },
+  "Arrow Any-002 Manual.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "ANYTRON Any-002"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
+  },
+  "ANYJET User Guide V1.1.pdf": {
+    "is_active": true,
+    "machine_model": [
+      "Anytron AnyJet"
+    ],
+    "category": null,
+    "product_family": null,
+    "last_ingestion_date": null,
+    "requires_admin_review": false
   }
 }

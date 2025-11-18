@@ -1807,6 +1807,11 @@ async def get_user_documents():
                 doc_metadata = get_document_metadata(filename)
                 machine_model = doc_metadata.get("machine_model")
                 
+                # CRITICAL: Filter out inactive documents - customers should not see or query inactive documents
+                is_active = doc_metadata.get("is_active", True)  # Default to active if not set
+                if not is_active:
+                    continue  # Skip inactive documents
+                
                 # Normalize machine_model to list
                 if isinstance(machine_model, str):
                     machine_model = [machine_model]
@@ -2140,6 +2145,86 @@ async def get_all_documents():
                 # Get ingestion status if available
                 ingestion_info = ingestion_metadata_map.get(filename, {})
                 
+                # Backfill metadata for legacy documents (exist in index but no metadata entry)
+                # This ensures all documents have proper status tracking
+                # Check if document is in index by checking multiple sources:
+                # 1. In corpus_nodes (seen_filenames)
+                # 2. In docstore (filename_to_doc_id)
+                # 3. Has chunks in the index (chunk_count > 0)
+                # 4. Document exists in filesystem with pages (legacy ingestion assumption)
+                is_in_corpus = filename in seen_filenames
+                is_in_docstore = filename in filename_to_doc_id
+                has_chunks = chunk_count > 0
+                file_exists = os.path.exists(file_path)
+                has_pages = page_count > 0
+                
+                # Document is in index if it's in corpus/docstore/has chunks, OR if it exists with pages (legacy assumption)
+                is_in_index = is_in_corpus or is_in_docstore or has_chunks or (file_exists and has_pages)
+                
+                # If no status and document appears to be in index, backfill it
+                if not ingestion_info.get("ingestion_status"):
+                    if is_in_index:
+                        logger.debug(
+                            f"Backfilling metadata for legacy document: {filename} "
+                            f"(in_corpus={is_in_corpus}, in_docstore={is_in_docstore}, has_chunks={has_chunks}, "
+                            f"chunk_count={chunk_count}, file_exists={file_exists}, has_pages={has_pages}, page_count={page_count})"
+                        )
+                        # Document exists in index but no metadata = legacy ingestion, backfill as COMPLETE
+                        def _backfill_metadata():
+                            with SessionLocal() as session:
+                                from backend.utils.db import DocumentIngestionMetadata
+                                import uuid
+                                
+                                # Check if metadata was just created (race condition protection)
+                                existing = session.query(DocumentIngestionMetadata).filter_by(filename=filename).first()
+                                if existing:
+                                    return {
+                                        "ingestion_status": existing.status,
+                                        "ingestion_metadata_id": existing.id,
+                                        "ingestion_error": existing.error_message,
+                                    }
+                                
+                                # Create metadata entry for legacy document
+                                metadata_id = str(uuid.uuid4())
+                                legacy_metadata = DocumentIngestionMetadata(
+                                    id=metadata_id,
+                                    filename=filename,
+                                    machine_model=machine_model[0] if machine_model and len(machine_model) > 0 else "UNKNOWN",
+                                    status="COMPLETE",  # Legacy documents are already ingested
+                                    file_path=file_path if os.path.exists(file_path) else None,
+                                    file_size_bytes=size_bytes if size_bytes > 0 else None,
+                                )
+                                session.add(legacy_metadata)
+                                session.commit()
+                                session.refresh(legacy_metadata)
+                                
+                                logger.debug(f"backfilled_legacy_document_metadata", filename=filename, metadata_id=metadata_id)
+                                
+                                return {
+                                    "ingestion_status": legacy_metadata.status,
+                                    "ingestion_metadata_id": legacy_metadata.id,
+                                    "ingestion_error": legacy_metadata.error_message,
+                                }
+                        
+                        # Backfill metadata (only if document is in index)
+                        try:
+                            backfilled_info = await run_sync(_backfill_metadata)
+                            if backfilled_info:
+                                ingestion_info = backfilled_info
+                                # Update the map so subsequent documents don't try to backfill again
+                                ingestion_metadata_map[filename] = backfilled_info
+                                logger.debug(f"Successfully backfilled metadata for {filename}: status={backfilled_info.get('ingestion_status')}")
+                            else:
+                                logger.warning(f"Backfill returned None for {filename}")
+                        except Exception as e:
+                            logger.error(f"Failed to backfill metadata for {filename}: {e}", exc_info=True)
+                    else:
+                        # Document not in index - log for debugging
+                        logger.debug(f"Document {filename} not in index (in_corpus={is_in_corpus}, in_docstore={is_in_docstore}, has_chunks={has_chunks}, chunk_count={chunk_count})")
+                
+                # Use metadata status (now guaranteed to exist if document is in index)
+                final_status = ingestion_info.get("ingestion_status") if ingestion_info else None
+                
                 documents.append({
                     "filename": filename,
                     "size_bytes": size_bytes,
@@ -2154,7 +2239,7 @@ async def get_all_documents():
                     "requires_admin_review": doc_metadata.get("requires_admin_review", False),
                     "category": doc_metadata.get("category"),
                     "product_family": doc_metadata.get("product_family"),
-                    "ingestion_status": ingestion_info.get("ingestion_status"),
+                    "ingestion_status": final_status,
                     "ingestion_metadata_id": ingestion_info.get("ingestion_metadata_id"),
                     "ingestion_error": ingestion_info.get("ingestion_error"),
                 })
@@ -2504,6 +2589,28 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
         
         update_document_metadata(filename, updates)
         
+        # Also update DocumentIngestionMetadata table to keep it in sync
+        # Convert list to string (use first machine model for database compatibility)
+        db_machine_model = machine_models_list[0] if machine_models_list and len(machine_models_list) > 0 else ""
+        
+        def _update_db_metadata():
+            with SessionLocal() as session:
+                metadata = session.query(DocumentIngestionMetadata).filter(
+                    DocumentIngestionMetadata.filename == filename
+                ).first()
+                if metadata:
+                    metadata.machine_model = db_machine_model
+                    session.commit()
+                    logger.debug(f"Updated DocumentIngestionMetadata.machine_model for {filename}: {db_machine_model}")
+                else:
+                    logger.warning(f"DocumentIngestionMetadata record not found for {filename} - skipping database update")
+        
+        try:
+            await run_sync(_update_db_metadata)
+        except Exception as e:
+            logger.warning(f"Failed to update DocumentIngestionMetadata for {filename}: {e}")
+            # Don't fail the request if database update fails - JSON file update already succeeded
+        
         logger.info(f"Updated machine_model for {filename}: {machine_models_list}")
         
         return {
@@ -2593,6 +2700,30 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
         
         from .utils.document_metadata import update_document_metadata
         update_document_metadata(filename, updates)
+        
+        # Also update DocumentIngestionMetadata table if machine_model was updated
+        if "machine_model" in updates:
+            machine_models_list = updates["machine_model"]
+            # Convert list to string (use first machine model for database compatibility)
+            db_machine_model = machine_models_list[0] if machine_models_list and len(machine_models_list) > 0 else ""
+            
+            def _update_db_metadata():
+                with SessionLocal() as session:
+                    metadata = session.query(DocumentIngestionMetadata).filter(
+                        DocumentIngestionMetadata.filename == filename
+                    ).first()
+                    if metadata:
+                        metadata.machine_model = db_machine_model
+                        session.commit()
+                        logger.debug(f"Updated DocumentIngestionMetadata.machine_model for {filename}: {db_machine_model}")
+                    else:
+                        logger.warning(f"DocumentIngestionMetadata record not found for {filename} - skipping database update")
+            
+            try:
+                await run_sync(_update_db_metadata)
+            except Exception as e:
+                logger.warning(f"Failed to update DocumentIngestionMetadata for {filename}: {e}")
+                # Don't fail the request if database update fails - JSON file update already succeeded
         
         # Audit log metadata update
         await audit_log(
@@ -3114,11 +3245,14 @@ async def upload_document(
             detail=f"File too large (>100MB). File size: {file_size / (1024*1024):.2f}MB"
         )
     
-    # Validate machine model exists
+    # Validate machine model exists (case-insensitive)
+    # Normalize machine_model to match MachineModel table format (uppercase, normalized spacing)
+    normalized_machine_model = " ".join(machine_model.strip().upper().split())
+    
     def _check_machine_model():
         with SessionLocal() as session:
             machine = session.query(MachineModel).filter(
-                MachineModel.name == machine_model
+                func.upper(MachineModel.name) == normalized_machine_model.upper()
             ).first()
             return machine is not None
     
@@ -3164,12 +3298,13 @@ async def upload_document(
         logger.info("document_uploaded", filename=file.filename, size_bytes=file_size, path=original_path)
         
         # Create metadata record with PENDING_INGESTION status
+        # Use normalized_machine_model (already normalized above)
         def _create_metadata():
             with SessionLocal() as session:
                 metadata = DocumentIngestionMetadata(
                     id=metadata_id,
                     filename=file.filename,
-                    machine_model=machine_model,
+                    machine_model=normalized_machine_model,
                     status="PENDING_INGESTION",
                     description=description,
                     file_path=original_path,
@@ -3195,7 +3330,7 @@ async def upload_document(
             update_document_metadata(
                 file.filename,
                 {
-                    "machine_model": [machine_model],  # Convert to list format
+                    "machine_model": [normalized_machine_model],  # Use normalized version
                     "requires_admin_review": False,  # Clear review flag since we have a valid machine model
                 }
             )

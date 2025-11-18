@@ -204,7 +204,16 @@ export function DocumentsTab() {
       const response = await fetch('/api/admin/machines');
       if (!response.ok) throw new Error('Failed to fetch machines');
       const data = await response.json();
-      setMachines(data.machines || []);
+      // Backend now returns array of objects with {id, name, document_count, created_at}
+      // Extract just the names for the dropdown
+      if (Array.isArray(data)) {
+        setMachines(data.map((m: { name: string }) => m.name));
+      } else if (data.machines && Array.isArray(data.machines)) {
+        // Fallback for old format
+        setMachines(data.machines);
+      } else {
+        setMachines([]);
+      }
     } catch (error) {
       console.error('Error fetching machines:', error);
       toast({
@@ -568,10 +577,6 @@ export function DocumentsTab() {
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Pages:</span>
                     <span className="font-medium">{doc.page_count}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Chunks:</span>
-                    <span className="font-medium">{doc.chunk_count}</span>
                   </div>
                   {doc.uploaded_date && (
                     <div className="flex items-center justify-between">

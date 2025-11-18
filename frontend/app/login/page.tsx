@@ -28,14 +28,22 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await response.json();
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        // If response is not JSON, use status text
+        setError(response.statusText || 'Login failed');
+        setLoading(false);
+        return;
+      }
 
       if (!response.ok) {
         // Handle error - ensure it's always a string
-        let errorMessage = 'Login failed';
-        if (data.error) {
+        let errorMessage = 'Invalid email or password';
+        if (data?.error) {
           errorMessage = typeof data.error === 'string' ? data.error : String(data.error);
-        } else if (data.detail) {
+        } else if (data?.detail) {
           if (Array.isArray(data.detail)) {
             // Handle validation error arrays
             errorMessage = data.detail.map((err: any) => 
@@ -49,6 +57,7 @@ export default function LoginPage() {
         }
         setError(errorMessage);
         setLoading(false);
+        // Prevent form from submitting and causing page reload
         return;
       }
 
@@ -69,8 +78,11 @@ export default function LoginPage() {
       // Redirect based on user role
       // Admins go to /admin, regular users go to main chat
       // Use window.location for full page reload to ensure middleware sees the cookie
+      // Add a small delay to ensure the cookie is set before redirect
       const redirectPath = user.role === 'ADMIN' ? '/admin' : '/';
-      window.location.href = redirectPath;
+      setTimeout(() => {
+        window.location.href = redirectPath;
+      }, 100);
     } catch (err) {
       setError('An error occurred. Please try again.');
       setLoading(false);

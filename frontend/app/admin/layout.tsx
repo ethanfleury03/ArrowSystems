@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { Toaster } from "@/components/ui/toaster";
 import type { ReactNode } from "react";
-import { Menu, Users, FileText, Activity, ArrowLeft, X, BarChart3 } from "lucide-react";
+import { Menu, Users, FileText, Activity, ArrowLeft, X, BarChart3, Settings, Cog } from "lucide-react";
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -24,6 +24,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Documents", href: "/admin/documents", icon: FileText },
   { label: "Logs", href: "/admin/logs", icon: Activity },
   { label: "Analytics", href: "/admin/analytics", icon: BarChart3 },
+  { label: "Settings", href: "/admin/settings", icon: Settings },
 ];
 
 export default function AdminLayout({ children }: AdminLayoutProps) {
@@ -147,19 +148,36 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
         <nav className="flex-1 space-y-1 px-3 py-4">
           {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
             const active = isRouteActive(href);
+            const isSettings = href === "/admin/settings";
             return (
-              <Link
-                key={href}
-                href={href}
-                className={`group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                  active
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-                }`}
-              >
-                <Icon className="h-4 w-4 flex-shrink-0" />
-                <span>{label}</span>
-              </Link>
+              <div key={href}>
+                <Link
+                  href={href}
+                  className={`group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                    active
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                  }`}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  <span>{label}</span>
+                </Link>
+                {isSettings && active && (
+                  <div className="ml-7 mt-1 space-y-1">
+                    <Link
+                      href="/admin/settings/machine-models"
+                      className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                        pathname === "/admin/settings/machine-models"
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                      }`}
+                    >
+                      <Cog className="h-3 w-3" />
+                      <span>Machine Models</span>
+                    </Link>
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>
@@ -194,20 +212,38 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
         <nav className="space-y-1 px-3 py-4">
           {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
             const active = isRouteActive(href);
+            const isSettings = href === "/admin/settings";
             return (
-              <Link
-                key={href}
-                href={href}
-                onClick={closeSidebar}
-                className={`group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                  active
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-                }`}
-              >
-                <Icon className="h-4 w-4 flex-shrink-0" />
-                <span>{label}</span>
-              </Link>
+              <div key={href}>
+                <Link
+                  href={href}
+                  onClick={closeSidebar}
+                  className={`group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                    active
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                  }`}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  <span>{label}</span>
+                </Link>
+                {isSettings && active && (
+                  <div className="ml-7 mt-1 space-y-1">
+                    <Link
+                      href="/admin/settings/machine-models"
+                      onClick={closeSidebar}
+                      className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                        pathname === "/admin/settings/machine-models"
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                      }`}
+                    >
+                      <Cog className="h-3 w-3" />
+                      <span>Machine Models</span>
+                    </Link>
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>

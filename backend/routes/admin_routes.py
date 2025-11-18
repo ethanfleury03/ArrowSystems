@@ -60,6 +60,19 @@ class AdminUserUpdateRequest(BaseModel):
 class MachineListResponse(BaseModel):
     machines: List[str]
 
+class MachineModelResponse(BaseModel):
+    id: int
+    name: str
+    document_count: int
+    created_at: str
+
+class MachineModelsListResponse(BaseModel):
+    machines: List[MachineModelResponse]
+    total_documents: int
+    matched_documents: int
+    unmatched_documents: int
+    unmatched_machine_models: List[str]
+
 
 class MachineCreateRequest(BaseModel):
     name: str
@@ -839,7 +852,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                     direct_rows = session.execute(text("SELECT id, event, timestamp FROM audit_logs ORDER BY timestamp DESC LIMIT 5")).fetchall()
                     logger.info("audit_logs_query", direct_rows_count=len(direct_rows), message="Direct SQL SELECT result")
                     for row in direct_rows:
-                        logger.info("audit_logs_query", row_id=row[0], event=row[1], timestamp=str(row[2]), message="Found audit log row")
+                        logger.info("audit_logs_query", row_id=row[0], event_name=row[1], timestamp=str(row[2]), message="Found audit log row")
                 except Exception as e:
                     logger.error("audit_logs_query", error=str(e), exc_info=True, message="Direct SQL query failed")
                 
@@ -963,16 +976,105 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         )
         return {"status": "success", "message": "Test audit log created"}
 
-    @router.get("/machines", response_model=MachineListResponse)
+    @router.get("/machines")
     async def list_machines(
         _: Dict[str, str] = Depends(get_current_admin),
         manager: DatabaseManager = Depends(get_db_manager),
     ):
-        """Get list of all machine models."""
+        """Get list of all machine models with document counts."""
         def _fetch():
             with SessionLocal() as session:
-                machines = session.query(MachineModel).order_by(MachineModel.name).all()
-                return {"machines": [m.name for m in machines]}
+                # Get all machine model names (for unmatched detection)
+                all_machines = session.query(MachineModel).all()
+                machine_names_upper = {m.name.upper() for m in all_machines}
+                
+                # Query machines with document counts
+                # Use case-insensitive comparison for machine_model matching
+                machines_query = (
+                    session.query(
+                        MachineModel.id,
+                        MachineModel.name,
+                        MachineModel.created_at,
+                        func.count(DocumentIngestionMetadata.id).label('document_count')
+                    )
+                    .outerjoin(
+                        DocumentIngestionMetadata,
+                        func.upper(MachineModel.name) == func.upper(DocumentIngestionMetadata.machine_model)
+                    )
+                    .group_by(MachineModel.id, MachineModel.name, MachineModel.created_at)
+                    .order_by(MachineModel.name)
+                )
+                
+                results = machines_query.all()
+                machines_list = [
+                    {
+                        "id": row.id,
+                        "name": row.name,
+                        "document_count": row.document_count or 0,
+                        "created_at": row.created_at.isoformat() if row.created_at else "",
+                    }
+                    for row in results
+                ]
+                
+                # Count total documents
+                total_docs = session.query(func.count(DocumentIngestionMetadata.id)).scalar() or 0
+                
+                # Find documents that don't match any machine model (case-insensitive)
+                # Get all unique machine_model values from documents (excluding NULL and empty strings)
+                from sqlalchemy import or_
+                all_doc_machine_models = session.query(
+                    func.upper(DocumentIngestionMetadata.machine_model).label('machine_model_upper'),
+                    DocumentIngestionMetadata.machine_model.label('machine_model_original')
+                ).filter(
+                    DocumentIngestionMetadata.machine_model.isnot(None),
+                    DocumentIngestionMetadata.machine_model != ""
+                ).distinct().all()
+                
+                unmatched_machine_models = []
+                for row in all_doc_machine_models:
+                    doc_model_upper = row.machine_model_upper
+                    doc_model_original = row.machine_model_original
+                    # Skip if the upper value is None (shouldn't happen with filter, but safety check)
+                    if doc_model_upper is None:
+                        continue
+                    # Check if this document's machine_model matches any machine model (case-insensitive)
+                    if doc_model_upper not in machine_names_upper:
+                        unmatched_machine_models.append(doc_model_original)
+                
+                # Count unmatched documents (only those with non-empty machine_model that don't match)
+                unmatched_count = 0
+                if unmatched_machine_models:
+                    unmatched_count = (
+                        session.query(func.count(DocumentIngestionMetadata.id))
+                        .filter(
+                            DocumentIngestionMetadata.machine_model.isnot(None),
+                            DocumentIngestionMetadata.machine_model != "",
+                            func.upper(DocumentIngestionMetadata.machine_model).in_(
+                                [m.upper() for m in unmatched_machine_models if m]
+                            )
+                        )
+                        .scalar() or 0
+                    )
+                
+                # Calculate sum of matched documents
+                matched_count = sum(m["document_count"] for m in machines_list)
+                
+                # Log warning if totals don't match
+                if total_docs != matched_count + unmatched_count:
+                    logger.warning(
+                        f"Document count mismatch: total={total_docs}, matched={matched_count}, unmatched={unmatched_count}, difference={total_docs - matched_count - unmatched_count}"
+                    )
+                    # Log unmatched machine models for debugging
+                    if unmatched_machine_models:
+                        logger.warning(f"Unmatched machine models found: {unmatched_machine_models}")
+                
+                return {
+                    "machines": machines_list,
+                    "total_documents": total_docs,
+                    "matched_documents": matched_count,
+                    "unmatched_documents": unmatched_count,
+                    "unmatched_machine_models": unmatched_machine_models,
+                }
         
         return await run_sync(_fetch)
 
@@ -1028,6 +1130,57 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         except Exception as e:
             logger.error(f"Error creating machine model: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to create machine model: {str(e)}")
+
+    @router.delete("/machines/{machine_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_machine(
+        machine_id: int,
+        admin: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
+    ):
+        """Delete a machine model (only if it has no associated documents)."""
+        def _delete():
+            with SessionLocal() as session:
+                # Check if machine exists
+                machine = session.query(MachineModel).filter(MachineModel.id == machine_id).first()
+                if not machine:
+                    raise HTTPException(status_code=404, detail="Machine model not found")
+                
+                # Check if machine has any associated documents (case-insensitive)
+                doc_count = session.query(func.count(DocumentIngestionMetadata.id)).filter(
+                    func.upper(DocumentIngestionMetadata.machine_model) == func.upper(machine.name)
+                ).scalar() or 0
+                
+                if doc_count > 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot delete machine model '{machine.name}' because it has {doc_count} associated document(s). Remove all documents first."
+                    )
+                
+                # Delete the machine
+                session.delete(machine)
+                session.commit()
+                return None
+        
+        try:
+            await run_sync(_delete)
+            
+            # Audit log
+            await audit_log(
+                "machine_model_deleted",
+                level="info",
+                user_id=admin.get("email"),
+                role=admin.get("role"),
+                metadata={"machine_id": machine_id},
+                request=http_request,
+            )
+            
+            return None
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting machine model: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to delete machine model: {str(e)}")
 
     return router
 
