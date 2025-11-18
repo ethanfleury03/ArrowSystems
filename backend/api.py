@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -30,7 +30,7 @@ from slowapi.errors import RateLimitExceeded
 from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from .orchestrator import StructuredResponse, QueryIntent
 from .utils.database_manager import DatabaseManager
-from .utils.db import DEFAULT_DB_PATH, engine, check_database_integrity, _is_sqlite, DATABASE_URL
+from .utils.db import DEFAULT_DB_PATH, engine, check_database_integrity, _is_sqlite, DATABASE_URL, SessionLocal, DocumentIngestionMetadata, MachineModel, run_sync
 from .utils.migration_runner import run_migrations, check_pending_migrations, check_migration_status
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
@@ -733,7 +733,7 @@ def apply_rate_limit(limit_str: str):
 # API Endpoints
 @app.get("/", response_model=Dict[str, str])
 @apply_rate_limit(settings.RATE_LIMIT_GLOBAL)
-async def root():
+async def root(request: Request):
     """Root endpoint with API information."""
     return {
         "message": "DuraFlex Technical Assistant API",
@@ -903,36 +903,56 @@ async def database_health_check():
 
 @app.post("/auth/login", response_model=LoginResponse)
 @apply_rate_limit(settings.RATE_LIMIT_LOGIN)
-async def auth_login(http_request: Request, login_request: LoginRequest):
+async def auth_login(request: Request):
     """Login endpoint with rate limiting."""
     if not db_manager:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    user = await db_manager.authenticate_user(login_request.email, login_request.password)
-    if not user:
-        # Audit failed login attempt
+    try:
+        # Parse request body manually to avoid FastAPI parameter resolution issues with rate limiter
+        body = await request.json()
+        login_request = LoginRequest(**body)
+        
+        user = await db_manager.authenticate_user(login_request.email, login_request.password)
+        if not user:
+            # Audit failed login attempt
+            await audit_log(
+                "user_login_failed",
+                level="warning",
+                user_id=login_request.email,
+                metadata={"reason": "invalid_credentials"},
+                request=request,
+            )
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        token = create_access_token({"email": user["email"], "role": user["role"]})
+        
+        # Audit successful login
         await audit_log(
-            "user_login_failed",
-            level="warning",
-            user_id=login_request.email,
-            metadata={"reason": "invalid_credentials"},
-            request=http_request,
+            "user_login",
+            level="info",
+            user_id=user["email"],
+            role=user["role"],
+            metadata={"user_id": str(user.get("id"))},
+            request=request,
         )
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    token = create_access_token({"email": user["email"], "role": user["role"]})
-    
-    # Audit successful login
-    await audit_log(
-        "user_login",
-        level="info",
-        user_id=user["email"],
-        role=user["role"],
-        metadata={"user_id": str(user.get("id"))},
-        request=http_request,
-    )
-    
-    return {"user": user, "token": token}
+        
+        return {"user": user, "token": token}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Login error for {login_request.email}: {e}", exc_info=True)
+        await audit_log(
+            "user_login_error",
+            level="error",
+            user_id=login_request.email,
+            metadata={"error": str(e)},
+            request=request,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=get_error_detail(e, "An internal error occurred during authentication")
+        )
 
 
 @app.get("/auth/me", response_model=UserResponse)
@@ -1007,7 +1027,7 @@ async def summarize_query_endpoint(request: Dict[str, Any]):
 
 @app.post("/query", response_model=QueryResponse)
 @apply_rate_limit(settings.RATE_LIMIT_QUERY)
-async def query_knowledge_base(http_request: Request, request: QueryRequest):
+async def query_knowledge_base(request: Request, query_request: QueryRequest):
     """
     Query the knowledge base using RAG pipeline with session-based chat memory.
     
@@ -1027,7 +1047,7 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
         start_time = time.time()
         
         # Generate or use provided session_id
-        session_id = request.session_id
+        session_id = query_request.session_id
         if not session_id:
             # Generate a simple session ID (in production, use proper UUID)
             session_id = f"session_{int(time.time() * 1000)}"
@@ -1065,7 +1085,7 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
         # Check machine confirmation for customers
         # Customers must confirm their machine list before querying
         if user_role and user_role.upper() == "CUSTOMER":
-            if request.machine_confirmation is not True:
+            if query_request.machine_confirmation is not True:
                 raise HTTPException(
                     status_code=403,
                     detail="Please confirm your machines first."
@@ -1074,32 +1094,32 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
         # Hybrid approach: If selected_machine is provided, use only that machine + GENERAL
         # Otherwise, use all assigned machines (backward compatibility)
         effective_machine_models = user_machine_models
-        if request.selected_machine:
+        if query_request.selected_machine:
             # Validate that selected_machine is in user's assigned machines
-            if user_machine_models and request.selected_machine not in user_machine_models:
+            if user_machine_models and query_request.selected_machine not in user_machine_models:
                 logger.warning(
-                    f"User {user_id} selected machine '{request.selected_machine}' not in their assigned machines: {user_machine_models}"
+                    f"User {user_id} selected machine '{query_request.selected_machine}' not in their assigned machines: {user_machine_models}"
                 )
                 # Still allow it - might be a GENERAL case or edge case
             # Use only selected machine + GENERAL for filtering
             from .config.machine_models import GENERAL_MACHINE
-            effective_machine_models = [request.selected_machine, GENERAL_MACHINE]
+            effective_machine_models = [query_request.selected_machine, GENERAL_MACHINE]
             logger.info(
-                f"Using hybrid approach: filtering to selected machine '{request.selected_machine}' + GENERAL"
+                f"Using hybrid approach: filtering to selected machine '{query_request.selected_machine}' + GENERAL"
             )
         
         # Log query start with structured logging
         logger.info(
             "rag_query_start",
-            query=request.query[:500],  # First 500 chars
+            query=query_request.query[:500],  # First 500 chars
             session_id=session_id,
             chat_history_length=len(chat_history),
-            top_k=request.top_k,
-            alpha=request.alpha,
+            top_k=query_request.top_k,
+            alpha=query_request.alpha,
             user_id=user_id,
             role=user_role,
             machines=effective_machine_models or [],
-            selected_machine=request.selected_machine,
+            selected_machine=query_request.selected_machine,
         )
         
         # Execute RAG query with chat history and machine filtering
@@ -1107,15 +1127,15 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
         # Wrap blocking RAG operation in thread pool for concurrency
         response = await run_blocking_rag_operation(
             rag_pipeline.query,
-            query=request.query,
-            top_k=request.top_k,
-            alpha=request.alpha,
-            metadata_filters=request.metadata_filters,
-            dynamic_windowing=request.dynamic_windowing,
+            query=query_request.query,
+            top_k=query_request.top_k,
+            alpha=query_request.alpha,
+            metadata_filters=query_request.metadata_filters,
+            dynamic_windowing=query_request.dynamic_windowing,
             chat_history=chat_history,  # Pass chat history to pipeline
             role=user_role,  # Pass user role for machine-based filtering
             user_machine_models=effective_machine_models,  # Pass effective machine models (selected + GENERAL or all)
-            machine_confirmation=request.machine_confirmation or False  # Pass machine confirmation
+            machine_confirmation=query_request.machine_confirmation or False  # Pass machine confirmation
         )
         
         response_time_ms = int((time.time() - start_time) * 1000)
@@ -1123,7 +1143,7 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
         # Log query completion with structured logging
         logger.info(
             "rag_query_complete",
-            query=request.query[:500],
+            query=query_request.query[:500],
             session_id=session_id,
             total_latency_ms=response_time_ms,
             chunks_retrieved=len(response.sources),
@@ -1146,17 +1166,17 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
             user_id=user_id,
             role=user_role,
             metadata={
-                "query": request.query[:200],  # First 200 chars only
+                "query": query_request.query[:200],  # First 200 chars only
                 "session_id": session_id,
                 "chunks_retrieved": len(response.sources),
                 "response_time_ms": response_time_ms,
                 "intent_type": response.intent.intent_type,
             },
-            request=None,  # Request not available here, but contextvars are set by middleware
+            request=request,  # Now we have the Request object
         )
         
         # Store messages in session history
-        await session_manager.add_message(session_id, "user", request.query)
+        await session_manager.add_message(session_id, "user", query_request.query)
         await session_manager.add_message(session_id, "assistant", response.answer)
         
         # Convert sources to response format
@@ -1178,7 +1198,7 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
             from utils.query_tracker import log_query
             documents_retrieved = [s['name'] for s in response.sources]
             log_query(
-                query_text=request.query,
+                query_text=query_request.query,
                 session_id=session_id,
                 answer_text=response.answer,
                 documents_retrieved=documents_retrieved,
@@ -1207,7 +1227,7 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
                 
                 await db_manager.save_query(
                     user=user_id,
-                    query_text=request.query,
+                    query_text=query_request.query,
                     answer_text=response.answer,
                     intent_type=response.intent.intent_type,
                     intent_confidence=response.intent.confidence,
@@ -1228,7 +1248,7 @@ async def query_knowledge_base(http_request: Request, request: QueryRequest):
         is_saved = False
         if saved_response_manager:
             try:
-                is_saved = await saved_response_manager.is_saved(request.query, user_id)
+                is_saved = await saved_response_manager.is_saved(query_request.query, user_id)
             except Exception as e:
                 logger.debug(f"Saved-state check failed: {e}")
         
@@ -1836,6 +1856,7 @@ async def get_all_documents():
     """
     Get all documents in the index with enhanced metadata.
     Returns list of documents with metadata including status, machine_model, etc.
+    Also includes documents in the ingestion pipeline (Phase 2).
     """
     global rag_pipeline
     
@@ -1844,6 +1865,24 @@ async def get_all_documents():
     
     try:
         from .utils.document_metadata import get_document_metadata
+        
+        # Get ingestion metadata for all documents in the pipeline
+        ingestion_metadata_map = {}
+        def _get_ingestion_metadata():
+            with SessionLocal() as session:
+                from backend.utils.db import DocumentIngestionMetadata
+                all_metadata = session.query(DocumentIngestionMetadata).all()
+                return {
+                    meta.filename: {
+                        "ingestion_status": meta.status,
+                        "ingestion_metadata_id": meta.id,
+                        "ingestion_error": meta.error_message,
+                        "ingestion_created_at": meta.created_at.isoformat() if meta.created_at else None,
+                    }
+                    for meta in all_metadata
+                }
+        
+        ingestion_metadata_map = await run_sync(_get_ingestion_metadata)
         
         documents = []
         
@@ -2055,6 +2094,9 @@ async def get_all_documents():
                     machine_model = None
                 # machine_model is now either None or a list of strings
                 
+                # Get ingestion status if available
+                ingestion_info = ingestion_metadata_map.get(filename, {})
+                
                 documents.append({
                     "filename": filename,
                     "size_bytes": size_bytes,
@@ -2068,11 +2110,38 @@ async def get_all_documents():
                     "missing_machine_model": machine_model is None or (isinstance(machine_model, list) and len(machine_model) == 0),
                     "requires_admin_review": doc_metadata.get("requires_admin_review", False),
                     "category": doc_metadata.get("category"),
-                    "product_family": doc_metadata.get("product_family")
+                    "product_family": doc_metadata.get("product_family"),
+                    "ingestion_status": ingestion_info.get("ingestion_status"),
+                    "ingestion_metadata_id": ingestion_info.get("ingestion_metadata_id"),
+                    "ingestion_error": ingestion_info.get("ingestion_error"),
                 })
             except Exception as e:
                 logger.debug(f"Error processing document {filename}: {e}")
                 continue
+        
+        # Add documents that are in ingestion pipeline but not yet in index
+        for filename, ingestion_info in ingestion_metadata_map.items():
+            # Check if this document is already in the list
+            if not any(doc['filename'] == filename for doc in documents):
+                # Document is in ingestion pipeline but not in index yet
+                documents.append({
+                    "filename": filename,
+                    "size_bytes": None,
+                    "uploaded_date": ingestion_info.get("ingestion_created_at"),
+                    "chunk_count": 0,
+                    "page_count": 0,
+                    "file_path": None,
+                    "file_type": None,
+                    "is_active": False,  # Not active until fully ingested
+                    "machine_model": None,
+                    "missing_machine_model": True,
+                    "requires_admin_review": False,
+                    "category": None,
+                    "product_family": None,
+                    "ingestion_status": ingestion_info.get("ingestion_status"),
+                    "ingestion_metadata_id": ingestion_info.get("ingestion_metadata_id"),
+                    "ingestion_error": ingestion_info.get("ingestion_error"),
+                })
         
         # Remove duplicates by filename
         seen = set()
@@ -2510,6 +2579,72 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
         raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while updating metadata"))
 
 
+@app.delete("/admin/documents/metadata/{metadata_id}")
+async def delete_document_by_metadata_id(
+    http_request: Request,
+    background_tasks: BackgroundTasks,
+    metadata_id: str
+):
+    """
+    Delete a document by metadata_id (Phase 4).
+    This triggers safe deletion with full index rebuild in the background.
+    """
+    from .logging_context import get_user_id, get_user_role
+    user_id = get_user_id()
+    user_role = get_user_role()
+    
+    # Validate metadata_id exists
+    def _check_metadata():
+        with SessionLocal() as session:
+            metadata = session.query(DocumentIngestionMetadata).filter(
+                DocumentIngestionMetadata.id == metadata_id
+            ).first()
+            return metadata is not None
+    
+    metadata_exists = await run_sync(_check_metadata)
+    if not metadata_exists:
+        raise HTTPException(status_code=404, detail=f"Document metadata not found: {metadata_id}")
+    
+    # Set status to DELETING
+    def _set_deleting_status():
+        with SessionLocal() as session:
+            metadata = session.query(DocumentIngestionMetadata).filter(
+                DocumentIngestionMetadata.id == metadata_id
+            ).first()
+            if metadata:
+                metadata.status = "DELETING"
+                session.commit()
+                return metadata.filename
+            return None
+    
+    filename = await run_sync(_set_deleting_status)
+    
+    # Trigger background delete and reindex task
+    from backend.utils.delete_runner import run_delete_and_reindex
+    background_tasks.add_task(run_delete_and_reindex, metadata_id)
+    logger.info(f"delete_task_queued", metadata_id=metadata_id, filename=filename)
+    
+    # Audit log
+    await audit_log(
+        "document_deletion_started",
+        level="info",
+        user_id=user_id,
+        role=user_role,
+        metadata={
+            "metadata_id": metadata_id,
+            "filename": filename,
+        },
+        request=http_request,
+    )
+    
+    return {
+        "status": "success",
+        "message": f"Document deletion started. Index rebuild in progress.",
+        "metadata_id": metadata_id,
+        "filename": filename,
+    }
+
+
 @app.delete("/admin/documents/{filename}")
 async def delete_document(filename: str):
     """
@@ -2789,24 +2924,83 @@ async def get_query_stats():
         raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching query stats"))
 
 
+def validate_uploaded_file(file: UploadFile) -> None:
+    """
+    Validate uploaded file for Phase 1 ingestion.
+    
+    Raises HTTPException if validation fails.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+    
+    # Validate file type
+    allowed_content_types = [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # DOCX
+        "text/markdown",
+    ]
+    
+    # Also check file extension as fallback
+    allowed_extensions = ['.pdf', '.docx', '.md', '.markdown']
+    file_ext = '.' + file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+    
+    if file.content_type not in allowed_content_types and file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: PDF, DOCX, Markdown"
+        )
+
+
 @app.post("/admin/documents/upload")
-async def upload_document(http_request: Request, file: UploadFile = File(...)):
+async def upload_document(
+    http_request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    machine_model: str = Form(...),
+    description: Optional[str] = Form(None),
+):
     """
-    Upload a document (PDF or DOCX) and trigger single-file ingestion.
-    Saves file to data/original_pdfs/ and ingests it into the existing index.
+    Phase 1: Upload a document with machine model selection.
+    Validates file, stores it safely, and creates metadata record with PENDING_INGESTION status.
+    Ingestion will be handled in later phases.
     """
+    import uuid
+    from datetime import datetime
+    
     # Get user from context
     from .logging_context import get_user_id, get_user_role
     user_id = get_user_id()
     user_role = get_user_role()
     
-    # Security check
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
+    # Validate file
+    validate_uploaded_file(file)
     
-    allowed_extensions = ['.pdf', '.docx', '.md', '.markdown']
-    if not any(file.filename.lower().endswith(ext) for ext in allowed_extensions):
-        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}")
+    # Read file content to check size
+    content = await file.read()
+    file_size = len(content)
+    
+    # Validate file size (100MB limit)
+    max_size = 100 * 1024 * 1024  # 100MB
+    if file_size > max_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large (>100MB). File size: {file_size / (1024*1024):.2f}MB"
+        )
+    
+    # Validate machine model exists
+    def _check_machine_model():
+        with SessionLocal() as session:
+            machine = session.query(MachineModel).filter(
+                MachineModel.name == machine_model
+            ).first()
+            return machine is not None
+    
+    machine_exists = await run_sync(_check_machine_model)
+    if not machine_exists:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid machine model: {machine_model}"
+        )
     
     # Audit log upload start
     await audit_log(
@@ -2814,135 +3008,111 @@ async def upload_document(http_request: Request, file: UploadFile = File(...)):
         level="info",
         user_id=user_id,
         role=user_role,
-        metadata={"filename": file.filename},
+        metadata={"filename": file.filename, "machine_model": machine_model},
         request=http_request,
     )
     
     try:
+        # Generate unique ID for metadata record
+        metadata_id = str(uuid.uuid4())
+        
         # Save file to data/original_pdfs/ directory
         original_pdfs_dir = "data/original_pdfs"
         os.makedirs(original_pdfs_dir, exist_ok=True)
         
-        # Also save to data/ for compatibility
-        data_dir = "data"
-        os.makedirs(data_dir, exist_ok=True)
-        
-        # Read file content
-        content = await file.read()
-        file_size = len(content)
-        
-        # Save to both locations
+        # Use original filename but ensure uniqueness if file exists
         original_path = os.path.join(original_pdfs_dir, file.filename)
-        data_path = os.path.join(data_dir, file.filename)
+        if os.path.exists(original_path):
+            # Add timestamp to filename to avoid conflicts
+            name, ext = os.path.splitext(file.filename)
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            original_path = os.path.join(original_pdfs_dir, f"{name}_{timestamp}{ext}")
+            file.filename = os.path.basename(original_path)
         
+        # Save file
         with open(original_path, "wb") as f:
-            f.write(content)
-        
-        with open(data_path, "wb") as f:
             f.write(content)
         
         logger.info("document_uploaded", filename=file.filename, size_bytes=file_size, path=original_path)
         
-        # Import single-file ingestion utility
-        from utils.single_file_ingestion import ingest_single_file
+        # Create metadata record with PENDING_INGESTION status
+        def _create_metadata():
+            with SessionLocal() as session:
+                metadata = DocumentIngestionMetadata(
+                    id=metadata_id,
+                    filename=file.filename,
+                    machine_model=machine_model,
+                    status="PENDING_INGESTION",
+                    description=description,
+                    file_path=original_path,
+                    file_size_bytes=file_size,
+                )
+                session.add(metadata)
+                session.commit()
+                session.refresh(metadata)
+                return {
+                    "id": metadata.id,
+                    "filename": metadata.filename,
+                    "machine_model": metadata.machine_model,
+                    "status": metadata.status,
+                    "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
+                }
         
-        # Determine storage directory (same logic as main initialization)
-        possible_paths = [
-            "latest_model",
-            "../latest_model",
-            "/workspace/latest_model",
-            "/workspace/ArrowSystems/latest_model",
-            "/workspace/storage",
-            "./storage"
-        ]
+        metadata_result = await run_sync(_create_metadata)
         
-        storage_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                storage_path = path
-                break
-        
-        if not storage_path:
-            raise HTTPException(
-                status_code=503,
-                detail="Index not found. Please ensure latest_model directory exists."
-            )
-        
-        # Use environment variable for cache directory if set
-        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface/hub')
-        if cache_dir.endswith('huggingface'):
-            cache_dir = os.path.join(cache_dir, 'hub')
-        
-        # Ingest the single file
-        logger.info("ingestion_starting", filename=file.filename)
-        result = ingest_single_file(
-            file_path=data_path,  # Use data/ path for ingestion
-            storage_dir=storage_path,
-            cache_dir=cache_dir,
-            enable_rewriting=False  # Can be made configurable
-        )
-        
-        if not result["success"]:
-            # Audit log ingestion error
-            await audit_log(
-                "manual_ingest_error",
-                level="error",
-                user_id=user_id,
-                role=user_role,
-                metadata={
-                    "filename": file.filename,
-                    "error": result.get('error', 'Unknown error'),
-                },
-                request=http_request,
-            )
-            raise HTTPException(
-                status_code=500,
-                detail=f"Ingestion failed: {result.get('error', 'Unknown error')}"
-            )
-        
-        # Audit log ingestion complete
+        # Audit log metadata created
         await audit_log(
-            "manual_ingest_complete",
+            "document_metadata_created",
             level="info",
             user_id=user_id,
             role=user_role,
             metadata={
                 "filename": file.filename,
-                "page_count": result.get("page_count", 0),
-                "chunk_count": result.get("chunk_count", 0),
-                "size_bytes": file_size,
+                "machine_model": machine_model,
+                "metadata_id": metadata_id,
+                "status": "PENDING_INGESTION",
             },
             request=http_request,
         )
         
-        # Reload RAG pipeline to pick up new document
-        global rag_pipeline
-        if rag_pipeline and rag_pipeline.is_initialized():
-            logger.info("Reloading RAG pipeline to include new document...")
+        # Trigger background chunking task (Phase 2)
+        # After chunking completes, it will trigger embedding (Phase 3)
+        from backend.utils.chunking_runner import run_chunking
+        from backend.utils.embedding_runner import run_embedding
+        
+        def chunking_with_embedding_trigger(meta_id: str):
+            """Run chunking, then trigger embedding if successful."""
             try:
-                rag_pipeline.orchestrator.load_index(storage_dir=storage_path)
-                logger.info("✅ RAG pipeline reloaded successfully")
+                # Run chunking (returns metadata_id if successful)
+                result = run_chunking(meta_id)
+                # If chunking succeeded, trigger embedding
+                if result:
+                    # Schedule embedding as a background task
+                    # Note: We can't use background_tasks here since we're already in a background task
+                    # So we'll call it directly, but it's async-safe
+                    run_embedding(meta_id)
             except Exception as e:
-                logger.warning(f"Failed to reload RAG pipeline: {e}. New document may not be immediately searchable.")
+                logger.error(f"chunking_or_embedding_failed", metadata_id=meta_id, error=str(e))
+        
+        background_tasks.add_task(chunking_with_embedding_trigger, metadata_id)
+        logger.info(f"chunking_task_queued", metadata_id=metadata_id, filename=file.filename)
         
         return {
             "status": "success",
-            "message": f"File {file.filename} uploaded and ingested successfully.",
+            "message": f"File {file.filename} uploaded successfully. Chunking started in background.",
+            "metadata": metadata_result,
             "file_path": original_path,
-            "size_bytes": len(content),
-            "doc_id": result["doc_id"],
-            "filename": result["filename"],
-            "page_count": result["page_count"],
-            "chunk_count": result["chunk_count"],
-            "text_chunks": result.get("text_chunks", 0),
-            "non_text_chunks": result.get("non_text_chunks", 0)
+            "size_bytes": file_size,
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error uploading/ingesting document: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while uploading/ingesting document"))
+        logger.error(f"Error uploading document: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=get_error_detail(e, "An internal error occurred while uploading document")
+        )
 
 
 @app.post("/admin/chunks/{chunk_id}/regenerate-summary")

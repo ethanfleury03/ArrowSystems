@@ -31,7 +31,23 @@ export default function LoginPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        setError(data.detail || data.error || 'Login failed');
+        // Handle error - ensure it's always a string
+        let errorMessage = 'Login failed';
+        if (data.error) {
+          errorMessage = typeof data.error === 'string' ? data.error : String(data.error);
+        } else if (data.detail) {
+          if (Array.isArray(data.detail)) {
+            // Handle validation error arrays
+            errorMessage = data.detail.map((err: any) => 
+              `${err.loc?.join('.') || 'field'}: ${err.msg || 'Invalid value'}`
+            ).join(', ');
+          } else if (typeof data.detail === 'string') {
+            errorMessage = data.detail;
+          } else {
+            errorMessage = String(data.detail);
+          }
+        }
+        setError(errorMessage);
         setLoading(false);
         return;
       }

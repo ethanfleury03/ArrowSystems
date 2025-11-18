@@ -14,7 +14,6 @@ FROM python:3.11-slim-bookworm AS base
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Install minimal runtime dependencies only
@@ -50,15 +49,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # This COPY command creates a layer that only invalidates when requirements.txt changes
 COPY backend/requirements.txt /tmp/requirements.txt
 
-# Upgrade pip in a separate cached RUN command
-# This layer will be cached unless pip itself needs updating
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip
-
-# Install Python dependencies with BuildKit cache mount
+# Upgrade pip and install dependencies in one step for better caching
 # This layer will only rebuild when requirements.txt changes (due to COPY above)
+# Using --no-cache-dir=off to leverage BuildKit cache mount properly
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r /tmp/requirements.txt
+    pip install --upgrade pip && \
+    pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Conditionally install development dependencies
 # This layer only rebuilds when BUILD_ENV changes or dependencies stage is invalidated

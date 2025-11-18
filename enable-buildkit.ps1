@@ -18,3 +18,4 @@ Write-Host ""
 Write-Host "Note: These variables are only set for the current PowerShell session." -ForegroundColor Yellow
 Write-Host "To make them permanent, add them to your PowerShell profile or set them system-wide." -ForegroundColor Yellow
 
+

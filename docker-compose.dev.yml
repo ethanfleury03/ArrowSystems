@@ -39,7 +39,7 @@ services:
       - hf_cache:/app/.cache/huggingface
       # Mount database file location (directory mount allows file creation)
       - ./backend:/app/db_data
-    command: python -m backend.api --host 0.0.0.0 --port 8000 --dev
+    command: python -m backend.api --host 0.0.0.0 --port 8000 --dev --reload
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

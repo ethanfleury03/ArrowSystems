@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..security import decode_access_token
 from ..utils.database_manager import DatabaseManager
-from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, run_sync
+from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, MachineModel, DocumentIngestionMetadata, run_sync
 from ..utils.audit_log import audit_log
 from ..logging_config import get_logger
 
@@ -55,6 +55,14 @@ class AdminUserUpdateRequest(BaseModel):
     contact_name: Optional[str] = None
     contact_phone: Optional[str] = None
     machine_models: Optional[List[str]] = None  # List of machine model strings
+
+
+class MachineListResponse(BaseModel):
+    machines: List[str]
+
+
+class MachineCreateRequest(BaseModel):
+    name: str
 
 
 def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager]]) -> APIRouter:
@@ -954,6 +962,72 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             request=http_request,
         )
         return {"status": "success", "message": "Test audit log created"}
+
+    @router.get("/machines", response_model=MachineListResponse)
+    async def list_machines(
+        _: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+    ):
+        """Get list of all machine models."""
+        def _fetch():
+            with SessionLocal() as session:
+                machines = session.query(MachineModel).order_by(MachineModel.name).all()
+                return {"machines": [m.name for m in machines]}
+        
+        return await run_sync(_fetch)
+
+    @router.post("/machines")
+    async def create_machine(
+        request: MachineCreateRequest,
+        admin: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
+    ):
+        """Add a new machine model."""
+        # Validate and normalize name
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Machine name cannot be empty")
+        
+        # Normalize: uppercase, remove extra spaces
+        name = " ".join(name.upper().split())
+        
+        def _create():
+            with SessionLocal() as session:
+                # Check for duplicates (case-insensitive)
+                existing = session.query(MachineModel).filter(
+                    func.upper(MachineModel.name) == name.upper()
+                ).first()
+                
+                if existing:
+                    raise HTTPException(status_code=400, detail=f"Machine model '{name}' already exists")
+                
+                # Create new machine model
+                machine = MachineModel(name=name)
+                session.add(machine)
+                session.commit()
+                session.refresh(machine)
+                return {"name": machine.name, "id": machine.id}
+        
+        try:
+            result = await run_sync(_create)
+            
+            # Audit log
+            await audit_log(
+                "machine_model_created",
+                level="info",
+                user_id=admin.get("email"),
+                role=admin.get("role"),
+                metadata={"machine_name": result["name"]},
+                request=http_request,
+            )
+            
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error creating machine model: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to create machine model: {str(e)}")
 
     return router
 
