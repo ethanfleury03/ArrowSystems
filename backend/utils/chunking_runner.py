@@ -21,7 +21,8 @@ from llama_index.core.schema import TextNode
 
 from backend.utils.db import SessionLocal, DocumentIngestionMetadata
 from backend.ingest import DocumentLoader, SmartChunkSplitter, TextPreprocessor
-from backend.utils.logging_context import get_logger
+from backend.logging_config import get_logger
+from backend.utils.test_mode import get_chunks_dir
 
 logger = get_logger(__name__)
 
@@ -107,6 +108,17 @@ def run_chunking(metadata_id: str) -> Optional[str]:
         
         logger.info(f"chunking_preprocessed", metadata_id=metadata_id, preprocessed_count=len(preprocessed_docs))
         
+        # Check if we have any documents to chunk - if not, fail early
+        if len(preprocessed_docs) == 0:
+            error_msg = "No content extracted from document. Document may be empty, contain only images, or all content was filtered out as low-quality."
+            logger.warning(f"chunking_no_preprocessed_docs", metadata_id=metadata_id, filename=metadata.filename, error=error_msg)
+            
+            # Update status to FAILED
+            metadata.status = "FAILED"
+            metadata.error_message = error_msg
+            session.commit()
+            return None
+        
         # Load chunking config
         import yaml
         config_path = "config.yaml"
@@ -143,9 +155,20 @@ def run_chunking(metadata_id: str) -> Optional[str]:
         
         logger.info(f"chunking_complete", metadata_id=metadata_id, chunk_count=len(filtered_nodes))
         
+        # Check if we have any chunks - if not, fail the ingestion
+        if len(filtered_nodes) == 0:
+            error_msg = "No chunks generated from document. Document may be empty, contain only images, or all content was filtered out as low-quality."
+            logger.warning(f"chunking_no_chunks", metadata_id=metadata_id, filename=metadata.filename, error=error_msg)
+            
+            # Update status to FAILED
+            metadata.status = "FAILED"
+            metadata.error_message = error_msg
+            session.commit()
+            return None
+        
         # Save chunks to temporary storage (JSON file)
         # This will be loaded in Phase 3 for embedding
-        chunks_dir = Path("data/chunks")
+        chunks_dir = Path(get_chunks_dir())
         chunks_dir.mkdir(parents=True, exist_ok=True)
         chunks_file = chunks_dir / f"{metadata_id}.json"
         

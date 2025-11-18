@@ -29,6 +29,7 @@ services:
       - SEED_TECH_EMAIL=${SEED_TECH_EMAIL:-}
       - SEED_TECH_PASSWORD=${SEED_TECH_PASSWORD:-}
       - HF_HOME=/app/.cache/huggingface
+      - TEST_MODE=${TEST_MODE:-false}
     volumes:
       # Mount code for hot reload
       - ./backend:/app/backend
@@ -68,6 +69,7 @@ services:
       - BACKEND_URL=http://backend:8000
       - NEXT_PUBLIC_SERVER_BACKEND_URL=http://backend:8000
       - SERVER_BACKEND_URL=http://backend:8000
+      - NEXT_PUBLIC_TEST_MODE=${TEST_MODE:-false}
     volumes:
       # Mount code for hot reload
       - ./frontend:/app

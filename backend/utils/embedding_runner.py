@@ -22,7 +22,8 @@ from llama_index.core.schema import TextNode
 
 from backend.utils.db import SessionLocal, DocumentIngestionMetadata
 from backend.utils.query_summarizer import QuerySummarizer
-from backend.utils.logging_context import get_logger
+from backend.logging_config import get_logger
+from backend.utils.test_mode import get_chunks_dir, get_index_dir
 
 logger = get_logger(__name__)
 
@@ -63,7 +64,7 @@ def run_embedding(metadata_id: str) -> None:
         logger.info(f"embedding_started", metadata_id=metadata_id, filename=metadata.filename)
         
         # Load chunks from JSON file
-        chunks_file = Path("data/chunks") / f"{metadata_id}.json"
+        chunks_file = Path(get_chunks_dir()) / f"{metadata_id}.json"
         if not chunks_file.exists():
             raise FileNotFoundError(f"Chunks file not found: {chunks_file}")
         
@@ -144,7 +145,7 @@ def run_embedding(metadata_id: str) -> None:
         )
         
         # Load or create vector index
-        storage_dir = "latest_model"
+        storage_dir = get_index_dir()
         
         # Ensure embedding model is set in Settings
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -226,7 +227,7 @@ def run_embedding(metadata_id: str) -> None:
         # Persist the index
         logger.info(f"embedding_persisting_index", metadata_id=metadata_id, storage_dir=storage_dir)
         index.storage_context.persist(persist_dir=storage_dir)
-        logger.info(f"embedding_index_persisted", metadata_id=metadata_id)
+        logger.info(f"embedding_index_persisted", metadata_id=metadata_id, storage_dir=storage_dir)
         
         # Update status to COMPLETE
         metadata.status = "COMPLETE"

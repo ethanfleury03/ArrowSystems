@@ -419,30 +419,41 @@ async def lifespan(app: FastAPI):
     
     # Initialize RAG pipeline
     try:
-        # Determine storage path - check multiple locations
-        possible_paths = [
-            "latest_model",  # Current directory
-            "../latest_model",  # Parent directory (for scripts/)
-            "/workspace/latest_model",  # RunPod workspace
-            "/workspace/ArrowSystems/latest_model",  # RunPod with ArrowSystems
-            "/workspace/storage",  # Old storage location
-            "./storage"  # Local storage
-        ]
+        # Check if test mode is enabled
+        from backend.utils.test_mode import is_test_mode, get_index_dir
         
-        storage_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                storage_path = path
-                break
+        if is_test_mode():
+            # In test mode, use test directory
+            storage_path = get_index_dir()
+            logger.info("test_mode_enabled", storage_path=storage_path)
+            # Create directory if it doesn't exist (will be handled by load_index)
+            if not os.path.exists(storage_path):
+                os.makedirs(storage_path, exist_ok=True)
+        else:
+            # Production mode: check multiple locations
+            possible_paths = [
+                "latest_model",  # Current directory
+                "../latest_model",  # Parent directory (for scripts/)
+                "/workspace/latest_model",  # RunPod workspace
+                "/workspace/ArrowSystems/latest_model",  # RunPod with ArrowSystems
+                "/workspace/storage",  # Old storage location
+                "./storage"  # Local storage
+            ]
+            
+            storage_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    storage_path = path
+                    break
+            
+            if not storage_path:
+                raise FileNotFoundError(
+                    "Index not found. Please run 'python -m backend.ingest' first, "
+                    "or ensure the latest_model directory exists. "
+                    f"Checked paths: {possible_paths}"
+                )
         
-        if not storage_path:
-            raise FileNotFoundError(
-                "Index not found. Please run 'python -m backend.ingest' first, "
-                "or ensure the latest_model directory exists. "
-                f"Checked paths: {possible_paths}"
-            )
-        
-        logger.info("rag_pipeline_storage_path", storage_path=storage_path, checked_paths=possible_paths)
+        logger.info("rag_pipeline_storage_path", storage_path=storage_path, test_mode=is_test_mode())
         
         # Use environment variable for cache directory if set
         cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface/hub')
@@ -1761,18 +1772,35 @@ async def get_user_documents():
                                     pass
         
         # Get from filesystem
-        data_dir = "data"
-        if os.path.exists(data_dir):
-            for filename in os.listdir(data_dir):
-                if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
-                    file_path = os.path.join(data_dir, filename)
-                    if os.path.isfile(file_path):
-                        seen_filenames.add(filename)
+        # In test mode, only scan test directories
+        from backend.utils.test_mode import is_test_mode, get_original_pdfs_dir
+        if is_test_mode():
+            # In test mode, only scan test directories
+            original_pdfs_dir = get_original_pdfs_dir()
+            if os.path.exists(original_pdfs_dir):
+                for filename in os.listdir(original_pdfs_dir):
+                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+                        file_path = os.path.join(original_pdfs_dir, filename)
+                        if os.path.isfile(file_path):
+                            seen_filenames.add(filename)
+        else:
+            # Production mode: scan production data directory
+            data_dir = "data"
+            if os.path.exists(data_dir):
+                for filename in os.listdir(data_dir):
+                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+                        file_path = os.path.join(data_dir, filename)
+                        if os.path.isfile(file_path):
+                            seen_filenames.add(filename)
         
         # Process each document and filter by machine models
         for filename in seen_filenames:
             try:
-                file_path = os.path.join("data", filename)
+                # Use appropriate directory based on test mode
+                if is_test_mode():
+                    file_path = os.path.join(get_original_pdfs_dir(), filename)
+                else:
+                    file_path = os.path.join("data", filename)
                 size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
                 
                 # Get metadata
@@ -1941,15 +1969,30 @@ async def get_all_documents():
                     pass
         
         # Source 2: Get from filesystem (most comprehensive)
+        # In test mode, only scan test directories
+        from backend.utils.test_mode import is_test_mode, get_original_pdfs_dir
         logger.info("Scanning filesystem for documents...")
-        data_dir = "data"
-        if os.path.exists(data_dir):
-            for filename in os.listdir(data_dir):
-                if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
-                    file_path = os.path.join(data_dir, filename)
-                    if os.path.isfile(file_path):
-                        all_filenames.add(filename)
-            logger.info(f"Found {len(all_filenames)} total unique documents across all sources")
+        
+        if is_test_mode():
+            # In test mode, only scan test directories
+            original_pdfs_dir = get_original_pdfs_dir()
+            if os.path.exists(original_pdfs_dir):
+                for filename in os.listdir(original_pdfs_dir):
+                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+                        file_path = os.path.join(original_pdfs_dir, filename)
+                        if os.path.isfile(file_path):
+                            all_filenames.add(filename)
+        else:
+            # Production mode: scan production data directory
+            data_dir = "data"
+            if os.path.exists(data_dir):
+                for filename in os.listdir(data_dir):
+                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+                        file_path = os.path.join(data_dir, filename)
+                        if os.path.isfile(file_path):
+                            all_filenames.add(filename)
+        
+        logger.info(f"Found {len(all_filenames)} total unique documents across all sources")
         
         # Convert to list for processing
         doc_ids = list(all_filenames)
@@ -2645,6 +2688,90 @@ async def delete_document_by_metadata_id(
     }
 
 
+@app.post("/admin/test/clear-test-mode")
+async def clear_test_mode(http_request: Request):
+    """
+    Clear test mode directories and database records (only works when TEST_MODE=true).
+    Deletes all test directories, recreates empty ones, and clears all DocumentIngestionMetadata records.
+    """
+    from backend.utils.test_mode import is_test_mode, get_index_dir, get_chunks_dir, get_original_pdfs_dir
+    import shutil
+    
+    if not is_test_mode():
+        raise HTTPException(
+            status_code=400,
+            detail="Test mode not enabled. Set TEST_MODE=true to use this endpoint."
+        )
+    
+    from .logging_context import get_user_id, get_user_role
+    user_id = get_user_id()
+    user_role = get_user_role()
+    
+    try:
+        deleted_dirs = []
+        deleted_metadata_count = 0
+        
+        # Delete test directories
+        test_dirs = [
+            get_index_dir(),
+            get_chunks_dir(),
+            get_original_pdfs_dir(),
+        ]
+        
+        for test_dir in test_dirs:
+            if os.path.exists(test_dir):
+                try:
+                    shutil.rmtree(test_dir)
+                    deleted_dirs.append(test_dir)
+                    logger.info(f"test_mode_dir_deleted", dir=test_dir)
+                except Exception as e:
+                    logger.warning(f"test_mode_dir_delete_failed", dir=test_dir, error=str(e))
+        
+        # Recreate empty directories
+        for test_dir in test_dirs:
+            try:
+                os.makedirs(test_dir, exist_ok=True)
+                logger.info(f"test_mode_dir_created", dir=test_dir)
+            except Exception as e:
+                logger.warning(f"test_mode_dir_create_failed", dir=test_dir, error=str(e))
+        
+        # Clear all DocumentIngestionMetadata records from database
+        def _clear_metadata():
+            with SessionLocal() as session:
+                from backend.utils.db import DocumentIngestionMetadata
+                count = session.query(DocumentIngestionMetadata).count()
+                session.query(DocumentIngestionMetadata).delete()
+                session.commit()
+                return count
+        
+        deleted_metadata_count = await run_sync(_clear_metadata)
+        logger.info(f"test_mode_metadata_cleared", deleted_count=deleted_metadata_count)
+        
+        # Audit log
+        await audit_log(
+            "test_mode_cleared",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "deleted_dirs": deleted_dirs,
+                "deleted_metadata_count": deleted_metadata_count,
+            },
+            request=http_request,
+        )
+        
+        return {
+            "status": "success",
+            "message": "Test mode directories and database records cleared",
+            "deleted_dirs": deleted_dirs,
+            "deleted_metadata_count": deleted_metadata_count,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error clearing test mode: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while clearing test mode"))
+
+
 @app.delete("/admin/documents/{filename}")
 async def delete_document(filename: str):
     """
@@ -3016,8 +3143,9 @@ async def upload_document(
         # Generate unique ID for metadata record
         metadata_id = str(uuid.uuid4())
         
-        # Save file to data/original_pdfs/ directory
-        original_pdfs_dir = "data/original_pdfs"
+        # Save file to data/original_pdfs/ directory (or test directory if in test mode)
+        from backend.utils.test_mode import get_original_pdfs_dir
+        original_pdfs_dir = get_original_pdfs_dir()
         os.makedirs(original_pdfs_dir, exist_ok=True)
         
         # Use original filename but ensure uniqueness if file exists
@@ -3059,6 +3187,22 @@ async def upload_document(
                 }
         
         metadata_result = await run_sync(_create_metadata)
+        
+        # Also update the old document_metadata.json file (for backwards compatibility)
+        # This ensures the machine_model shows up in the document list immediately
+        from .utils.document_metadata import update_document_metadata
+        try:
+            update_document_metadata(
+                file.filename,
+                {
+                    "machine_model": [machine_model],  # Convert to list format
+                    "requires_admin_review": False,  # Clear review flag since we have a valid machine model
+                }
+            )
+            logger.info(f"Updated document_metadata.json for {file.filename} with machine_model={machine_model}")
+        except Exception as e:
+            # Don't fail the upload if metadata update fails - log and continue
+            logger.warning(f"Failed to update document_metadata.json for {file.filename}: {e}")
         
         # Audit log metadata created
         await audit_log(

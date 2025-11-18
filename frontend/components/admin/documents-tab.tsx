@@ -86,6 +86,7 @@ export function DocumentsTab() {
   const [newMachineName, setNewMachineName] = useState('');
   const [addingMachine, setAddingMachine] = useState(false);
   const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null);
+  const [testMode, setTestMode] = useState(false);
   const { toast } = useToast();
 
   // Helper function to get status label
@@ -159,7 +160,20 @@ export function DocumentsTab() {
   useEffect(() => {
     fetchDocuments();
     fetchMachines();
+    checkTestMode();
   }, [fetchDocuments]);
+
+  const checkTestMode = useCallback(async () => {
+    try {
+      const response = await fetch('/api/admin/test-mode');
+      if (response.ok) {
+        const data = await response.json();
+        setTestMode(data.test_mode || false);
+      }
+    } catch (error) {
+      console.error('Error checking test mode:', error);
+    }
+  }, []);
 
   // Poll for status updates on documents that are pending, chunking, embedding, or deleting
   useEffect(() => {
@@ -450,10 +464,40 @@ export function DocumentsTab() {
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
   };
 
+  // Check if test mode is enabled (via environment variable or API)
+  const [isTestMode, setIsTestMode] = useState(false);
+  
+  useEffect(() => {
+    // Check test mode status
+    const checkTestMode = async () => {
+      try {
+        // Test mode is determined by backend, we can check via a simple API call
+        // or read from environment. For now, we'll check if test directories exist
+        // by trying to fetch a test mode indicator from the backend
+        const response = await fetch('/api/admin/test/mode-status');
+        if (response.ok) {
+          const data = await response.json();
+          setIsTestMode(data.test_mode || false);
+        }
+      } catch (error) {
+        // If endpoint doesn't exist yet, assume false
+        setIsTestMode(false);
+      }
+    };
+    checkTestMode();
+  }, []);
+  
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-semibold">Documents</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-2xl font-semibold">Documents</h2>
+          {testMode && (
+            <Badge variant="destructive" className="text-xs">
+              TEST MODE (temporary index)
+            </Badge>
+          )}
+        </div>
         <div className="flex gap-2">
           <Input
             type="file"
@@ -693,10 +737,17 @@ export function DocumentsTab() {
             <div className="space-y-4 py-4">
               <div>
                 <Label htmlFor="machine-select">Machine Model *</Label>
+                {loadingMachines ? (
+                  <div className="text-sm text-muted-foreground mt-2">Loading machines...</div>
+                ) : machines.length === 0 ? (
+                  <div className="text-sm text-muted-foreground mt-2">
+                    No machines available. Click the + button to add one.
+                  </div>
+                ) : null}
                 <div className="flex gap-2 mt-2">
-                  <Select value={selectedMachine} onValueChange={setSelectedMachine}>
+                  <Select value={selectedMachine} onValueChange={setSelectedMachine} disabled={loadingMachines}>
                     <SelectTrigger id="machine-select" className="flex-1">
-                      <SelectValue placeholder="Select a machine model" />
+                      <SelectValue placeholder={machines.length === 0 ? "No machines available" : "Select a machine model"} />
                     </SelectTrigger>
                     <SelectContent>
                       {machines.map((machine) => (
@@ -711,6 +762,7 @@ export function DocumentsTab() {
                     size="icon"
                     onClick={() => setAddMachineDialogOpen(true)}
                     title="Add new machine model"
+                    disabled={loadingMachines}
                   >
                     <Plus className="h-4 w-4" />
                   </Button>
