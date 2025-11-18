@@ -25,13 +25,17 @@ export function middleware(request: NextRequest) {
       // Redirect to account if already logged in
       return NextResponse.redirect(new URL('/account', request.url));
     }
+    // Allow access to login page - don't redirect if already on login
     return NextResponse.next();
   }
 
   // Protect all other routes (including root)
   if (!sessionCookie) {
-    // Redirect to login if no session
-    return NextResponse.redirect(new URL('/login', request.url));
+    // Only redirect to login if not already going there (prevent redirect loops)
+    // Clean the URL to avoid query parameters that might cause issues
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.search = ''; // Remove any query parameters
+    return NextResponse.redirect(loginUrl);
   }
 
   return NextResponse.next();

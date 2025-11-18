@@ -24,7 +24,7 @@ interface Document {
   ingestion_error?: string | null;
 }
 
-type SortField = keyof Pick<Document, "filename" | "chunk_count" | "page_count" | "is_active">;
+type SortField = keyof Pick<Document, "filename" | "page_count" | "is_active">;
 type SortDirection = "asc" | "desc";
 
 const formatFileSize = (bytes: number): string => {
@@ -430,10 +430,10 @@ export default function AdminDocumentsPage() {
       const result = await response.json();
       
       setUploadProgress(
-        `✅ Complete! Processed ${result.page_count || 0} pages, created ${result.chunk_count || 0} chunks. Reloading index...`
+        `✅ Complete! Processed ${result.page_count || 0} pages. Reloading index...`
       );
       
-      showToast(`✅ Document uploaded and ingested successfully (${result.chunk_count || 0} chunks created)`);
+      showToast(`✅ Document uploaded and ingested successfully`);
       await fetchDocuments(authToken);
       
       // Small delay to show completion message
@@ -620,13 +620,6 @@ export default function AdminDocumentsPage() {
                   Pages
                   {sortField === "page_count" && (sortDirection === "asc" ? " ↑" : " ↓")}
                 </th>
-                <th
-                  className="cursor-pointer whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:bg-muted/50"
-                  onClick={() => handleSort("chunk_count")}
-                >
-                  Chunks
-                  {sortField === "chunk_count" && (sortDirection === "asc" ? " ↑" : " ↓")}
-                </th>
                 <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Ingestion Status
                 </th>
@@ -638,19 +631,19 @@ export default function AdminDocumentsPage() {
             <tbody>
               {loadingTable ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-6 text-center text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-6 text-center text-muted-foreground">
                     Loading documents...
                   </td>
                 </tr>
               ) : error ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-6 text-center text-destructive">
+                  <td colSpan={7} className="px-4 py-6 text-center text-destructive">
                     {error}
                   </td>
                 </tr>
               ) : sortedDocuments.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-6 text-center text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-6 text-center text-muted-foreground">
                     {searchTerm ? "No documents match your search." : "No documents found. Upload a document to get started."}
                   </td>
                 </tr>
@@ -711,7 +704,6 @@ export default function AdminDocumentsPage() {
                       {formatFileSize(doc.size_bytes)}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{doc.page_count}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{doc.chunk_count}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm">
                       {doc.ingestion_status ? (
                         <div className="flex flex-col gap-1">
