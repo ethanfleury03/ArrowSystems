@@ -6,6 +6,8 @@ export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File;
+    const machine_model = formData.get('machine_model') as string;
+    const description = formData.get('description') as string | null;
 
     if (!file) {
       return NextResponse.json(
@@ -14,12 +16,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!machine_model) {
+      return NextResponse.json(
+        { detail: 'Machine model is required' },
+        { status: 400 }
+      );
+    }
+
     // Create FormData for backend
     const backendFormData = new FormData();
     backendFormData.append('file', file);
+    backendFormData.append('machine_model', machine_model);
+    if (description) {
+      backendFormData.append('description', description);
+    }
 
     const response = await fetch(`${BACKEND_URL}/admin/documents/upload`, {
       method: 'POST',
+      headers: {
+        'Authorization': request.headers.get('Authorization') || '',
+      },
       body: backendFormData,
     });
 

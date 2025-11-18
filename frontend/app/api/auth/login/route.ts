@@ -26,10 +26,28 @@ export async function POST(request: NextRequest) {
     });
 
     if (!backendResponse.ok) {
-      const detail = await backendResponse.json().catch(() => null);
-      console.error(`Login failed for ${email}:`, detail);
+      const errorData = await backendResponse.json().catch(() => null);
+      console.error(`Login failed for ${email}:`, errorData);
+      
+      // Handle FastAPI validation errors (array of error objects)
+      let errorMessage = 'Invalid email or password';
+      if (errorData) {
+        if (errorData.detail) {
+          if (Array.isArray(errorData.detail)) {
+            // Pydantic validation errors: array of {type, loc, msg, input}
+            errorMessage = errorData.detail.map((err: any) => 
+              `${err.loc?.join('.') || 'field'}: ${err.msg || 'Invalid value'}`
+            ).join(', ');
+          } else if (typeof errorData.detail === 'string') {
+            errorMessage = errorData.detail;
+          }
+        } else if (errorData.error && typeof errorData.error === 'string') {
+          errorMessage = errorData.error;
+        }
+      }
+      
       return NextResponse.json(
-        { error: detail?.detail || 'Invalid email or password' },
+        { error: errorMessage },
         { status: backendResponse.status === 401 ? 401 : 500 }
       );
     }

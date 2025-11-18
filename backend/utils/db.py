@@ -241,6 +241,32 @@ class AuditLog(Base):
     request_id = Column(String(255), nullable=True)  # Request ID from context
 
 
+class MachineModel(Base):
+    """Machine model registry table."""
+    __tablename__ = "machine_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class DocumentIngestionMetadata(Base):
+    """Document ingestion metadata table for tracking ingestion status."""
+    __tablename__ = "document_ingestion_metadata"
+
+    id = Column(String(36), primary_key=True, index=True)  # UUID as string
+    filename = Column(String(500), nullable=False, index=True)
+    machine_model = Column(String(255), nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="PENDING_INGESTION", index=True)
+    description = Column(Text, nullable=True)
+    file_path = Column(String(1000), nullable=True)
+    file_size_bytes = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 def ensure_analytics_columns() -> None:
     """Ensure analytics columns exist in query_history table (SQLite-safe migration)."""
     with engine.begin() as connection:

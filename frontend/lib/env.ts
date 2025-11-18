@@ -32,3 +32,4 @@ export const shouldLog = (level: 'debug' | 'info' | 'warn' | 'error'): boolean =
   return levels[level] >= levels[currentLevel];
 };
 
+

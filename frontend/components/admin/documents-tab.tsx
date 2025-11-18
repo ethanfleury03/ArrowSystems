@@ -20,7 +20,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Input } from '@/components/ui/input';
-import { Upload, Trash2, FileText, Edit, Power, PowerOff, Eye } from 'lucide-react';
+import { Upload, Trash2, FileText, Edit, Power, PowerOff, Eye, Plus } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import {
   Dialog,
@@ -33,19 +33,30 @@ import {
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
 
 interface Document {
   filename: string;
-  size_bytes: number;
+  size_bytes: number | null;
   uploaded_date: string | null;
   chunk_count: number;
   page_count: number;
-  file_path: string;
-  file_type: string;
+  file_path: string | null;
+  file_type: string | null;
   is_active: boolean;
   machine_model: string | null;
   category: string | null;
   product_family: string | null;
+  ingestion_status?: string | null;
+  ingestion_metadata_id?: string | null;
+  ingestion_error?: string | null;
 }
 
 interface DocumentChunk {
@@ -65,7 +76,67 @@ export function DocumentsTab() {
   const [uploading, setUploading] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingDoc, setEditingDoc] = useState<Document | null>(null);
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedMachine, setSelectedMachine] = useState<string>('');
+  const [description, setDescription] = useState<string>('');
+  const [machines, setMachines] = useState<string[]>([]);
+  const [loadingMachines, setLoadingMachines] = useState(false);
+  const [addMachineDialogOpen, setAddMachineDialogOpen] = useState(false);
+  const [newMachineName, setNewMachineName] = useState('');
+  const [addingMachine, setAddingMachine] = useState(false);
+  const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
+
+  // Helper function to get status label
+  const getStatusLabel = (status: string | null | undefined): string => {
+    if (!status) return '';
+    switch (status) {
+      case 'PENDING_INGESTION':
+        return 'Pending';
+      case 'CHUNKING':
+        return 'Processing (chunking)';
+      case 'READY_FOR_EMBEDDING':
+        return 'Ready for embeddings';
+      case 'EMBEDDING':
+        return 'Processing (embedding)';
+      case 'COMPLETE':
+        return 'Complete';
+      case 'DELETING':
+        return 'Deleting…';
+      case 'REBUILDING_INDEX':
+        return 'Rebuilding index…';
+      case 'FAILED':
+        return 'Failed';
+      default:
+        return status;
+    }
+  };
+
+  // Helper function to get status badge variant
+  const getStatusVariant = (status: string | null | undefined): 'default' | 'secondary' | 'destructive' | 'outline' => {
+    if (!status) return 'outline';
+    switch (status) {
+      case 'PENDING_INGESTION':
+        return 'secondary';
+      case 'CHUNKING':
+        return 'default';
+      case 'READY_FOR_EMBEDDING':
+        return 'default';
+      case 'EMBEDDING':
+        return 'default';
+      case 'COMPLETE':
+        return 'default';
+      case 'DELETING':
+        return 'default';
+      case 'REBUILDING_INDEX':
+        return 'default';
+      case 'FAILED':
+        return 'destructive';
+      default:
+        return 'outline';
+    }
+  };
 
   const fetchDocuments = useCallback(async () => {
     try {
@@ -87,38 +158,98 @@ export function DocumentsTab() {
 
   useEffect(() => {
     fetchDocuments();
+    fetchMachines();
   }, [fetchDocuments]);
 
-  const handleDelete = async () => {
-    if (!selectedDoc) return;
-    
+  // Poll for status updates on documents that are pending, chunking, embedding, or deleting
+  useEffect(() => {
+    const hasActiveIngestion = documents.some(
+      doc => doc.ingestion_status === 'PENDING_INGESTION' || 
+             doc.ingestion_status === 'CHUNKING' || 
+             doc.ingestion_status === 'READY_FOR_EMBEDDING' ||
+             doc.ingestion_status === 'EMBEDDING' ||
+             doc.ingestion_status === 'DELETING' ||
+             doc.ingestion_status === 'REBUILDING_INDEX'
+    );
+
+    if (hasActiveIngestion) {
+      // Poll every 3 seconds
+      const interval = setInterval(() => {
+        fetchDocuments();
+      }, 3000);
+
+      return () => {
+        clearInterval(interval);
+      };
+    }
+  }, [documents, fetchDocuments]);
+
+  const fetchMachines = useCallback(async () => {
     try {
-      const response = await fetch(`/api/admin/documents/${encodeURIComponent(selectedDoc.filename)}`, {
-        method: 'DELETE',
+      setLoadingMachines(true);
+      const response = await fetch('/api/admin/machines');
+      if (!response.ok) throw new Error('Failed to fetch machines');
+      const data = await response.json();
+      setMachines(data.machines || []);
+    } catch (error) {
+      console.error('Error fetching machines:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load machine models',
       });
-      
+    } finally {
+      setLoadingMachines(false);
+    }
+  }, [toast]);
+
+  const handleAddMachine = async () => {
+    if (!newMachineName.trim()) {
+      toast({
+        title: 'Error',
+        description: 'Machine name cannot be empty',
+      });
+      return;
+    }
+
+    try {
+      setAddingMachine(true);
+      const response = await fetch('/api/admin/machines', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newMachineName.trim() }),
+      });
+
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.detail || 'Failed to delete document');
+        throw new Error(error.detail || 'Failed to create machine');
       }
-      
+
+      const data = await response.json();
       toast({
         title: 'Success',
-        description: `Document ${selectedDoc.filename} deleted`,
+        description: `Machine model "${data.name}" added successfully`,
       });
+
+      // Refresh machines list
+      await fetchMachines();
       
-      setDeleteDialogOpen(false);
-      setSelectedDoc(null);
-      fetchDocuments();
+      // Auto-select the newly created machine
+      setSelectedMachine(data.name);
+      
+      // Close dialog
+      setAddMachineDialogOpen(false);
+      setNewMachineName('');
     } catch (error: any) {
       toast({
         title: 'Error',
-        description: error.message || 'Failed to delete document',
+        description: error.message || 'Failed to add machine model',
       });
+    } finally {
+      setAddingMachine(false);
     }
   };
 
-  const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -133,15 +264,74 @@ export function DocumentsTab() {
       return;
     }
 
+    setSelectedFile(file);
+    setUploadDialogOpen(true);
+  };
+
+  const handleDelete = async () => {
+    if (!selectedDoc) return;
+
+    // Check if we have metadata_id for Phase 4 deletion
+    if (!selectedDoc.ingestion_metadata_id) {
+      toast({
+        title: 'Error',
+        description: 'Document metadata ID not found. Cannot delete.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/admin/documents/metadata/${selectedDoc.ingestion_metadata_id}`, {
+        method: 'DELETE',
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to delete document');
+      }
+      
+      toast({
+        title: 'Deletion started',
+        description: 'Document deletion started. The index is rebuilding in the background.',
+      });
+      
+      setDeleteDialogOpen(false);
+      setSelectedDoc(null);
+      // Refresh to show DELETING status
+      fetchDocuments();
+    } catch (error: any) {
+      toast({
+        title: 'Error',
+        description: error.message || 'Failed to delete document',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!selectedFile) return;
+    if (!selectedMachine) {
+      toast({
+        title: 'Error',
+        description: 'Please select a machine model',
+      });
+      return;
+    }
+
     try {
       setUploading(true);
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', selectedFile);
+      formData.append('machine_model', selectedMachine);
+      if (description.trim()) {
+        formData.append('description', description.trim());
+      }
 
       // Show initial upload toast
-      const uploadToast = toast({
+      toast({
         title: 'Uploading...',
-        description: `Uploading ${file.name}...`,
+        description: `Uploading ${selectedFile.name}...`,
       });
 
       const response = await fetch('/api/admin/documents/upload', {
@@ -159,8 +349,14 @@ export function DocumentsTab() {
       // Show success toast with details
       toast({
         title: 'Success',
-        description: `${data.filename} uploaded and ingested successfully. ${data.chunk_count} chunks created from ${data.page_count} pages.`,
+        description: `${data.metadata.filename} uploaded successfully. Status: ${data.metadata.status}`,
       });
+
+      // Reset form
+      setSelectedFile(null);
+      setSelectedMachine('');
+      setDescription('');
+      setUploadDialogOpen(false);
 
       // Refresh document list to show new document
       await fetchDocuments();
@@ -171,8 +367,6 @@ export function DocumentsTab() {
       });
     } finally {
       setUploading(false);
-      // Reset input
-      event.target.value = '';
     }
   };
 
@@ -264,7 +458,7 @@ export function DocumentsTab() {
           <Input
             type="file"
             accept=".pdf,.docx,.md,.markdown"
-            onChange={handleUpload}
+            onChange={handleFileSelect}
             disabled={uploading}
             className="hidden"
             id="file-upload"
@@ -301,6 +495,18 @@ export function DocumentsTab() {
                     {doc.is_active ? 'Enabled' : 'Disabled'}
                   </Badge>
                 </div>
+                {doc.ingestion_status && (
+                  <div className="mt-1">
+                    <Badge variant={getStatusVariant(doc.ingestion_status)} className="text-xs">
+                      {getStatusLabel(doc.ingestion_status)}
+                    </Badge>
+                    {doc.ingestion_error && (
+                      <p className="text-xs text-destructive mt-1" title={doc.ingestion_error}>
+                        Error: {doc.ingestion_error.substring(0, 50)}...
+                      </p>
+                    )}
+                  </div>
+                )}
                 {doc.machine_model && (
                   <CardDescription className="mt-1">
                     Machine: {doc.machine_model}
@@ -309,10 +515,12 @@ export function DocumentsTab() {
               </CardHeader>
               <CardContent className="flex-1">
                 <div className="space-y-2 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Type:</span>
-                    <Badge variant="outline">{doc.file_type.toUpperCase()}</Badge>
-                  </div>
+                  {doc.file_type && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Type:</span>
+                      <Badge variant="outline">{doc.file_type.toUpperCase()}</Badge>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Pages:</span>
                     <span className="font-medium">{doc.page_count}</span>
@@ -368,8 +576,8 @@ export function DocumentsTab() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Document</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete &quot;{selectedDoc?.filename}&quot;? This action cannot be undone.
-              You will need to re-index after deletion.
+              Are you sure you want to delete &quot;{selectedDoc?.filename}&quot;? This requires a full index rebuild.
+              The deletion will happen in the background.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -468,6 +676,107 @@ export function DocumentsTab() {
             <DialogFooter>
               <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
                 Close
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Upload Dialog */}
+        <Dialog open={uploadDialogOpen} onOpenChange={setUploadDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Upload Document</DialogTitle>
+              <DialogDescription>
+                {selectedFile?.name}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div>
+                <Label htmlFor="machine-select">Machine Model *</Label>
+                <div className="flex gap-2 mt-2">
+                  <Select value={selectedMachine} onValueChange={setSelectedMachine}>
+                    <SelectTrigger id="machine-select" className="flex-1">
+                      <SelectValue placeholder="Select a machine model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {machines.map((machine) => (
+                        <SelectItem key={machine} value={machine}>
+                          {machine}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => setAddMachineDialogOpen(true)}
+                    title="Add new machine model"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="description">Description (Optional)</Label>
+                <Textarea
+                  id="description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Optional description for this document"
+                  rows={3}
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => {
+                setUploadDialogOpen(false);
+                setSelectedFile(null);
+                setSelectedMachine('');
+                setDescription('');
+              }}>
+                Cancel
+              </Button>
+              <Button onClick={handleUpload} disabled={uploading || !selectedMachine}>
+                {uploading ? 'Uploading...' : 'Upload'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Add Machine Dialog */}
+        <Dialog open={addMachineDialogOpen} onOpenChange={setAddMachineDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add New Machine Model</DialogTitle>
+              <DialogDescription>
+                Add a new machine model to the system
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div>
+                <Label htmlFor="new-machine-name">Machine Name *</Label>
+                <Input
+                  id="new-machine-name"
+                  value={newMachineName}
+                  onChange={(e) => setNewMachineName(e.target.value)}
+                  placeholder="e.g., NEW_MACHINE_MODEL"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newMachineName.trim()) {
+                      handleAddMachine();
+                    }
+                  }}
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => {
+                setAddMachineDialogOpen(false);
+                setNewMachineName('');
+              }}>
+                Cancel
+              </Button>
+              <Button onClick={handleAddMachine} disabled={addingMachine || !newMachineName.trim()}>
+                {addingMachine ? 'Adding...' : 'Add Machine'}
               </Button>
             </DialogFooter>
           </DialogContent>

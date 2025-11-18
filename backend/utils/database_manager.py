@@ -280,20 +280,30 @@ class DatabaseManager:
 
     async def authenticate_user(self, email: str, password: str) -> Optional[Dict[str, Any]]:
         def _auth():
-            with SessionLocal() as session:
-                record = (
-                    session.execute(
-                        select(User).where(func.lower(User.email) == email.strip().lower())
-                    ).scalars().first()
-                )
-                if not record or not record.password_hash:
+            try:
+                with SessionLocal() as session:
+                    record = (
+                        session.execute(
+                            select(User).where(func.lower(User.email) == email.strip().lower())
+                        ).scalars().first()
+                    )
+                    if not record:
+                        logger.debug(f"User not found: {email}")
+                        return None
+                    if not record.password_hash or record.password_hash.strip() == "":
+                        logger.warning(f"User {email} has no password hash set")
+                        return None
+                    try:
+                        if bcrypt.checkpw(password.encode("utf-8"), record.password_hash.encode("utf-8")):
+                            return self._serialize_user(record)
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"User {email} has invalid password hash: {e}")
+                    except Exception as e:
+                        logger.error(f"Error checking password for {email}: {e}", exc_info=True)
                     return None
-                try:
-                    if bcrypt.checkpw(password.encode("utf-8"), record.password_hash.encode("utf-8")):
-                        return self._serialize_user(record)
-                except ValueError:
-                    logger.warning("User %s has invalid password hash", email)
-                return None
+            except Exception as e:
+                logger.error(f"Error authenticating user {email}: {e}", exc_info=True)
+                raise
 
         return await run_sync(_auth)
 
