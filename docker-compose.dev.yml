@@ -23,7 +23,7 @@ services:
     environment:
       - ENV=dev
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - SQLITE_DB_PATH=/app/backend/database.sqlite
+      - DATABASE_URL=postgresql://rag_user:ArrowSystems1@host.docker.internal:5432/rag_app
       - SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-admin@example.com}
       - SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD:-admin123}
       - SEED_TECH_EMAIL=${SEED_TECH_EMAIL:-}
@@ -38,8 +38,6 @@ services:
       - ./logs:/app/logs
       - ./storage:/app/storage
       - hf_cache:/app/.cache/huggingface
-      # Mount database file location (directory mount allows file creation)
-      - ./backend:/app/db_data
     command: python -m backend.api --host 0.0.0.0 --port 8000 --dev --reload
     restart: unless-stopped
     healthcheck:

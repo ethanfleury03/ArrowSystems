@@ -2,7 +2,7 @@
 Alembic environment configuration.
 
 This file integrates Alembic with our database setup, using get_engine()
-from utils.db.py to support both SQLite (dev) and PostgreSQL (prod).
+from utils.db.py for PostgreSQL.
 """
 
 from logging.config import fileConfig
@@ -64,8 +64,6 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        # SQLite-specific options
-        render_as_batch=True,  # Use batch mode for SQLite ALTER TABLE
     )
 
     with context.begin_transaction():
@@ -86,8 +84,6 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            # SQLite-specific options
-            render_as_batch=True,  # Use batch mode for SQLite ALTER TABLE
         )
 
         with context.begin_transaction():

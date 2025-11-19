@@ -182,8 +182,7 @@ fi
 EOF
 RUN sed -i 's/\r$//' /app/run_backend.sh && chmod +x /app/run_backend.sh
 
-# Ensure local SQLite database file exists for persistence
-RUN touch /app/database.sqlite
+# Database is managed via DATABASE_URL environment variable (PostgreSQL)
 
 # Set ownership and permissions
 RUN chown -R appuser:appuser /app && \

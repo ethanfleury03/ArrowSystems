@@ -12,7 +12,7 @@ import os
 
 import bcrypt
 
-from .db import SessionLocal, User, QueryHistory, Feedback, SavedResponse, init_db, _is_sqlite, DATABASE_URL
+from .db import SessionLocal, User, QueryHistory, Feedback, SavedResponse, init_db, DATABASE_URL
 from .db import run_sync
 
 logger = logging.getLogger(__name__)
@@ -22,45 +22,12 @@ T = TypeVar("T")
 
 def _retry_on_locked(func: Callable[..., T], max_retries: int = 5, *args: Any, **kwargs: Any) -> T:
     """
-    Retry a database operation on SQLite "database is locked" errors.
-    Uses exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms
+    Execute a database operation.
     
-    Only retries for SQLite and only on OperationalError with "database is locked".
+    PostgreSQL handles concurrency natively, so no retry logic is needed.
+    This function is kept for backward compatibility.
     """
-    if not _is_sqlite(DATABASE_URL):
-        # No retry needed for non-SQLite databases
-        return func(*args, **kwargs)
-    
-    last_exception = None
-    for attempt in range(max_retries):
-        try:
-            return func(*args, **kwargs)
-        except OperationalError as e:
-            error_str = str(e).lower()
-            if "database is locked" in error_str or "database locked" in error_str:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    # Exponential backoff: 100ms * 2^attempt
-                    wait_time = 0.1 * (2 ** attempt)
-                    logger.warning(
-                        f"Database locked, retrying in {wait_time:.3f}s (attempt {attempt + 1}/{max_retries})",
-                        exc_info=False
-                    )
-                    time.sleep(wait_time)
-                else:
-                    logger.error(
-                        f"Database locked after {max_retries} attempts",
-                        exc_info=True
-                    )
-            else:
-                # Not a locking error, re-raise immediately
-                raise
-        except Exception as e:
-            # Not an OperationalError or not a locking error, re-raise immediately
-            raise
-    
-    # If we get here, all retries failed
-    raise last_exception or RuntimeError("Database operation failed after retries")
+    return func(*args, **kwargs)
 
 
 class DatabaseManager:
