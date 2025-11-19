@@ -30,7 +30,7 @@ from slowapi.errors import RateLimitExceeded
 from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from .orchestrator import StructuredResponse, QueryIntent
 from .utils.database_manager import DatabaseManager
-from .utils.db import DEFAULT_DB_PATH, engine, check_database_integrity, _is_sqlite, DATABASE_URL, SessionLocal, DocumentIngestionMetadata, MachineModel, run_sync
+from .utils.db import engine, check_database_integrity, DATABASE_URL, SessionLocal, DocumentIngestionMetadata, MachineModel, run_sync
 from .utils.migration_runner import run_migrations, check_pending_migrations, check_migration_status
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
@@ -359,19 +359,10 @@ async def lifespan(app: FastAPI):
         feedback_manager = None
         logger.warning("feedback_manager_init_failed", error=str(e), exc_info=True)
 
-    # Check for unsafe multi-worker SQLite usage in production
-    gunicorn_workers = os.getenv("GUNICORN_WORKERS", "1")
-    try:
-        worker_count = int(gunicorn_workers)
-        if worker_count > 1 and settings.is_prod and _is_sqlite(DATABASE_URL):
-            raise RuntimeError(
-                "SQLite cannot be used in production with multiple workers. "
-                "Either use a single worker (GUNICORN_WORKERS=1) or migrate to PostgreSQL."
-            )
-        elif worker_count > 1 and settings.is_dev and _is_sqlite(DATABASE_URL):
-            logger.warning("sqlite_multi_worker_warning", worker_count=worker_count, message="SQLite has concurrency limitations with multiple workers. Consider migrating to PostgreSQL.")
-    except (ValueError, TypeError):
-        pass  # Ignore if GUNICORN_WORKERS is not a valid integer
+    # Log database connection info and validate connection
+    from .utils.db import _validate_database_connection
+    logger.info(f"Database URL configured: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'database'}")
+    _validate_database_connection(engine, DATABASE_URL)
     
     # Run database migrations
     if settings.is_dev:
@@ -406,16 +397,14 @@ async def lifespan(app: FastAPI):
     db_manager = DatabaseManager()
     saved_response_manager = SavedResponseManager(db_manager)
     await db_manager.seed_default_users()
-    db_path = DEFAULT_DB_PATH if _is_sqlite(DATABASE_URL) and DEFAULT_DB_PATH else "production_database"
-    logger.info("database_initialized", path=db_path)
+    logger.info("database_initialized", database="postgres")
     
-    # Run database integrity check (SQLite only)
-    if _is_sqlite(DATABASE_URL):
-        is_healthy, integrity_message = check_database_integrity()
-        if not is_healthy:
-            logger.error("database_integrity_check_failed", message=integrity_message)
-            raise RuntimeError(f"Database integrity check failed: {integrity_message}")
-        logger.info("database_integrity_check_passed", message=integrity_message)
+    # Run database connection check
+    is_healthy, integrity_message = check_database_integrity()
+    if not is_healthy:
+        logger.error("database_connection_check_failed", message=integrity_message)
+        raise RuntimeError(f"Database connection check failed: {integrity_message}")
+    logger.info("database_connection_check_passed", message=integrity_message)
     
     # Initialize RAG pipeline
     try:
@@ -645,6 +634,7 @@ class SaveResponseResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response model."""
     status: str
+    database: str = "postgres"
     rag_pipeline_initialized: bool
     database_connected: bool
     database_query_success: Optional[bool] = None
@@ -794,10 +784,11 @@ async def health_check():
     )
     
     response = HealthResponse(
-        status="healthy" if is_healthy else "unhealthy",
+        status="ok" if is_healthy else "unhealthy",
         rag_pipeline_initialized=rag_pipeline is not None and rag_pipeline.is_initialized(),
         database_connected=db_manager is not None,
         database_query_success=database_query_success,
+        database="postgres",
         migration_current=migration_current if settings.is_dev else None,
         migration_head=migration_head if settings.is_dev else None,
         migration_pending=migration_pending,
@@ -815,11 +806,6 @@ class DatabaseHealthResponse(BaseModel):
     """Database health check response model."""
     status: str
     database_type: str
-    sqlite_version: Optional[str] = None
-    integrity_check: Optional[str] = None
-    integrity_status: Optional[str] = None
-    file_size_bytes: Optional[int] = None
-    wal_checkpoint_status: Optional[str] = None
     test_query_success: bool
     migration_current: Optional[str] = None
     migration_head: Optional[str] = None
@@ -831,16 +817,10 @@ class DatabaseHealthResponse(BaseModel):
 async def database_health_check():
     """
     Detailed database health check endpoint.
-    Provides SQLite-specific information in dev mode.
     """
-    from .utils.db import engine, text, _is_sqlite, DATABASE_URL, check_database_integrity
+    from .utils.db import engine, text, check_database_integrity
     
-    database_type = "sqlite" if _is_sqlite(DATABASE_URL) else "postgresql"
-    sqlite_version = None
-    integrity_check = None
-    integrity_status = None
-    file_size_bytes = None
-    wal_checkpoint_status = None
+    database_type = "postgres"
     test_query_success = False
     migration_current = None
     migration_head = None
@@ -862,31 +842,9 @@ async def database_health_check():
             result = connection.execute(text("SELECT 1")).scalar()
             test_query_success = result == 1
         
-        # SQLite-specific checks
-        if _is_sqlite(DATABASE_URL):
-            with engine.connect() as connection:
-                # Get SQLite version
-                sqlite_version = connection.execute(text("SELECT sqlite_version()")).scalar()
-                
-                # Run integrity check
-                is_healthy, integrity_message = check_database_integrity()
-                integrity_status = "ok" if is_healthy else "failed"
-                integrity_check = integrity_message
-                
-                # Get file size
-                db_path = DATABASE_URL.replace("sqlite:///", "")
-                if os.path.exists(db_path):
-                    file_size_bytes = os.path.getsize(db_path)
-                    
-                    # Check WAL file if it exists
-                    wal_path = f"{db_path}-wal"
-                    if os.path.exists(wal_path):
-                        wal_size = os.path.getsize(wal_path)
-                        wal_checkpoint_status = f"WAL file exists ({wal_size} bytes)"
-                    else:
-                        wal_checkpoint_status = "No WAL file (not in WAL mode or no pending writes)"
-        
-        status = "healthy" if test_query_success else "unhealthy"
+        # Run connection check
+        is_healthy, integrity_message = check_database_integrity()
+        status = "healthy" if test_query_success and is_healthy else "unhealthy"
         
     except Exception as e:
         status = "error"
@@ -897,11 +855,6 @@ async def database_health_check():
     response = DatabaseHealthResponse(
         status=status,
         database_type=database_type,
-        sqlite_version=sqlite_version if settings.is_dev else None,
-        integrity_check=integrity_check if settings.is_dev else None,
-        integrity_status=integrity_status if settings.is_dev else None,
-        file_size_bytes=file_size_bytes if settings.is_dev else None,
-        wal_checkpoint_status=wal_checkpoint_status if settings.is_dev else None,
         test_query_success=test_query_success,
         migration_current=migration_current if settings.is_dev else None,
         migration_head=migration_head if settings.is_dev else None,

@@ -20,7 +20,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 import time
 
-from .db import get_engine, _is_sqlite, DATABASE_URL
+from .db import get_engine, DATABASE_URL
 from ..config.env import settings
 
 logger = logging.getLogger(__name__)
@@ -291,7 +291,7 @@ def check_migration_status(use_cache: bool = True) -> dict:
         "current_revision": current,
         "head_revision": head,
         "pending_migrations": pending,
-        "database_type": "sqlite" if _is_sqlite(DATABASE_URL) else "postgresql",
+        "database_type": "postgresql",
     }
     
     # Cache the result

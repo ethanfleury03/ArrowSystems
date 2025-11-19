@@ -32,11 +32,12 @@ anthropic==0.71.0
 # openai>=1.108.1,<2.0  # REMOVED: Not used in codebase
 
 # -----------------------------
-# Database (SQLite via SQLAlchemy)
+# Database (PostgreSQL via SQLAlchemy)
 # -----------------------------
 bcrypt==4.2.0
 sqlalchemy==2.0.25
 alembic==1.13.1
+psycopg2-binary==2.9.9  # PostgreSQL adapter for SQLAlchemy
 
 # -----------------------------
 # FastAPI Backend
