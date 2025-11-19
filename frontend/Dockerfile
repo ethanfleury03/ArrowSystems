@@ -1,25 +1,25 @@
-# Build argument to determine environment
-ARG NODE_ENV=production
-
 # =============================================================================
-# Dependencies Stage
+# Dependencies Stage - Install dependencies
 # =============================================================================
 FROM node:20-alpine AS deps
 WORKDIR /app
 RUN apk add --no-cache libc6-compat
 COPY package.json package-lock.json* ./
-RUN npm install --legacy-peer-deps --prefer-offline --no-audit || \
-    (npm cache clean --force && npm install --legacy-peer-deps --no-audit)
+RUN npm ci --legacy-peer-deps --prefer-offline --no-audit || \
+    (npm cache clean --force && npm ci --legacy-peer-deps --no-audit)
 
 # =============================================================================
-# Builder Stage (Production only)
+# Builder Stage - Build the app (creates .next/standalone)
 # =============================================================================
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ARG NODE_ENV=production
+ARG NEXT_PUBLIC_API_URL
 ENV NODE_ENV=${NODE_ENV}
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+# Build the app - this creates .next/standalone directory
 RUN npm run build
 
 # =============================================================================
@@ -40,30 +40,31 @@ EXPOSE 3000
 CMD ["npm", "run", "dev"]
 
 # =============================================================================
-# Production Runner Stage
+# Production Runner Stage - Cloud Run Optimized (Standalone Mode)
 # =============================================================================
 FROM node:20-alpine AS production
 WORKDIR /app
-ARG NODE_ENV=production
-ENV NODE_ENV=${NODE_ENV}
+
+ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
+# Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# Copy built artifacts from builder
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
-
-RUN mkdir -p /app/.next/cache/images && \
-    chown -R nextjs:nodejs /app/.next
+# Copy only the standalone output from builder
+# This contains only the minimal runtime files needed
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+# Copy public folder for static assets
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+# Copy .next/static for static assets
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 
 EXPOSE 3000
 
-CMD ["npm", "run", "start"]
+# Use node directly to run the standalone server (faster than npm start)
+CMD ["node", "server.js"]
 

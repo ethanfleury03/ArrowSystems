@@ -1,29 +1,27 @@
 """
 Document Metadata Management
 
-Stores and manages document metadata including:
-- is_active flag (enable/disable)
-- machine_model (MUST be from ALLOWED_MACHINE_MODELS - inferred from filename if not provided)
-- category
-- product_family
-- last_ingestion_date
-- requires_admin_review (flag for documents needing manual review)
+Stores and manages document metadata in the database.
+Replaces the document_metadata.json file.
+
+All functions now use SQLAlchemy sessions to interact with the documents table.
 """
 
-import os
 import json
 import logging
-import re
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
+from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
+from .db import Document, SessionLocal
 try:
     from ..config.machine_models import (
         is_valid_machine_model,
         is_valid_machine_model_list,
         get_allowed_machine_models,
-        ANY_MACHINE
+        ANY_MACHINE,
+        GENERAL_MACHINE
     )
 except ImportError:
     # Fallback if config not available (shouldn't happen in production)
@@ -37,336 +35,465 @@ except ImportError:
         return []
     
     ANY_MACHINE = "Any"
+    GENERAL_MACHINE = "GENERAL"
 
 logger = logging.getLogger(__name__)
 
-METADATA_FILE = "data/document_metadata.json"
 
-
-def load_metadata() -> Dict[str, Dict[str, Any]]:
-    """Load document metadata from JSON file."""
-    if not os.path.exists(METADATA_FILE):
-        return {}
+def get_all_documents(session: Optional[Session] = None, active_only: bool = True) -> List[Document]:
+    """
+    Get all documents from the database.
+    
+    Args:
+        session: Optional SQLAlchemy session. If None, creates a new one.
+        active_only: If True, only return active documents.
+    
+    Returns:
+        List of Document objects
+    """
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
     
     try:
-        with open(METADATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading metadata: {e}")
-        return {}
+        query = session.query(Document)
+        if active_only:
+            query = query.filter(Document.is_active == True)
+        return query.order_by(Document.file_name).all()
+    finally:
+        if close_session:
+            session.close()
 
 
-def save_metadata(metadata: Dict[str, Dict[str, Any]]):
-    """Save document metadata to JSON file."""
-    os.makedirs(os.path.dirname(METADATA_FILE), exist_ok=True)
+def get_document_by_id(session: Session, doc_id: int) -> Optional[Document]:
+    """Get a document by ID."""
+    return session.query(Document).filter(Document.id == doc_id).first()
+
+
+def get_document_by_filename(session: Session, filename: str) -> Optional[Document]:
+    """Get a document by filename."""
+    return session.query(Document).filter(Document.file_name == filename).first()
+
+
+def get_document_metadata(filename: str, session: Optional[Session] = None) -> Dict[str, Any]:
+    """
+    Get metadata for a specific document by filename.
+    Maintains backward compatibility with the old JSON-based API.
+    
+    Returns a dictionary with the same structure as before for compatibility.
+    """
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
     
     try:
-        with open(METADATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error saving metadata: {e}")
-        raise
+        doc = get_document_by_filename(session, filename)
+        
+        if doc is None:
+            # Return default structure for backward compatibility
+            return {
+                "is_active": True,
+                "machine_model": None,
+                "category": None,
+                "product_family": None,
+                "last_ingestion_date": None,
+                "requires_admin_review": False
+            }
+        
+        # Parse machine_model if it's a JSON string
+        machine_model = doc.machine_model
+        if machine_model and isinstance(machine_model, str):
+            try:
+                # Try to parse as JSON array
+                machine_model = json.loads(machine_model)
+            except (json.JSONDecodeError, TypeError):
+                # If not JSON, treat as single string
+                machine_model = [machine_model] if machine_model else None
+        
+        return {
+            "is_active": doc.is_active,
+            "machine_model": machine_model,
+            "category": doc.category,
+            "product_family": doc.product_family,
+            "last_ingestion_date": doc.last_ingestion_date.isoformat() if doc.last_ingestion_date else None,
+            "requires_admin_review": doc.requires_admin_review
+        }
+    finally:
+        if close_session:
+            session.close()
 
 
-def get_document_metadata(filename: str) -> Dict[str, Any]:
-    """Get metadata for a specific document."""
-    metadata = load_metadata()
-    default_meta = metadata.get(filename, {
-        "is_active": True,  # Default to active
-        "machine_model": None,  # Can be None, a list of strings, or a single string (for backwards compatibility)
-        "category": None,
-        "product_family": None,
-        "last_ingestion_date": None,
-        "requires_admin_review": False
-    })
+def upsert_document(
+    session: Session,
+    file_name: str,
+    gcs_path: Optional[str] = None,
+    display_name: Optional[str] = None,
+    machine_model: Optional[str | List[str]] = None,
+    category: Optional[str] = None,
+    product_family: Optional[str] = None,
+    is_active: bool = True,
+    requires_admin_review: Optional[bool] = None,
+    file_size_bytes: Optional[int] = None,
+    last_ingestion_date: Optional[datetime] = None
+) -> Document:
+    """
+    Upsert a document record.
+    Creates a new record if file_name doesn't exist, updates if it does.
     
-    # Normalize machine_model: convert single string to list for consistency
-    machine_model = default_meta.get("machine_model")
-    if isinstance(machine_model, str):
-        default_meta["machine_model"] = [machine_model]
-    elif machine_model is None:
-        default_meta["machine_model"] = None
+    Args:
+        session: SQLAlchemy session
+        file_name: Original filename
+        gcs_path: Cloud Storage path
+        display_name: Display name (defaults to file_name)
+        machine_model: Machine model(s) - can be string, list, or JSON string
+        category: Document category
+        product_family: Product family
+        is_active: Active status
+        requires_admin_review: Requires admin review flag
+        file_size_bytes: File size in bytes
+        last_ingestion_date: Last ingestion timestamp
     
-    return default_meta
+    Returns:
+        Document object
+    """
+    # Normalize machine_model to JSON string
+    machine_model_str = None
+    if machine_model is not None:
+        if isinstance(machine_model, list):
+            # Validate all models
+            if is_valid_machine_model_list(machine_model):
+                machine_model_str = json.dumps(machine_model)
+            else:
+                invalid_models = [m for m in machine_model if not is_valid_machine_model(m)]
+                logger.warning(f"Invalid machine_model(s) {invalid_models} for {file_name}")
+                machine_model_str = None
+                if requires_admin_review is None:
+                    requires_admin_review = True
+        elif isinstance(machine_model, str):
+            if is_valid_machine_model(machine_model):
+                machine_model_str = machine_model
+            else:
+                logger.warning(f"Invalid machine_model '{machine_model}' for {file_name}")
+                machine_model_str = None
+                if requires_admin_review is None:
+                    requires_admin_review = True
+    
+    # Check if document exists
+    doc = get_document_by_filename(session, file_name)
+    
+    if doc is None:
+        # Create new document
+        doc = Document(
+            file_name=file_name,
+            gcs_path=gcs_path,
+            display_name=display_name or file_name,
+            machine_model=machine_model_str,
+            category=category,
+            product_family=product_family,
+            is_active=is_active,
+            requires_admin_review=requires_admin_review if requires_admin_review is not None else False,
+            file_size_bytes=file_size_bytes,
+            last_ingestion_date=last_ingestion_date or datetime.utcnow()
+        )
+        session.add(doc)
+    else:
+        # Update existing document
+        if gcs_path is not None:
+            doc.gcs_path = gcs_path
+        if display_name is not None:
+            doc.display_name = display_name
+        if machine_model_str is not None:
+            doc.machine_model = machine_model_str
+        if category is not None:
+            doc.category = category
+        if product_family is not None:
+            doc.product_family = product_family
+        if requires_admin_review is not None:
+            doc.requires_admin_review = requires_admin_review
+        if file_size_bytes is not None:
+            doc.file_size_bytes = file_size_bytes
+        if last_ingestion_date is not None:
+            doc.last_ingestion_date = last_ingestion_date
+        doc.is_active = is_active
+        doc.updated_at = datetime.utcnow()
+    
+    session.commit()
+    session.refresh(doc)
+    return doc
 
 
-def update_document_metadata(filename: str, updates: Dict[str, Any]):
+def update_document_metadata(filename: str, updates: Dict[str, Any], session: Optional[Session] = None) -> Document:
     """
     Update metadata for a specific document.
+    Maintains backward compatibility with the old API.
     
-    Validates that machine_model (if provided) is a list of values from ALLOWED_MACHINE_MODELS.
-    If invalid, sets machine_model to None and requires_admin_review to True.
+    Args:
+        filename: Document filename
+        updates: Dictionary of updates
+        session: Optional SQLAlchemy session
     
-    machine_model can be:
-    - None (no machine model assigned)
-    - A list of strings (e.g., ["EZCut 330", "EZCut 350"])
-    - An empty list (treated as None)
-    - "Any" as a single-item list (indicates document applies to any machine)
+    Returns:
+        Updated Document object
     """
-    metadata = load_metadata()
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
     
-    if filename not in metadata:
-        metadata[filename] = {
-            "is_active": True,
-            "machine_model": None,
-            "category": None,
-            "product_family": None,
-            "last_ingestion_date": None,
-            "requires_admin_review": False
-        }
-    
-    # Validate and update machine_model if provided
-    if "machine_model" in updates:
-        machine_model = updates["machine_model"]
+    try:
+        # Convert updates to upsert_document parameters
+        machine_model = updates.get("machine_model")
+        if machine_model is not None:
+            # Normalize to list if needed
+            if isinstance(machine_model, str):
+                machine_model = [machine_model] if machine_model else None
+            elif isinstance(machine_model, list):
+                # Filter out empty strings
+                machine_model = [m for m in machine_model if m and isinstance(m, str)]
+                if len(machine_model) == 0:
+                    machine_model = None
         
-        # Normalize: convert to list format
-        # Handle various input formats for backwards compatibility
-        if machine_model is None:
-            machine_models_list = None
-        elif machine_model == "":
-            machine_models_list = None
-        elif isinstance(machine_model, str):
-            # Single string -> convert to list
-            machine_models_list = [machine_model] if machine_model else None
-        elif isinstance(machine_model, list):
-            # Filter out empty strings and None values
-            machine_models_list = [m for m in machine_model if m and isinstance(m, str)]
-            if len(machine_models_list) == 0:
-                machine_models_list = None
-            # If "Any" is present, it should be the only item
-            if ANY_MACHINE in machine_models_list and len(machine_models_list) > 1:
-                logger.warning(f"Invalid machine_model list for {filename}: 'Any' cannot be combined with other models. Using only 'Any'.")
-                machine_models_list = [ANY_MACHINE]
-        else:
-            logger.warning(f"Invalid machine_model type for {filename}: {type(machine_model)}. Setting to None.")
-            machine_models_list = None
+        last_ingestion_date = None
+        if "last_ingestion_date" in updates:
+            ingestion_date = updates["last_ingestion_date"]
+            if ingestion_date is not None:
+                if isinstance(ingestion_date, str):
+                    try:
+                        last_ingestion_date = datetime.fromisoformat(ingestion_date.replace('Z', '+00:00'))
+                    except (ValueError, AttributeError):
+                        last_ingestion_date = datetime.utcnow()
+                elif isinstance(ingestion_date, datetime):
+                    last_ingestion_date = ingestion_date
         
-        # Validate: must be None or a valid list
-        if machine_models_list is not None and not is_valid_machine_model_list(machine_models_list):
-            invalid_models = [m for m in machine_models_list if not is_valid_machine_model(m)]
-            logger.warning(f"Invalid machine_model(s) {invalid_models} for {filename} - not in allowed list. Setting to None and marking for review.")
-            machine_models_list = None
-            updates["requires_admin_review"] = True
-        
-        # If valid machine_model is set, clear requires_admin_review
-        if machine_models_list is not None and is_valid_machine_model_list(machine_models_list):
-            metadata[filename]["requires_admin_review"] = False
-        elif machine_models_list is None:
-            # If setting to None, mark for review
-            updates["requires_admin_review"] = True
-        
-        updates["machine_model"] = machine_models_list
-    
-    # Update fields
-    for key, value in updates.items():
-        metadata[filename][key] = value
-    
-    save_metadata(metadata)
+        return upsert_document(
+            session=session,
+            file_name=filename,
+            machine_model=machine_model,
+            category=updates.get("category"),
+            product_family=updates.get("product_family"),
+            is_active=updates.get("is_active", True),
+            requires_admin_review=updates.get("requires_admin_review"),
+            last_ingestion_date=last_ingestion_date
+        )
+    finally:
+        if close_session:
+            session.commit()
+            session.close()
 
 
-def set_document_active(filename: str, is_active: bool):
+def set_document_active(filename: str, is_active: bool, session: Optional[Session] = None):
     """Set document active/inactive status."""
-    update_document_metadata(filename, {"is_active": is_active})
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    
+    try:
+        doc = get_document_by_filename(session, filename)
+        if doc:
+            doc.is_active = is_active
+            doc.updated_at = datetime.utcnow()
+            session.commit()
+    finally:
+        if close_session:
+            session.close()
 
 
-def update_ingestion_date(filename: str):
+def update_ingestion_date(filename: str, session: Optional[Session] = None):
     """Update last ingestion date to current timestamp."""
-    update_document_metadata(filename, {
-        "last_ingestion_date": datetime.now().isoformat()
-    })
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    
+    try:
+        doc = get_document_by_filename(session, filename)
+        if doc:
+            doc.last_ingestion_date = datetime.utcnow()
+            doc.updated_at = datetime.utcnow()
+            session.commit()
+    finally:
+        if close_session:
+            session.close()
 
 
-def delete_document_metadata(filename: str):
+def delete_document_metadata(filename: str, session: Optional[Session] = None):
     """Remove metadata for a deleted document."""
-    metadata = load_metadata()
-    if filename in metadata:
-        del metadata[filename]
-        save_metadata(metadata)
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    
+    try:
+        doc = get_document_by_filename(session, filename)
+        if doc:
+            session.delete(doc)
+            session.commit()
+    finally:
+        if close_session:
+            session.close()
 
 
-def is_document_active(filename: str) -> bool:
+def is_document_active(filename: str, session: Optional[Session] = None) -> bool:
     """Check if document is active."""
-    doc_meta = get_document_metadata(filename)
-    return doc_meta.get("is_active", True)  # Default to active if not set
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    
+    try:
+        doc = get_document_by_filename(session, filename)
+        return doc.is_active if doc else True  # Default to active if not found
+    finally:
+        if close_session:
+            session.close()
 
 
 def infer_machine_model_from_filename(filename: str) -> Optional[list[str]]:
     """
     Infer machine model(s) from filename using pattern matching.
     ONLY returns values that are in ALLOWED_MACHINE_MODELS.
-    Can return multiple models if the filename suggests multiple machines.
     
-    Examples:
-        "EZCut_330_Manual.pdf" -> ["EZCut 330"] (if in allowed list)
-        "DuraFlex_ServiceGuide.pdf" -> ["Duraflex"] (if in allowed list)
-        "EZCut_330_and_350_Manual.pdf" -> ["EZCut 330", "EZCut 350"] (if both in allowed list)
-    
-    Returns:
-        List of inferred machine model strings from ALLOWED_MACHINE_MODELS, or None if inference fails
+    This is a helper function for migration scripts.
     """
-    # Get allowed models list (excluding "Any" from inference)
+    import re
+    from pathlib import Path
+    
     allowed_models = [m for m in get_allowed_machine_models() if m != ANY_MACHINE]
     if not allowed_models:
-        # If no allowed models configured, can't infer anything
         return None
     
-    # Remove file extension
     name_without_ext = Path(filename).stem
     name_lower = name_without_ext.lower()
     
     inferred_models = []
     
-    # Check if any allowed model appears in the filename (case-insensitive)
     for model in allowed_models:
         model_lower = model.lower()
-        # Check if model appears as a word boundary match (at start, before underscore, or standalone)
-        # Pattern: model at start, or model before underscore/dash/space
         patterns = [
-            r'^' + re.escape(model_lower) + r'(?:[_\s-]|$)',  # At start
-            r'(?:[_\s-])' + re.escape(model_lower) + r'(?:[_\s-]|$)',  # After separator
-            r'\b' + re.escape(model_lower) + r'\b',  # Word boundary
+            r'^' + re.escape(model_lower) + r'(?:[_\s-]|$)',
+            r'(?:[_\s-])' + re.escape(model_lower) + r'(?:[_\s-]|$)',
+            r'\b' + re.escape(model_lower) + r'\b',
         ]
         for pattern in patterns:
             if re.search(pattern, name_lower):
-                # Avoid duplicates
                 if model not in inferred_models:
-                    inferred_models.append(model)  # Add original case from allowed list
-                break  # Found this model, move to next
+                    inferred_models.append(model)
+                break
     
-    # Also check if the first token before underscore matches an allowed model
     match = re.match(r'^([A-Za-z0-9]+?)(?:_|$)', name_without_ext)
     if match:
         candidate = match.group(1)
-        # Check if candidate (case-insensitive) matches any allowed model
         for model in allowed_models:
             if candidate.lower() == model.lower():
                 if model not in inferred_models:
                     inferred_models.append(model)
                 break
     
-    # Return list if any models found, otherwise None
     return inferred_models if inferred_models else None
 
 
-def require_machine_model(filename: str) -> bool:
-    """
-    Returns True if metadata exists and machine_model is not None or empty list.
+def require_machine_model(filename: str, session: Optional[Session] = None) -> bool:
+    """Returns True if document has a machine model set."""
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
     
-    Args:
-        filename: Document filename
-        
-    Returns:
-        True if machine_model is set (not None and not empty), False otherwise
-    """
-    doc_meta = get_document_metadata(filename)
-    machine_model = doc_meta.get("machine_model")
-    if machine_model is None:
-        return False
-    if isinstance(machine_model, list):
-        return len(machine_model) > 0
-    # Handle legacy string format
-    if isinstance(machine_model, str):
-        return len(machine_model) > 0
-    return machine_model is not None
+    try:
+        doc = get_document_by_filename(session, filename)
+        if doc is None:
+            return False
+        return doc.machine_model is not None and doc.machine_model != ""
+    finally:
+        if close_session:
+            session.close()
 
 
-def ensure_metadata_entry(filename: str, machine_model: Optional[list[str] | str] = None) -> Dict[str, Any]:
+def ensure_metadata_entry(
+    filename: str,
+    machine_model: Optional[list[str] | str] = None,
+    gcs_path: Optional[str] = None,
+    session: Optional[Session] = None
+) -> Document:
     """
-    Ensure a metadata entry exists for a document with all required fields.
+    Ensure a metadata entry exists for a document.
     If machine_model is not provided, attempts automatic inference.
-    
-    Validates that machine_model is a list of values from ALLOWED_MACHINE_MODELS.
     
     Args:
         filename: Document filename
         machine_model: Optional machine model (can be string, list of strings, or None)
-                      Must be in ALLOWED_MACHINE_MODELS if provided
-        
+        gcs_path: Optional Cloud Storage path
+        session: Optional SQLAlchemy session
+    
     Returns:
-        Dictionary with metadata entry (including requires_admin_review flag)
+        Document object
     """
-    metadata = load_metadata()
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
     
-    # Normalize machine_model to list format
-    machine_models_list = None
-    if machine_model is not None:
-        if isinstance(machine_model, str):
-            machine_models_list = [machine_model]
-        elif isinstance(machine_model, list):
-            machine_models_list = machine_model
-        else:
-            logger.warning(f"Invalid machine_model type for {filename}: {type(machine_model)}")
-            machine_models_list = None
-    
-    # Validate provided machine_model
-    if machine_models_list is not None and not is_valid_machine_model_list(machine_models_list):
-        logger.warning(f"Invalid machine_model '{machine_models_list}' for {filename} - not in allowed list. Attempting inference.")
-        machine_models_list = None
-    
-    if filename not in metadata:
-        # Attempt to infer machine_model if not provided
-        inferred_models = machine_models_list
-        requires_review = False
+    try:
+        doc = get_document_by_filename(session, filename)
         
-        if not inferred_models:
-            inferred_models = infer_machine_model_from_filename(filename)
-            if not inferred_models or not is_valid_machine_model_list(inferred_models):
-                requires_review = True
-                inferred_models = None
-                logger.warning(f"Could not infer valid machine_model for {filename}, marking for admin review")
-        
-        metadata[filename] = {
-            "is_active": True,
-            "machine_model": inferred_models,
-            "category": None,
-            "product_family": None,
-            "last_ingestion_date": datetime.now().isoformat(),
-            "requires_admin_review": requires_review
-        }
-        save_metadata(metadata)
-    else:
-        # Update ingestion date if entry exists
-        metadata[filename]["last_ingestion_date"] = datetime.now().isoformat()
-        
-        # If machine_model was provided and differs, update it (with validation)
-        if machine_models_list is not None:
-            if is_valid_machine_model_list(machine_models_list):
-                metadata[filename]["machine_model"] = machine_models_list
-                metadata[filename]["requires_admin_review"] = False
-            else:
-                logger.warning(f"Invalid machine_model '{machine_models_list}' for {filename} - keeping existing value")
-        
-        # Ensure requires_admin_review field exists and current machine_model is valid
-        if "requires_admin_review" not in metadata[filename]:
-            current_model = metadata[filename].get("machine_model")
-            # Normalize current_model to list for validation
-            if isinstance(current_model, str):
-                current_model_list = [current_model]
-            elif isinstance(current_model, list):
-                current_model_list = current_model
-            else:
-                current_model_list = None
+        if doc is None:
+            # Attempt to infer machine_model if not provided
+            inferred_models = None
+            requires_review = False
             
-            metadata[filename]["requires_admin_review"] = (
-                current_model_list is None or not is_valid_machine_model_list(current_model_list)
+            if machine_model is None:
+                inferred_models = infer_machine_model_from_filename(filename)
+                if not inferred_models or not is_valid_machine_model_list(inferred_models):
+                    requires_review = True
+                    inferred_models = None
+                    logger.warning(f"Could not infer valid machine_model for {filename}, marking for admin review")
+            else:
+                if isinstance(machine_model, str):
+                    inferred_models = [machine_model] if is_valid_machine_model(machine_model) else None
+                elif isinstance(machine_model, list):
+                    inferred_models = machine_model if is_valid_machine_model_list(machine_model) else None
+                
+                if not inferred_models:
+                    requires_review = True
+            
+            doc = upsert_document(
+                session=session,
+                file_name=filename,
+                gcs_path=gcs_path,
+                machine_model=inferred_models,
+                is_active=True,
+                requires_admin_review=requires_review,
+                last_ingestion_date=datetime.utcnow()
             )
         else:
-            # Validate existing machine_model - if invalid, mark for review
-            current_model = metadata[filename].get("machine_model")
-            # Normalize to list
-            if isinstance(current_model, str):
-                current_model_list = [current_model]
-            elif isinstance(current_model, list):
-                current_model_list = current_model
-            else:
-                current_model_list = None
+            # Update ingestion date if entry exists
+            doc.last_ingestion_date = datetime.utcnow()
+            doc.updated_at = datetime.utcnow()
             
-            if current_model_list is not None and not is_valid_machine_model_list(current_model_list):
-                logger.warning(f"Existing invalid machine_model '{current_model_list}' for {filename} - marking for review")
-                metadata[filename]["machine_model"] = None
-                metadata[filename]["requires_admin_review"] = True
+            # If machine_model was provided and differs, update it
+            if machine_model is not None:
+                machine_models_list = None
+                if isinstance(machine_model, str):
+                    machine_models_list = [machine_model] if is_valid_machine_model(machine_model) else None
+                elif isinstance(machine_model, list):
+                    machine_models_list = machine_model if is_valid_machine_model_list(machine_model) else None
+                
+                if machine_models_list is not None:
+                    doc.machine_model = json.dumps(machine_models_list) if len(machine_models_list) > 1 else machine_models_list[0]
+                    doc.requires_admin_review = False
+                else:
+                    logger.warning(f"Invalid machine_model '{machine_model}' for {filename} - keeping existing value")
+            
+            if gcs_path is not None:
+                doc.gcs_path = gcs_path
+            
+            session.commit()
+            session.refresh(doc)
         
-        save_metadata(metadata)
-    
-    return metadata[filename]
-
+        return doc
+    finally:
+        if close_session:
+            session.close()

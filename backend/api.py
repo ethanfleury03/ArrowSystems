@@ -1532,10 +1532,18 @@ async def get_chat_history(user: str = "api_user", limit: int = 50):
 @app.get("/documents/{filename:path}")
 async def serve_document(filename: str):
     """
-    Serve document files (PDFs) from the data directory.
+    Serve document files from Cloud Storage.
     Used by frontend to display source documents.
+    
+    The document is retrieved from the database by filename,
+    then downloaded from Cloud Storage using the stored gcs_path.
     """
     import urllib.parse
+    from fastapi.responses import Response
+    import mimetypes
+    from .utils.db import SessionLocal
+    from .utils.document_metadata import get_document_by_filename
+    from .utils.gcs_client import download_document, download_document_by_filename, get_docs_bucket_name
     
     # URL decode the filename
     filename = urllib.parse.unquote(filename)
@@ -1544,43 +1552,46 @@ async def serve_document(filename: str):
     if '..' in filename or filename.startswith('/'):
         raise HTTPException(status_code=400, detail="Invalid filename")
     
-    # Try multiple possible data directory locations
-    possible_paths = [
-        "data",
-        "../data",
-        "/app/data",
-        "/workspace/data",
-        "/workspace/ArrowSystems/data"
-    ]
+    # Check file extension for security
+    if not filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+        raise HTTPException(status_code=400, detail="Invalid file type")
     
-    for base_path in possible_paths:
-        file_path = os.path.join(base_path, filename)
-        if os.path.exists(file_path) and os.path.isfile(file_path):
-            # Check file extension for security
-            if not filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
-                raise HTTPException(status_code=400, detail="Invalid file type")
-            
-            from fastapi.responses import Response
-            import mimetypes
-            
-            # Determine media type
-            if filename.lower().endswith('.pdf'):
-                media_type = "application/pdf"
-            elif filename.lower().endswith('.docx'):
-                media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            elif filename.lower().endswith(('.md', '.markdown')):
-                media_type = "text/markdown"
-            else:
-                media_type, _ = mimetypes.guess_type(filename)
-                if not media_type:
-                    media_type = "application/octet-stream"
-            
-            # Read file content
-            with open(file_path, "rb") as f:
-                content = f.read()
-            
-            # Return response with inline content-disposition header
-            return Response(
+    # Look up document in database
+    session = SessionLocal()
+    try:
+        doc = get_document_by_filename(session, filename)
+        
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Download from Cloud Storage
+        content = None
+        if doc.gcs_path:
+            # Use stored GCS path
+            content = download_document(doc.gcs_path)
+        else:
+            # Fallback: try to download by filename from default bucket
+            bucket_name = get_docs_bucket_name()
+            if bucket_name:
+                content = download_document_by_filename(filename, bucket_name)
+        
+        if not content:
+            raise HTTPException(status_code=404, detail="Document file not found in Cloud Storage")
+        
+        # Determine media type
+        if filename.lower().endswith('.pdf'):
+            media_type = "application/pdf"
+        elif filename.lower().endswith('.docx'):
+            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif filename.lower().endswith(('.md', '.markdown')):
+            media_type = "text/markdown"
+        else:
+            media_type, _ = mimetypes.guess_type(filename)
+            if not media_type:
+                media_type = "application/octet-stream"
+        
+        # Return response with inline content-disposition header
+        return Response(
                 content=content,
                 media_type=media_type,
                 headers={
@@ -1588,8 +1599,8 @@ async def serve_document(filename: str):
                     "Content-Length": str(len(content))
                 }
             )
-    
-    raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+    finally:
+        session.close()
 
 
 @app.post("/session/{session_id}/clear")
@@ -1693,15 +1704,16 @@ async def get_user_documents():
         from .config.machine_models import get_effective_machines_for_user, GENERAL_MACHINE, ANY_MACHINE
         effective_machines = get_effective_machines_for_user(user_role, user_machine_models or [])
         
-        # Get all documents (reuse logic from admin endpoint)
-        from .utils.document_metadata import get_document_metadata
+        # Get all documents from database
+        from .utils.document_metadata import get_all_documents
+        from .utils.db import SessionLocal
+        import json
         
         documents = []
         
-        # Group chunks by document filename
+        # Group chunks by document filename (for chunk/page counts)
         doc_chunks = {}
         doc_pages = {}
-        seen_filenames = set()
         
         if hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
             retriever = rag_pipeline.orchestrator.retriever
@@ -1711,7 +1723,6 @@ async def get_user_documents():
                     if hasattr(node, 'metadata') and node.metadata:
                         filename = node.metadata.get('file_name', 'Unknown')
                         if filename and filename != 'Unknown':
-                            seen_filenames.add(filename)
                             if filename not in doc_chunks:
                                 doc_chunks[filename] = []
                                 doc_pages[filename] = set()
@@ -1724,105 +1735,79 @@ async def get_user_documents():
                                 except:
                                     pass
         
-        # Get from filesystem
-        # In test mode, only scan test directories
-        from backend.utils.test_mode import is_test_mode, get_original_pdfs_dir
-        if is_test_mode():
-            # In test mode, only scan test directories
-            original_pdfs_dir = get_original_pdfs_dir()
-            if os.path.exists(original_pdfs_dir):
-                for filename in os.listdir(original_pdfs_dir):
-                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
-                        file_path = os.path.join(original_pdfs_dir, filename)
-                        if os.path.isfile(file_path):
-                            seen_filenames.add(filename)
-        else:
-            # Production mode: scan production data directory
-            data_dir = "data"
-            if os.path.exists(data_dir):
-                for filename in os.listdir(data_dir):
-                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
-                        file_path = os.path.join(data_dir, filename)
-                        if os.path.isfile(file_path):
-                            seen_filenames.add(filename)
-        
-        # Process each document and filter by machine models
-        for filename in seen_filenames:
-            try:
-                # Use appropriate directory based on test mode
-                if is_test_mode():
-                    file_path = os.path.join(get_original_pdfs_dir(), filename)
-                else:
-                    file_path = os.path.join("data", filename)
-                size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-                
-                # Get metadata
-                doc_metadata = get_document_metadata(filename)
-                machine_model = doc_metadata.get("machine_model")
-                
-                # CRITICAL: Filter out inactive documents - customers should not see or query inactive documents
-                is_active = doc_metadata.get("is_active", True)  # Default to active if not set
-                if not is_active:
-                    continue  # Skip inactive documents
-                
-                # Normalize machine_model to list
-                if isinstance(machine_model, str):
-                    machine_model = [machine_model]
-                elif machine_model is None:
-                    machine_model = []
-                
-                # Filter: include document if:
-                # 1. It has no machine_model (None or empty list) - include for all
-                # 2. It has "GENERAL" in machine_model - always include
-                # 3. It has "Any" in machine_model - always include
-                # 4. Any of its machine_models are in the user's effective_machines
-                should_include = False
-                
-                if not machine_model or len(machine_model) == 0:
-                    # No machine model assigned - include for all users
-                    should_include = True
-                elif GENERAL_MACHINE in machine_model or ANY_MACHINE in machine_model:
-                    # GENERAL or Any - always include
-                    should_include = True
-                else:
-                    # Check if any machine_model matches user's effective machines
-                    should_include = any(m in effective_machines for m in machine_model)
-                
-                if not should_include:
-                    continue  # Skip this document
-                
-                # Count chunks
-                chunk_count = len(doc_chunks.get(filename, []))
-                
-                # Get page count
-                page_count = len(doc_pages.get(filename, set()))
-                if page_count == 0 and os.path.exists(file_path):
-                    try:
-                        if filename.lower().endswith('.pdf'):
-                            import fitz
-                            pdf_doc = fitz.open(file_path)
-                            page_count = len(pdf_doc)
-                            pdf_doc.close()
-                    except:
-                        pass
-                
-                # Get file type
-                file_ext = os.path.splitext(filename)[1].lower()
-                file_type = file_ext[1:] if file_ext else 'pdf'
-                
-                documents.append({
-                    "filename": filename,
-                    "size_bytes": size_bytes,
-                    "uploaded_date": doc_metadata.get("last_ingestion_date"),
-                    "chunk_count": chunk_count,
-                    "page_count": page_count,
-                    "file_path": file_path,
-                    "file_type": file_type,
-                    "machine_model": machine_model if machine_model else None,
-                })
-            except Exception as e:
-                logger.debug(f"Error processing document {filename}: {e}")
-                continue
+        # Get all active documents from database
+        session = SessionLocal()
+        try:
+            all_db_docs = get_all_documents(session=session, active_only=True)
+            
+            # Process each document from database
+            for doc in all_db_docs:
+                try:
+                    filename = doc.file_name
+                    
+                    # Parse machine_model from database (can be JSON string or single string)
+                    machine_model = doc.machine_model
+                    if machine_model:
+                        try:
+                            machine_model = json.loads(machine_model)
+                        except (json.JSONDecodeError, TypeError):
+                            # If not JSON, treat as single string
+                            machine_model = [machine_model] if machine_model else []
+                    else:
+                        machine_model = []
+                    
+                    # Filter: include document if:
+                    # 1. It has no machine_model (None or empty list) - include for all
+                    # 2. It has "GENERAL" in machine_model - always include
+                    # 3. It has "Any" in machine_model - always include
+                    # 4. Any of its machine_models are in the user's effective_machines
+                    should_include = False
+                    
+                    if not machine_model or len(machine_model) == 0:
+                        # No machine model assigned - include for all users
+                        should_include = True
+                    elif GENERAL_MACHINE in machine_model or ANY_MACHINE in machine_model:
+                        # GENERAL or Any - always include
+                        should_include = True
+                    else:
+                        # Check if any machine_model matches user's effective machines
+                        should_include = any(m in effective_machines for m in machine_model)
+                    
+                    if not should_include:
+                        continue  # Skip this document
+                    
+                    # Count chunks from vector index
+                    chunk_count = len(doc_chunks.get(filename, []))
+                    
+                    # Get page count from vector index or use default
+                    page_count = len(doc_pages.get(filename, set()))
+                    # Note: We can't read PDF page count from GCS here easily, so we rely on vector index
+                    # or stored metadata
+                    
+                    # Get file type
+                    file_ext = os.path.splitext(filename)[1].lower()
+                    file_type = file_ext[1:] if file_ext else 'pdf'
+                    
+                    # Format last_ingestion_date
+                    uploaded_date = None
+                    if doc.last_ingestion_date:
+                        uploaded_date = doc.last_ingestion_date.isoformat()
+                    
+                    documents.append({
+                        "filename": filename,
+                        "size_bytes": doc.file_size_bytes or 0,
+                        "uploaded_date": uploaded_date,
+                        "chunk_count": chunk_count,
+                        "page_count": page_count,
+                        "file_path": doc.gcs_path or filename,  # Use GCS path or fallback to filename
+                        "file_type": file_type,
+                        "machine_model": machine_model if machine_model else None,
+                    })
+                except Exception as e:
+                    logger.debug(f"Error processing document {doc.file_name}: {e}")
+                    continue
+        finally:
+            session.close()
         
         # Sort by filename
         documents.sort(key=lambda x: x['filename'])
@@ -2085,7 +2070,7 @@ async def get_all_documents():
                 file_ext = os.path.splitext(filename)[1].lower()
                 file_type = file_ext[1:] if file_ext else 'pdf'  # Remove dot
                 
-                # Get metadata from document_metadata.json
+                # Get metadata from database (Phase 1: migrated from document_metadata.json)
                 doc_metadata = get_document_metadata(filename)
                 machine_model = doc_metadata.get("machine_model")
                 # Normalize: ensure machine_model is a list (for backwards compatibility with single string)
@@ -3276,21 +3261,25 @@ async def upload_document(
         
         metadata_result = await run_sync(_create_metadata)
         
-        # Also update the old document_metadata.json file (for backwards compatibility)
+        # Update document metadata in database (Phase 1: migrated from document_metadata.json)
         # This ensures the machine_model shows up in the document list immediately
-        from .utils.document_metadata import update_document_metadata
+        from .utils.document_metadata import upsert_document
+        from .utils.db import SessionLocal
         try:
-            update_document_metadata(
-                file.filename,
-                {
-                    "machine_model": [normalized_machine_model],  # Use normalized version
-                    "requires_admin_review": False,  # Clear review flag since we have a valid machine model
-                }
-            )
-            logger.info(f"Updated document_metadata.json for {file.filename} with machine_model={machine_model}")
+            session = SessionLocal()
+            try:
+                upsert_document(
+                    session=session,
+                    file_name=file.filename,
+                    machine_model=[normalized_machine_model],  # Use normalized version
+                    requires_admin_review=False  # Clear review flag since we have a valid machine model
+                )
+                logger.info(f"Updated document metadata in database for {file.filename} with machine_model={machine_model}")
+            finally:
+                session.close()
         except Exception as e:
             # Don't fail the upload if metadata update fails - log and continue
-            logger.warning(f"Failed to update document_metadata.json for {file.filename}: {e}")
+            logger.warning(f"Failed to update document metadata in database for {file.filename}: {e}")
         
         # Audit log metadata created
         await audit_log(

@@ -223,6 +223,53 @@ class DocumentIngestionMetadata(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class Document(Base):
+    """
+    Document metadata table for storing document information.
+    Replaces the document_metadata.json file.
+    """
+    __tablename__ = "documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_name = Column(String(500), nullable=False, index=True)  # Original filename
+    gcs_path = Column(String(1000), nullable=True)  # Cloud Storage path: gs://bucket/path or relative path
+    display_name = Column(String(500), nullable=True)  # Name to show in UI (defaults to file_name)
+    machine_model = Column(String(255), nullable=True, index=True)  # Machine model(s) - can be JSON array string for multiple
+    category = Column(String(255), nullable=True)
+    product_family = Column(String(255), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+    requires_admin_review = Column(Boolean, default=False, nullable=False)
+    file_size_bytes = Column(Integer, nullable=True)
+    last_ingestion_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('ix_documents_file_name', 'file_name'),
+        Index('ix_documents_is_active', 'is_active'),
+        Index('ix_documents_machine_model', 'machine_model'),
+    )
+
+
+class GlossaryTerm(Base):
+    """
+    Glossary terms table for storing glossary definitions.
+    Replaces the glossary.csv file.
+    """
+    __tablename__ = "glossary_terms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    term = Column(String(255), nullable=False, index=True)
+    definition = Column(Text, nullable=False)
+    aliases = Column(JSON, nullable=True)  # List of alias strings (JSON array)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('ix_glossary_terms_term', 'term'),
+    )
+
+
 def ensure_analytics_columns() -> None:
     """Ensure analytics columns exist in query_history table."""
     with engine.begin() as connection:
