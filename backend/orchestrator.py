@@ -3254,27 +3254,44 @@ class RAGOrchestrator:
         return processed.strip()
 
     def _load_glossary_index(self):
+        """
+        Load glossary index from database (Phase 1) or fallback to file.
+        
+        Phase 1: Database is preferred. Falls back to file path if configured.
+        """
         try:
             glossary_cfg = (self.config or {}).get('glossary', {})
             if not glossary_cfg or not glossary_cfg.get('enabled', False):
                 return
-            path = glossary_cfg.get('path') or ''
-            if not path:
-                return
-            if not os.path.isabs(path):
-                # Resolve relative to project root
-                path = os.path.join(os.getcwd(), path)
-            if not os.path.exists(path):
-                logger.warning(f"Glossary file not found at {path}")
-                return
+            
             from .glossary_loader import load_glossary_any
-            nodes = load_glossary_any(path)
+            
+            # Try to load from database first (Phase 1 migration)
+            # If database is empty, fallback to file path if configured
+            path = glossary_cfg.get('path') or ''
+            fallback_path = None
+            
+            if path:
+                if not os.path.isabs(path):
+                    # Resolve relative to project root
+                    fallback_path = os.path.join(os.getcwd(), path)
+                else:
+                    fallback_path = path
+                
+                # Only use fallback if file exists (for backward compatibility during migration)
+                if not os.path.exists(fallback_path):
+                    fallback_path = None
+            
+            nodes = load_glossary_any(path=fallback_path)
             if not nodes:
-                logger.warning("No glossary entries loaded")
+                logger.warning("No glossary entries loaded (database empty and no file available)")
                 return
+            
             from llama_index.core import VectorStoreIndex
             self.glossary_index = VectorStoreIndex.from_documents(nodes, show_progress=False)
-            logger.info(f"✅ Loaded glossary index with {len(nodes)} entries from {path}")
+            
+            source = "database" if fallback_path is None or not os.path.exists(fallback_path) else fallback_path
+            logger.info(f"✅ Loaded glossary index with {len(nodes)} entries from {source}")
             # Optionally enrich acronym map from aliases
             try:
                 # Fetch all nodes by a dummy query

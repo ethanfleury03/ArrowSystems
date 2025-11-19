@@ -1,35 +1,51 @@
+# ============================================================================
+# CPU-Only Requirements for Cloud Run Deployment
+# ============================================================================
+# This file is optimized for small Docker images (<400MB)
+# All packages are CPU-only versions to avoid GPU wheel bloat
+# Models download at runtime in /app/.cache, NOT during pip install
+# ============================================================================
+
 # -----------------------------
-# Core ML and AI
+# PyTorch (CPU-Only) - MUST BE FIRST
 # -----------------------------
-# PyTorch nightly with CUDA 12.4 support (required for Blackwell sm_120 GPU)
-# Install with: pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124
-# Note: Nightly build required for Blackwell (sm_120) support. torchvision/torchaudio not needed for embeddings.
-# COMMENTED OUT: Uncomment if torch is not pre-installed (e.g., RunPod usually has it)
-# torch>=2.7.0.dev
-transformers==4.57.1
-sentence-transformers==5.1.2
-accelerate==1.11.0
-huggingface-hub==0.36.0
+# CPU-only PyTorch (~200MB instead of 4-6GB GPU version)
+# Install from PyTorch CPU wheel index to ensure CPU-only build
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0+cpu
+
+# -----------------------------
+# Core ML and AI (CPU-Only, No Auto-Download)
+# -----------------------------
+# Pinned to stable versions that do NOT download models during pip install
+# Models are downloaded at runtime in /app/.cache/huggingface
+transformers==4.40.0  # Stable version, no auto-download, CPU-compatible, works with sentence-transformers 2.6.1
+sentence-transformers==2.6.1  # Minimum version required by llama-index-embeddings-huggingface, CPU-compatible
+huggingface-hub==0.22.2  # Stable version, no auto-download
 safetensors==0.6.2
+accelerate==0.30.1  # CPU-only version, compatible with transformers 4.40.0
 scikit-learn==1.7.2
 numpy==1.26.4
 
 # -----------------------------
 # LlamaIndex
 # -----------------------------
+# LlamaIndex works with CPU-only PyTorch and transformers
 llama-index==0.14.5
 llama-index-core==0.14.5
 llama-index-embeddings-huggingface==0.6.1
-# llama-index-llms-huggingface==0.6.1  # REMOVED: Not used in codebase
-# llama-index-readers-file==0.5.4  # REMOVED: Not used in codebase
 llama-index-vector-stores-qdrant==0.8.6  # Optional: Only needed if USE_QDRANT=true
 qdrant-client==1.12.2  # Optional: Only needed if USE_QDRANT=true
+
+# -----------------------------
+# Google Cloud Storage
+# -----------------------------
+google-cloud-storage>=2.10.0
 
 # -----------------------------
 # API and LLM
 # -----------------------------
 anthropic==0.71.0
-# openai>=1.108.1,<2.0  # REMOVED: Not used in codebase
 
 # -----------------------------
 # Database (PostgreSQL via SQLAlchemy)
@@ -37,7 +53,7 @@ anthropic==0.71.0
 bcrypt==4.2.0
 sqlalchemy==2.0.25
 alembic==1.13.1
-psycopg2-binary==2.9.9  # PostgreSQL adapter for SQLAlchemy
+psycopg2-binary==2.9.9
 
 # -----------------------------
 # FastAPI Backend
@@ -55,8 +71,6 @@ slowapi==0.1.8
 # -----------------------------
 PyMuPDF==1.26.5
 pandas==2.2.0
-# reportlab==4.4.4  # REMOVED: Not used in codebase
-# openpyxl==3.1.5  # REMOVED: Not used in codebase
 python-docx==1.2.0
 python-dotenv==1.1.1
 Pillow==11.3.0
@@ -66,10 +80,7 @@ PyJWT==2.9.0
 # Utilities
 # -----------------------------
 tqdm==4.67.1
-# nltk==3.9.2  # REMOVED: Not used in codebase
 rank-bm25==0.2.2
-# symspellpy==6.9.0  # REMOVED: Not used in codebase
-# tabulate==0.9.0  # REMOVED: Not used in codebase
 pyyaml==6.0.3
 structlog==24.1.0
 
@@ -92,4 +103,3 @@ anyio==4.11.0
 starlette==0.48.0
 annotated-types==0.7.0
 pydantic-core==2.41.4
-

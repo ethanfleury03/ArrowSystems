@@ -2,37 +2,19 @@
 .git
 .gitignore
 .gitattributes
-.gitmodules
 
 # Python cache and compiled files
 __pycache__/
+**/__pycache__/
 *.py[cod]
-*$py.class
+*.pyc
+*.pyo
+*.pyd
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
 
 # Virtual environments
 venv/
 env/
-ENV/
-env.bak/
-venv.bak/
 .venv/
 
 # IDE and editor files
@@ -44,10 +26,7 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Environment files (keep .env.example)
+# Environment files
 .env.local
 .env.development
 .env.test
@@ -58,28 +37,12 @@ Thumbs.db
 logs/
 log/
 
-# Runtime data
-pids/
-*.pid
-*.seed
-*.pid.lock
-
-# Coverage directory used by tools like istanbul
-coverage/
-.coverage
-.coverage.*
-htmlcov/
-
-# pytest
-.pytest_cache/
-.tox/
-
 # Documentation
 docs/
 *.md
 README*
 
-# Docker files (except the one we're using)
+# Docker files
 Dockerfile*
 docker-compose*.yml
 .dockerignore
@@ -89,50 +52,11 @@ tmp/
 temp/
 .tmp/
 
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Node.js (if any)
+# Node.js and frontend (NOT needed in backend image)
 node_modules/
-frontend/node_modules/
-frontend/.next/
-frontend/dist/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Large model files (if not using Git LFS)
-*.bin
-*.safetensors
-models/
-checkpoints/
-
-# Data files (keep structure but exclude large files)
-data/*.pdf
-data/*.docx
-data/*.xlsx
-data/*.csv
-!data/.gitkeep
-
-# Exclude large runtime assets from Docker image
-data/
-latest_model/
-logs/
-rag_app.db
-config/users.yaml
-Users.txt
-frontend/node_modules/
-
-# Keep placeholder files for directory structure
-!data/.gitkeep
-!latest_model/.gitkeep
-!logs/.gitkeep
+frontend/
+.next/
+dist/
 
 # Cache directories
 .cache/
@@ -149,3 +73,33 @@ test/
 tests/
 *_test.py
 test_*.py
+
+# ============================================================================
+# CRITICAL: Exclude large directories that cause 4GB+ bloat
+# ============================================================================
+
+# RAG artifacts and vector stores (NOT needed - using Cloud Storage + PostgreSQL)
+latest_model/
+**/latest_model/
+
+# Document data directory (NOT needed - documents in GCS)
+data/
+**/data/
+
+# Document files (NOT needed - in GCS)
+*.pdf
+*.docx
+*.xlsx
+*.csv
+
+# SQLite databases (NOT needed - using PostgreSQL in GCP)
+*.db
+*.sqlite
+*.sqlite-*
+*.sql
+
+# Model files (NOT needed - download at runtime)
+*.bin
+*.safetensors
+models/
+checkpoints/
