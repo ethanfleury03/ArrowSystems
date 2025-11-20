@@ -142,11 +142,32 @@ jobs:
             NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app
             SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
 
+      - name: List all Docker images (debug)
+        if: failure()
+        run: |
+          echo "=== All Docker images ==="
+          docker images
+          echo "=== Images with 'duraflex' in name ==="
+          docker images | grep duraflex || echo "No images found with 'duraflex' in name"
+
       - name: Verify Docker images
         run: |
-          docker images | grep duraflex-backend:ci
-          docker images | grep duraflex-frontend:ci
-          echo "✅ Docker images built successfully"
+          echo "Checking for built Docker images..."
+          if docker images | grep -q duraflex-backend:ci; then
+            echo "✅ Backend image found"
+            docker images | grep duraflex-backend:ci
+          else
+            echo "❌ Backend image not found"
+            exit 1
+          fi
+          if docker images | grep -q duraflex-frontend:ci; then
+            echo "✅ Frontend image found"
+            docker images | grep duraflex-frontend:ci
+          else
+            echo "❌ Frontend image not found"
+            exit 1
+          fi
+          echo "✅ All Docker images built successfully"
 
   lint:
     name: Lint (Placeholder)
