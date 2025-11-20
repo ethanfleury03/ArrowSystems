@@ -154,6 +154,148 @@ jobs:
             NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app
             SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
 
+  deploy-backend:
+    name: Deploy Backend to Cloud Run
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: arrow-rag-support-prod
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push Backend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./backend/Dockerfile.backend
+          push: true
+          tags: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }}
+          platforms: linux/amd64
+          build-args: |
+            BUILD_ENV=production
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Deploy Backend to Cloud Run
+        run: |
+          gcloud run deploy arrow-rag-backend \
+            --image=us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }} \
+            --region=us-central1 \
+            --platform=managed \
+            --memory=4Gi \
+            --cpu=2 \
+            --timeout=900 \
+            --concurrency=80 \
+            --cpu-boost \
+            --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
+            --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --set-env-vars=HF_HOME=/tmp/hf \
+            --set-env-vars=TRANSFORMERS_CACHE=/tmp/hf \
+            --set-env-vars=SENTENCE_TRANSFORMERS_HOME=/tmp/hf \
+            --set-env-vars=ENABLE_INGESTION_ON_STARTUP=false \
+            --set-env-vars=PYTHONUNBUFFERED=1 \
+            --set-env-vars=ENV=prod \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Get service URL
+        id: get-service-url
+        run: |
+          SERVICE_URL=$(gcloud run services describe arrow-rag-backend \
+            --region=us-central1 \
+            --format='value(status.url)')
+          echo "✅ Backend deployed successfully!"
+          echo "🌐 Service URL: $SERVICE_URL"
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+  deploy-frontend:
+    name: Deploy Frontend to Cloud Run
+    runs-on: ubuntu-latest
+    needs: [frontend-build]
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: arrow-rag-support-prod
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push Frontend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-frontend/frontend:${{ github.sha }}
+          platforms: linux/amd64
+          target: production
+          build-args: |
+            NODE_ENV=production
+            NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app
+            SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Deploy Frontend to Cloud Run
+        run: |
+          gcloud run deploy arrow-rag-frontend \
+            --image=us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-frontend/frontend:${{ github.sha }} \
+            --region=us-central1 \
+            --platform=managed \
+            --memory=1Gi \
+            --cpu=1 \
+            --timeout=300 \
+            --concurrency=80 \
+            --set-env-vars=NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app \
+            --set-env-vars=NODE_ENV=production \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Get service URL
+        id: get-service-url
+        run: |
+          SERVICE_URL=$(gcloud run services describe arrow-rag-frontend \
+            --region=us-central1 \
+            --format='value(status.url)')
+          echo "✅ Frontend deployed successfully!"
+          echo "🌐 Service URL: $SERVICE_URL"
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
   lint:
     name: Lint (Placeholder)
     runs-on: ubuntu-latest
