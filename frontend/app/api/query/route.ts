@@ -133,7 +133,7 @@ export async function POST(request: NextRequest) {
     console.error('API route error:', error);
     
     // Detect backend URL for error message (fallback if detection failed)
-    let backendUrlForError = 'http://localhost:8000';
+    let backendUrlForError = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
     try {
       backendUrlForError = getBackendUrl(request);
     } catch {
@@ -143,7 +143,7 @@ export async function POST(request: NextRequest) {
     // Check if it's a network error (backend not reachable)
     if (error instanceof TypeError && (error.message.includes('fetch') || error.message.includes('ECONNREFUSED'))) {
       return NextResponse.json(
-        { detail: `Cannot connect to backend at ${backendUrlForError}. Make sure the backend is running on port 8000.` },
+        { detail: `Cannot connect to backend at ${backendUrlForError}. Please check your backend URL configuration.` },
         { status: 503 }
       );
     }

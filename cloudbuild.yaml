@@ -68,6 +68,8 @@ steps:
       - '3600'
       - '--set-env-vars'
       - 'PYTHONPATH=/app'
+      - '--set-env-vars'
+      - 'HF_HOME=/tmp/hf,TRANSFORMERS_CACHE=/tmp/hf,SENTENCE_TRANSFORMERS_HOME=/tmp/st'
       - '--set-secrets'
       - 'ANTHROPIC_API_KEY=anthropic-api-key:latest'
 

@@ -3311,6 +3311,9 @@ class RAGOrchestrator:
     
     def initialize_models(self):
         """Initialize embedding and re-ranking models."""
+        # Note: Model loading is allowed on Cloud Run for query embeddings
+        # Ingestion is blocked separately via should_skip_ingestion() check
+        
         logger.info("🚀 Initializing models for RAG orchestrator...")
         
         # Disable hf_transfer if not installed (RunPod issue)
@@ -3406,14 +3409,27 @@ class RAGOrchestrator:
     def load_index(self, storage_dir="latest_model"):
         """Load existing index from latest_model/ directory."""
         from backend.utils.test_mode import is_test_mode
+        from backend.utils.cloud_run import should_skip_ingestion
         
         # Check if directory exists or if docstore.json exists
         docstore_path = os.path.join(storage_dir, "docstore.json")
         index_exists = os.path.exists(storage_dir) and os.path.exists(docstore_path)
         
-        # If directory doesn't exist or is empty, create a new index instead of raising error
-        # This allows test mode to work with empty directories
+        # If directory doesn't exist or is empty, handle based on ingestion settings
         if not index_exists:
+            # If ingestion is disabled, don't try to create index or raise error
+            # This allows FastAPI to start without the index
+            if should_skip_ingestion():
+                logger.warning(
+                    "index_not_found_ingestion_disabled",
+                    storage_dir=storage_dir,
+                    message="Index not found but ingestion is disabled. RAG pipeline will not be functional."
+                )
+                # Set index to None so query operations fail gracefully
+                self.index = None
+                self.retriever = None
+                return
+            
             if is_test_mode():
                 # In test mode, create empty index if directory doesn't exist
                 logger.info(f"test_mode_index_not_found_creating_new", storage_dir=storage_dir)

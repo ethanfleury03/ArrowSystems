@@ -17,8 +17,10 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ARG NODE_ENV=production
 ARG NEXT_PUBLIC_API_URL
+ARG SESSION_SECRET
 ENV NODE_ENV=${NODE_ENV}
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV SESSION_SECRET=${SESSION_SECRET}
 # Build the app - this creates .next/standalone directory
 RUN npm run build
 

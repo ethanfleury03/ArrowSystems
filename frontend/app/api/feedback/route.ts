@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // Use BACKEND_URL from env (set in Docker) or default to localhost for local dev
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 export async function POST(request: NextRequest) {
   try {
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
 
     if (error instanceof TypeError && error.message.includes('fetch')) {
       return NextResponse.json(
-        { detail: `Cannot connect to backend at ${BACKEND_URL}. Make sure the backend is running on port 8000.` },
+        { detail: `Cannot connect to backend at ${BACKEND_URL}. Make sure the backend is running on the configured backend port.` },
         { status: 503 }
       );
     }

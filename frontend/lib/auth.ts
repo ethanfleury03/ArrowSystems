@@ -10,7 +10,7 @@ const BACKEND_URL = (() => {
     return getBackendUrl();
   } catch {
     // Fallback for server-side usage where request is not available
-    return process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    return process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
   }
 })();
 

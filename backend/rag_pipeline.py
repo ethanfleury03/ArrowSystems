@@ -56,6 +56,9 @@ class RAGPipeline:
         
         Args:
             storage_dir: Directory containing the vector index
+        
+        Raises:
+            RuntimeError: If ingestion is disabled or models cannot be loaded
         """
         if self._initialized:
             logger.info("rag_pipeline_already_initialized", storage_dir=storage_dir)
@@ -63,11 +66,17 @@ class RAGPipeline:
             
         logger.info("rag_pipeline_initializing", storage_dir=storage_dir)
         
-        # Initialize models
+        # Initialize models (model loading is always allowed, even on Cloud Run)
         self.orchestrator.initialize_models()
         
-        # Load index
+        # Load index (will handle missing index gracefully if ingestion is disabled)
         self.orchestrator.load_index(storage_dir=storage_dir)
+        
+        # Check if index was actually loaded (might be None if ingestion disabled)
+        if self.orchestrator.index is None:
+            logger.warning("rag_pipeline_index_not_loaded", message="Index is None, pipeline will not be functional")
+            # Don't set _initialized to True if index is None
+            return
         
         self._initialized = True
         logger.info("rag_pipeline_initialized", storage_dir=storage_dir)

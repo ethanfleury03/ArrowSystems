@@ -54,6 +54,12 @@ api.log
 *.bak
 *.tar.gz
 temp/
+=
+CACHED
+resolve
+transferring
+# Files starting with [ in root directory (escape bracket)
+/\[*
 
 # Test files (but allow test_claude_intent.py)
 mock_*.py

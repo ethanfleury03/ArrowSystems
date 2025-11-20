@@ -118,8 +118,10 @@ echo ""
 
 # Build with build-time environment variables
 # NEXT_PUBLIC_API_URL is required at build time for Next.js validation
+# SESSION_SECRET is also validated at build time by next.config.js
 if ! docker build -f frontend/Dockerfile \
     --build-arg NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL}" \
+    --build-arg SESSION_SECRET="${SESSION_SECRET}" \
     --build-arg NODE_ENV=production \
     -t "$IMAGE_NAME" \
     ./frontend; then
