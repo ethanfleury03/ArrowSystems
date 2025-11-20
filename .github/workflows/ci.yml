@@ -140,6 +140,7 @@ jobs:
           build-args: |
             NODE_ENV=production
             NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app
+            SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
 
       - name: Verify Docker images
         run: |
