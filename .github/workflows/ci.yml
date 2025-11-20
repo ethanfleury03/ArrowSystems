@@ -121,14 +121,18 @@ jobs:
           test -f ./backend/Dockerfile.backend && echo "✅ Dockerfile found" || echo "❌ Dockerfile not found"
           echo "=== Checking backend directory ==="
           ls -la backend/ | head -20
+          echo "=== Checking buildx builder ==="
+          docker buildx ls
 
       - name: Build backend Docker image
         id: build-backend
+        continue-on-error: false
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./backend/Dockerfile.backend
           push: false
+          load: true
           tags: duraflex-backend:ci
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
@@ -156,6 +160,7 @@ jobs:
           context: ./frontend
           file: ./frontend/Dockerfile
           push: false
+          load: true
           tags: duraflex-frontend:ci
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
