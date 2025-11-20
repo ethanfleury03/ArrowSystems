@@ -407,6 +407,10 @@ async def lifespan(app: FastAPI):
     logger.info("database_connection_check_passed", message=integrity_message)
     
     # Initialize RAG pipeline
+    # Note: Model loading is always allowed (for query embeddings)
+    # Ingestion (index building) is disabled on Cloud Run via should_skip_ingestion()
+    from backend.utils.cloud_run import should_skip_ingestion
+    
     try:
         # Check if test mode is enabled
         from backend.utils.test_mode import is_test_mode, get_index_dir
@@ -436,30 +440,48 @@ async def lifespan(app: FastAPI):
                     break
             
             if not storage_path:
-                raise FileNotFoundError(
-                    "Index not found. Please run 'python -m backend.ingest' first, "
-                    "or ensure the latest_model directory exists. "
-                    f"Checked paths: {possible_paths}"
-                )
+                # If ingestion is disabled, allow startup without index (models will still load)
+                if should_skip_ingestion():
+                    logger.warning("Index missing but ingestion disabled — Cloud Run startup continuing without index.")
+                    storage_path = "latest_model"  # Use default path, load_index will handle missing index gracefully
+                else:
+                    raise FileNotFoundError(
+                        "Index not found. Please run 'python -m backend.ingest' first, "
+                        "or ensure the latest_model directory exists. "
+                        f"Checked paths: {possible_paths}"
+                    )
         
+        # Always try to initialize pipeline (models will load, index will load if available)
         logger.info("rag_pipeline_storage_path", storage_path=storage_path, test_mode=is_test_mode())
         
         # Use environment variable for cache directory if set
-        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface/hub')
-        if cache_dir.endswith('huggingface'):
+        # Default to /tmp/hf for Cloud Run compatibility
+        cache_dir = os.getenv('HF_HOME', '/tmp/hf')
+        # Ensure hub subdirectory exists for HuggingFace cache structure
+        if not cache_dir.endswith('hub'):
             cache_dir = os.path.join(cache_dir, 'hub')
         
-        # Initialize RAG pipeline
+        # Initialize RAG pipeline (will load models and index if available)
+        # load_index() will handle missing index gracefully if ingestion is disabled
         rag_pipeline = initialize_rag_pipeline(
             storage_dir=storage_path,
             cache_dir=cache_dir,
             db_manager=db_manager
         )
-        logger.info("rag_pipeline_initialized", storage_path=storage_path, cache_dir=cache_dir)
         
+        if rag_pipeline and rag_pipeline.is_initialized():
+            logger.info("rag_pipeline_initialized", storage_path=storage_path, cache_dir=cache_dir)
+        else:
+            logger.warning("rag_pipeline_initialized_without_index", message="Pipeline initialized but index not loaded (ingestion disabled or index missing)")
+            
     except Exception as e:
         logger.error("rag_pipeline_init_failed", error=str(e), exc_info=True)
-        raise
+        # On Cloud Run, allow startup even if pipeline init fails
+        if should_skip_ingestion():
+            logger.warning("Pipeline initialization failed but ingestion disabled — continuing startup without RAG pipeline.")
+            rag_pipeline = None
+        else:
+            raise
     
     # Initialize query summarizer
     try:
@@ -3572,7 +3594,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="DuraFlex Technical Assistant API Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--port", type=int, default=8080, help="Port to bind to (default: 8080 for GCP Cloud Run)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
     parser.add_argument("--dev", action="store_true", help="Run in development mode with Uvicorn (single worker)")
     
@@ -3716,7 +3738,7 @@ def main():
         logger.warning("  gunicorn backend.api:app \\")
         logger.warning("      --workers 3 \\")
         logger.warning("      --worker-class uvicorn.workers.UvicornWorker \\")
-        logger.warning("      --bind 0.0.0.0:8000 \\")
+        logger.warning("      --bind 0.0.0.0:8080 \\")
         logger.warning("      --timeout 300 \\")
         logger.warning("      --keep-alive 5 \\")
         logger.warning("      --max-requests 1000 \\")

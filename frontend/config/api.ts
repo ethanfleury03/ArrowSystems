@@ -1,7 +1,7 @@
 import { isDev, isProd } from '@/lib/env';
 
-const DEFAULT_SERVER_BACKEND = 'http://backend:8000';
-const DEFAULT_CLIENT_BACKEND = 'http://localhost:8000';
+const DEFAULT_SERVER_BACKEND = process.env.SERVER_BACKEND_URL || process.env.NEXT_PUBLIC_SERVER_BACKEND_URL || 'http://backend:8080';
+const DEFAULT_CLIENT_BACKEND = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 const SERVER_BACKEND =
   process.env.SERVER_BACKEND_URL ??
@@ -34,15 +34,17 @@ const getClientBackendUrl = (): string => {
   if (typeof window !== 'undefined' && window.location) {
     const hostname = window.location.hostname;
     
-    // If accessing from localhost or 127.0.0.1, use localhost:8000
+    // If accessing from localhost or 127.0.0.1, use default
     if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '') {
       return DEFAULT_CLIENT_BACKEND;
     }
     
-    // Otherwise, use the same hostname but port 8000 for backend
-    // This allows network access: if frontend is at 192.168.1.100:3000,
-    // backend will be at 192.168.1.100:8000
-    return `http://${hostname}:8000`;
+    // For production/network access, prefer environment variable
+    if (process.env.NEXT_PUBLIC_API_URL) {
+      return process.env.NEXT_PUBLIC_API_URL;
+    }
+    // Fallback: use same hostname with port 8080 (GCP default)
+    return `http://${hostname}:8080`;
   }
   
   // Fallback for SSR or when window is not available

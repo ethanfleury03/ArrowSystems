@@ -52,22 +52,25 @@ export function getBackendUrl(request?: NextRequest | Request | { headers: Heade
         // Extract hostname (remove port if present)
         const hostnameOnly = hostname.split(':')[0].trim();
         
-        // If accessing from localhost or 127.0.0.1, use localhost:8000
+        // If accessing from localhost or 127.0.0.1, use localhost:8080 (GCP default)
         if (hostnameOnly === 'localhost' || hostnameOnly === '127.0.0.1' || hostnameOnly === '') {
-          return 'http://localhost:8000';
+          return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
         }
         
-        // Otherwise, use the same hostname but port 8000 for backend
-        // This allows network access: if frontend is at 192.168.1.100:3000,
-        // backend will be at 192.168.1.100:8000
-        return `http://${hostnameOnly}:8000`;
+        // For production/network access, use environment variable or construct from hostname
+        // In GCP, backend URL should be provided via NEXT_PUBLIC_API_URL
+        if (process.env.NEXT_PUBLIC_API_URL) {
+          return process.env.NEXT_PUBLIC_API_URL;
+        }
+        // Fallback: use same hostname with port 8080 (GCP default)
+        return `http://${hostnameOnly}:8080`;
       }
     } catch (error) {
       console.warn('Failed to detect backend URL from request:', error);
     }
   }
   
-  // Fallback to localhost for development
-  return 'http://localhost:8000';
+  // Fallback to localhost for development (use env var if available, otherwise 8080)
+  return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 }
 

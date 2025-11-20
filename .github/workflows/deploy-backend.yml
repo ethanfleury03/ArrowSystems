@@ -1,0 +1,97 @@
+name: Deploy Backend to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: arrow-rag-support-prod
+  SERVICE_NAME: arrow-rag-backend
+  REGION: us-central1
+  GCR_IMAGE: gcr.io/arrow-rag-support-prod/arrow-rag-backend
+
+jobs:
+  deploy:
+    name: Build and Deploy Backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./backend/Dockerfile.backend
+          push: true
+          tags: ${{ env.GCR_IMAGE }}:${{ github.sha }}
+          platforms: linux/amd64
+          build-args: |
+            BUILD_ENV=production
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.GCR_IMAGE }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --memory 4Gi \
+            --cpu 2 \
+            --timeout 900 \
+            --concurrency 80 \
+            --cpu-boost \
+            --set-cloudsql-instances arrow-rag-support-prod:us-central1:rag-postgres \
+            --set-env-vars DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --set-env-vars HF_HOME=/tmp/hf \
+            --set-env-vars TRANSFORMERS_CACHE=/tmp/hf \
+            --set-env-vars SENTENCE_TRANSFORMERS_HOME=/tmp/hf \
+            --set-env-vars ENABLE_INGESTION_ON_STARTUP=false \
+            --set-env-vars PYTHONUNBUFFERED=1 \
+            --set-env-vars ENV=prod \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Get service URL
+        id: get-service-url
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          echo "✅ Backend deployed successfully!"
+          echo "🌐 Service URL: $SERVICE_URL"
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+      - name: Deployment summary
+        run: |
+          echo "## 🚀 Backend Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service**: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${{ env.REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ env.GCR_IMAGE }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: ${{ steps.get-service-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
+

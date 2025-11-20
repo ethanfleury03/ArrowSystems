@@ -160,7 +160,8 @@ if ! gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
     --set-env-vars "APP_ENV=production" \
     --set-env-vars "ALLOWED_ORIGINS=https://support.arrowsystems.com" \
-    --set-env-vars "LOG_LEVEL=INFO"; then
+    --set-env-vars "LOG_LEVEL=INFO" \
+    --set-env-vars "HF_HOME=/tmp/hf,TRANSFORMERS_CACHE=/tmp/hf,SENTENCE_TRANSFORMERS_HOME=/tmp/st"; then
     echo -e "${RED}❌ Cloud Run deployment failed${NC}"
     exit 1
 fi

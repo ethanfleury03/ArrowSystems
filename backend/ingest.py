@@ -1323,10 +1323,15 @@ class TechnicalRAGPipeline:
         
     def initialize_models(self):
         """Initialize embedding and re-ranking models."""
+        # Cloud Run safeguard: prevent ingestion on Cloud Run
+        from backend.utils.cloud_run import is_cloud_run
+        
+        if is_cloud_run():
+            raise RuntimeError("Ingestion cannot run on Cloud Run — must be executed on GPU externally.")
+        
         logger.info("🚀 Initializing embedding model...")
         
         # Disable hf_transfer if not installed (RunPod issue)
-        import os
         import shutil
         if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1':
             logger.info("Disabling HF_HUB_ENABLE_HF_TRANSFER (package not installed)")

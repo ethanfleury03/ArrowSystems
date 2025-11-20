@@ -75,17 +75,21 @@ ARG BUILD_ENV=production
 # Set as ENV so it's available at runtime
 ENV BUILD_ENV=${BUILD_ENV}
 # ENV can be overridden at runtime via docker-compose or docker run
-ENV ENV=${ENV:-dev}
+# Default to 'dev' if not set (can be overridden at runtime)
+ENV ENV=dev
 
 # Set HuggingFace cache directory (models download here at runtime)
-ENV HF_HOME=/app/.cache/huggingface
-ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
-ENV HF_DATASETS_CACHE=/app/.cache/huggingface
-ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
+# Using /tmp for Cloud Run compatibility (Cloud Run cannot write to /root/.cache or /app/.cache)
+# These can be overridden at runtime via environment variables
+ENV HF_HOME=/tmp/hf
+ENV TRANSFORMERS_CACHE=/tmp/hf
+ENV HF_DATASETS_CACHE=/tmp/hf
+ENV SENTENCE_TRANSFORMERS_HOME=/tmp/st
 
 # Create necessary directories
 # TODO: In production, mount GCS bucket for /data and use vector DB for latest_model
-RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/huggingface
+# Note: /tmp directories are ephemeral in Cloud Run (models re-download on cold start)
+RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /tmp/hf /tmp/st
 
 # Copy Python dependencies from dependencies stage (no build tools)
 COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
@@ -95,13 +99,14 @@ COPY --from=dependencies /usr/local/bin /usr/local/bin
 WORKDIR /app
 
 # Ensure Alembic can run inside Docker by including config file
-COPY alembic.ini /app/alembic.ini
+RUN mkdir -p /app/backend/migrations
+COPY backend/migrations/alembic.ini /app/backend/migrations/alembic.ini
 
 # Copy pyproject.toml (for project configuration, used by some tools)
 COPY pyproject.toml /app/pyproject.toml
 
-# Create health check script
-RUN printf '#!/bin/bash\nif curl -f http://localhost:8000/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && sed -i 's/\r$//' /app/healthcheck.sh && chmod +x /app/healthcheck.sh
+# Create health check script (uses PORT env var, defaults to 8080 for GCP)
+RUN printf '#!/bin/bash\nPORT=${PORT:-8080}\nif curl -f http://localhost:${PORT}/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && sed -i 's/\r$//' /app/healthcheck.sh && chmod +x /app/healthcheck.sh
 
 # Copy ONLY backend code (exclude data/, latest_model/, frontend/, etc.)
 # .dockerignore ensures large directories are excluded from build context
@@ -147,23 +152,40 @@ if [ -d "latest_model" ] && [ -f "latest_model/docstore.json" ]; then
     echo "   📊 Indexed chunks: ${chunks}"
     echo ""
 else
-    echo "⚠️  RAG Index Not Found! Running ingestion..."
-    python -m backend.ingest
-    echo "✅ Ingestion complete!"
+    # Detect Cloud Run deployment and NEVER ingest
+    if [ -n "$K_SERVICE" ] || [ -n "$K_REVISION" ]; then
+        echo "ℹ️ RAG Index not found - Cloud Run detected, ingestion permanently disabled"
+        echo "   (Cloud Run MUST receive a pre-built index or use a vector DB)"
+        echo ""
+    else
+        # Local development only
+        ENABLE_INGESTION=${ENABLE_INGESTION_ON_STARTUP:-false}
+        if [ "$ENABLE_INGESTION" = "true" ]; then
+            echo "🔄 ENABLE_INGESTION_ON_STARTUP=true - Running ingestion..."
+            python -m backend.ingest
+            echo "✅ Ingestion complete!"
+        else
+            echo "⏭️  Skipping ingestion locally (ENABLE_INGESTION_ON_STARTUP=${ENABLE_INGESTION})"
+        fi
+    fi
 fi
 
 echo "🚀 Starting FastAPI backend server..."
 echo ""
-echo "API will be available at: http://localhost:8000"
-echo "API docs available at: http://localhost:8000/docs"
+PORT=${PORT:-8080}
+echo "API will be available at: http://localhost:${PORT}"
+echo "API docs available at: http://localhost:${PORT}/docs"
 echo ""
 echo "⚠️  Note: This container runs the backend API only."
 echo "   Use docker-compose.yml to run both backend and frontend together."
 echo ""
 
 # Start FastAPI with environment-specific settings
+# Use PORT environment variable (Cloud Run sets this to 8080, default to 8080 for GCP)
+PORT=${PORT:-8080}
+
 if [ "$BUILD_ENV" = "development" ]; then
-    exec python -m backend.api --host 0.0.0.0 --port 8000 --dev --reload
+    exec python -m backend.api --host 0.0.0.0 --port "${PORT}" --dev --reload
 else
     # Production: Use Gunicorn with multiple workers
     # Use 1 worker for dev environment to reduce log duplication, 3 for production
@@ -178,15 +200,15 @@ else
     MAX_REQUESTS=${GUNICORN_MAX_REQUESTS:-1000}
     
     exec gunicorn backend.api:app \
-        --workers $WORKERS \
+        --workers "${WORKERS}" \
         --worker-class uvicorn.workers.UvicornWorker \
-        --bind 0.0.0.0:8000 \
-        --timeout $TIMEOUT \
+        --bind "0.0.0.0:${PORT}" \
+        --timeout "${TIMEOUT}" \
         --keep-alive 5 \
-        --max-requests $MAX_REQUESTS \
+        --max-requests "${MAX_REQUESTS}" \
         --max-requests-jitter 100 \
-        --access-logfile - \
-        --error-logfile -
+        --access-logfile "-" \
+        --error-logfile "-"
 fi
 EOF
 RUN sed -i 's/\r$//' /app/run_backend.sh && chmod +x /app/run_backend.sh
@@ -194,13 +216,15 @@ RUN sed -i 's/\r$//' /app/run_backend.sh && chmod +x /app/run_backend.sh
 # Database is managed via DATABASE_URL environment variable (PostgreSQL)
 
 # Set ownership and permissions
-RUN chown -R appuser:appuser /app && \
-    chmod -R 755 /app/.cache
+# Note: /tmp directories don't need chmod (they're world-writable by default)
+RUN chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
 
-EXPOSE 8000
+# EXPOSE is just documentation - Cloud Run uses PORT env var
+# Default to 8080 for GCP Cloud Run compatibility
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \

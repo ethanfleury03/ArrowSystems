@@ -157,12 +157,6 @@ export function DocumentsTab() {
     }
   }, [toast]);
 
-  useEffect(() => {
-    fetchDocuments();
-    fetchMachines();
-    checkTestMode();
-  }, [fetchDocuments]);
-
   const checkTestMode = useCallback(async () => {
     try {
       const response = await fetch('/api/admin/test-mode');
@@ -174,29 +168,6 @@ export function DocumentsTab() {
       console.error('Error checking test mode:', error);
     }
   }, []);
-
-  // Poll for status updates on documents that are pending, chunking, embedding, or deleting
-  useEffect(() => {
-    const hasActiveIngestion = documents.some(
-      doc => doc.ingestion_status === 'PENDING_INGESTION' || 
-             doc.ingestion_status === 'CHUNKING' || 
-             doc.ingestion_status === 'READY_FOR_EMBEDDING' ||
-             doc.ingestion_status === 'EMBEDDING' ||
-             doc.ingestion_status === 'DELETING' ||
-             doc.ingestion_status === 'REBUILDING_INDEX'
-    );
-
-    if (hasActiveIngestion) {
-      // Poll every 3 seconds
-      const interval = setInterval(() => {
-        fetchDocuments();
-      }, 3000);
-
-      return () => {
-        clearInterval(interval);
-      };
-    }
-  }, [documents, fetchDocuments]);
 
   const fetchMachines = useCallback(async () => {
     try {
@@ -224,6 +195,36 @@ export function DocumentsTab() {
       setLoadingMachines(false);
     }
   }, [toast]);
+
+  // Initial data fetch on mount
+  useEffect(() => {
+    fetchDocuments();
+    fetchMachines();
+    checkTestMode();
+  }, [fetchDocuments, fetchMachines, checkTestMode]);
+
+  // Poll for status updates on documents that are pending, chunking, embedding, or deleting
+  useEffect(() => {
+    const hasActiveIngestion = documents.some(
+      doc => doc.ingestion_status === 'PENDING_INGESTION' || 
+             doc.ingestion_status === 'CHUNKING' || 
+             doc.ingestion_status === 'READY_FOR_EMBEDDING' ||
+             doc.ingestion_status === 'EMBEDDING' ||
+             doc.ingestion_status === 'DELETING' ||
+             doc.ingestion_status === 'REBUILDING_INDEX'
+    );
+
+    if (hasActiveIngestion) {
+      // Poll every 3 seconds
+      const interval = setInterval(() => {
+        fetchDocuments();
+      }, 3000);
+
+      return () => {
+        clearInterval(interval);
+      };
+    }
+  }, [documents, fetchDocuments]);
 
   const handleAddMachine = async () => {
     if (!newMachineName.trim()) {

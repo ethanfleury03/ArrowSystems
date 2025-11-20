@@ -4,7 +4,7 @@ import { setLoginSession } from '@/lib/auth';
 const BACKEND_URL =
   process.env.BACKEND_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
-  'http://localhost:8000';
+  process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.SEED_ADMIN_EMAIL;
 const ADMIN_PASSWORD =
   process.env.ADMIN_PASSWORD || process.env.SEED_ADMIN_PASSWORD;
