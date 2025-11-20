@@ -13,7 +13,7 @@ env:
   PROJECT_ID: arrow-rag-support-prod
   SERVICE_NAME: arrow-rag-frontend
   REGION: us-central1
-  GCR_IMAGE: gcr.io/arrow-rag-support-prod/arrow-rag-frontend
+  IMAGE: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-frontend/frontend
   BACKEND_URL: https://arrow-rag-backend-70705019874.us-central1.run.app
 
 jobs:
@@ -40,8 +40,8 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Configure Docker for GCR
-        run: gcloud auth configure-docker --quiet
+      - name: Configure Docker for Artifact Registry
+        run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
 
       - name: Build Docker image
         uses: docker/build-push-action@v5
@@ -49,7 +49,7 @@ jobs:
           context: ./frontend
           file: ./frontend/Dockerfile
           push: true
-          tags: ${{ env.GCR_IMAGE }}:${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
           platforms: linux/amd64
           target: production
           build-args: |
@@ -62,14 +62,14 @@ jobs:
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ env.GCR_IMAGE }}:${{ github.sha }} \
+            --image ${{ env.IMAGE }}:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --platform managed \
             --memory 1Gi \
             --cpu 1 \
             --timeout 300 \
             --concurrency 80 \
-            --set-env-vars NEXT_PUBLIC_API_URL="https://arrow-rag-backend-70705019874.us-central1.run.app"
+            --set-env-vars NEXT_PUBLIC_API_URL="https://arrow-rag-backend-70705019874.us-central1.run.app" \
             --set-env-vars NODE_ENV=production \
             --set-env-vars SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }} \
             --allow-unauthenticated \
@@ -91,7 +91,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Service**: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Region**: ${{ env.REGION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: ${{ env.GCR_IMAGE }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ env.IMAGE }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- **URL**: ${{ steps.get-service-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
 

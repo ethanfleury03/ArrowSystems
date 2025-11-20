@@ -13,7 +13,7 @@ env:
   PROJECT_ID: arrow-rag-support-prod
   SERVICE_NAME: arrow-rag-backend
   REGION: us-central1
-  GCR_IMAGE: gcr.io/arrow-rag-support-prod/arrow-rag-backend
+  IMAGE: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend
 
 jobs:
   deploy:
@@ -27,18 +27,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: projects/70705019874/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Configure Docker for GCR
-        run: gcloud auth configure-docker --quiet
+      - name: Configure Docker for Artifact Registry
+        run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
 
       - name: Build Docker image
         uses: docker/build-push-action@v5
@@ -46,7 +47,7 @@ jobs:
           context: .
           file: ./backend/Dockerfile.backend
           push: true
-          tags: ${{ env.GCR_IMAGE }}:${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
@@ -56,7 +57,7 @@ jobs:
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ env.GCR_IMAGE }}:${{ github.sha }} \
+            --image ${{ env.IMAGE }}:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --platform managed \
             --memory 4Gi \
@@ -72,6 +73,7 @@ jobs:
             --set-env-vars ENABLE_INGESTION_ON_STARTUP=false \
             --set-env-vars PYTHONUNBUFFERED=1 \
             --set-env-vars ENV=prod \
+            --set-env-vars CORS_ALLOWED_ORIGINS="https://arrow-rag-frontend-70705019874.us-central1.run.app" \
             --allow-unauthenticated \
             --quiet
 
@@ -91,7 +93,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Service**: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Region**: ${{ env.REGION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: ${{ env.GCR_IMAGE }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ env.IMAGE }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- **URL**: ${{ steps.get-service-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
 
