@@ -335,6 +335,7 @@ jobs:
             --concurrency=80 \
             --set-env-vars=NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app \
             --set-env-vars=NODE_ENV=production \
+            --set-env-vars=SESSION_SECRET="${{ secrets.FRONTEND_SESSION_SECRET }}" \
             --allow-unauthenticated \
             --quiet
 
