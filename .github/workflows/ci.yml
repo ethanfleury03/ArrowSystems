@@ -113,7 +113,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Verify build context
+        run: |
+          echo "=== Checking build context ==="
+          ls -la
+          echo "=== Checking Dockerfile exists ==="
+          test -f ./backend/Dockerfile.backend && echo "✅ Dockerfile found" || echo "❌ Dockerfile not found"
+          echo "=== Checking backend directory ==="
+          ls -la backend/ | head -20
+
       - name: Build backend Docker image
+        id: build-backend
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -125,6 +135,20 @@ jobs:
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
+
+      - name: Verify backend image was created
+        run: |
+          echo "=== Checking for backend image immediately after build ==="
+          docker images | head -10
+          if docker images | grep -q duraflex-backend:ci; then
+            echo "✅ Backend image found after build"
+            docker images | grep duraflex-backend:ci
+          else
+            echo "❌ Backend image NOT found after build"
+            echo "=== All images ==="
+            docker images
+            exit 1
+          fi
 
       - name: Build frontend Docker image
         uses: docker/build-push-action@v5
