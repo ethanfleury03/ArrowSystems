@@ -154,10 +154,9 @@ jobs:
             NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app
             SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
 
-  deploy-backend:
-    name: Deploy Backend to Cloud Run
+  gcp-auth-check:
+    name: Validate GCP Authentication
     runs-on: ubuntu-latest
-    needs: [docker-build]
     permissions:
       contents: read
       id-token: write
@@ -166,10 +165,60 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: projects/70705019874/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
+
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Validate service account authentication
+        run: |
+          echo "Checking GCP auth..."
+          gcloud auth list
+
+      - name: Validate project access
+        run: |
+          gcloud config set project arrow-rag-support-prod
+          gcloud projects describe arrow-rag-support-prod
+
+      - name: Validate Artifact Registry access
+        run: |
+          gcloud artifacts repositories list \
+            --project=arrow-rag-support-prod \
+            --location=us-central1
+
+      - name: Validate Cloud Run access
+        run: |
+          gcloud run services list \
+            --platform=managed \
+            --region=us-central1
+
+      - name: Validate Cloud SQL access
+        run: |
+          gcloud sql instances list --project=arrow-rag-support-prod
+
+  deploy-backend:
+    name: Deploy Backend to Cloud Run
+    runs-on: ubuntu-latest
+    needs: [docker-build, gcp-auth-check]
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/70705019874/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
+
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -230,7 +279,7 @@ jobs:
   deploy-frontend:
     name: Deploy Frontend to Cloud Run
     runs-on: ubuntu-latest
-    needs: [frontend-build]
+    needs: [frontend-build, gcp-auth-check]
     permissions:
       contents: read
       id-token: write
