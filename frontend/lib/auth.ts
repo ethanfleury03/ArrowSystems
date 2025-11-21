@@ -60,7 +60,7 @@ const getSessionSecret = (): string => {
 // For local network access (IP addresses), allow HTTP cookies
 export const sessionOptions = {
   password: getSessionSecret(),
-  cookieName: 'app_session',
+  cookieName: 'app_session_v2', // Changed to v2 to invalidate all old sessions
   cookieOptions: {
     // Only use secure cookies if explicitly enabled AND on HTTPS
     // This allows local network access via IP address (HTTP)
