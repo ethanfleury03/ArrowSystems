@@ -106,8 +106,9 @@ export default function AdminAnalyticsPage() {
         params.append("machine_name", selectedMachine);
       }
 
-      const baseUrl = `${apiBaseUrl}/admin/analytics`;
-      // Cookie-based JWT is automatically sent with fetch requests
+      // All analytics requests go through Next.js API routes, which proxy to the backend
+      const baseUrl = `/api/admin/analytics`;
+      // Cookie-based JWT is automatically sent with fetch requests to /api/*
       const [queriesOverTime, queriesPerUser, queriesByMachine, tokenUsage, tokenUsagePerUser, documentUsage, topKeywords] =
         await Promise.all([
           fetch(`${baseUrl}/queries_over_time?${params}`, {
