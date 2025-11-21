@@ -11,7 +11,7 @@ export function middleware(request: NextRequest) {
   }
 
   // Get the session cookie
-  const sessionCookie = request.cookies.get('app_session');
+  const sessionCookie = request.cookies.get('app_session_v2');
   const pathname = request.nextUrl.pathname;
 
   // Redirect /register to /login (registration is disabled)
