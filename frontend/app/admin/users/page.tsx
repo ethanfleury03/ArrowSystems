@@ -549,8 +549,9 @@ export default function AdminUsersPage() {
     }
     setActionSubmitting(true);
     try {
-      // Cookie-based JWT is automatically sent with fetch requests
-      const response = await fetch(`${apiBaseUrl}/admin/delete_user/${selectedUser.id}`, {
+      // Cookie-based JWT is automatically sent with fetch requests.
+      // Use the Next.js API route which proxies to the backend DELETE /admin/users/{userId}.
+      const response = await fetch(`${apiBaseUrl}/admin/users/${selectedUser.id}`, {
         method: "DELETE",
         credentials: "include",
       });

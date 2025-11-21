@@ -2003,12 +2003,17 @@ async def get_all_documents(request: Request):
 
         from .utils.document_metadata import get_document_metadata
         
-        # Get ingestion metadata for all documents in the pipeline
+        # Get ingestion metadata for all documents in the pipeline and log basic stats.
         ingestion_metadata_map = {}
+
         def _get_ingestion_metadata():
             with SessionLocal() as session:
                 from backend.utils.db import DocumentIngestionMetadata
                 all_metadata = session.query(DocumentIngestionMetadata).all()
+                logger.info(
+                    "admin_documents_ingestion_metadata",
+                    total=len(all_metadata),
+                )
                 return {
                     meta.filename: {
                         "ingestion_status": meta.status,
@@ -2018,7 +2023,7 @@ async def get_all_documents(request: Request):
                     }
                     for meta in all_metadata
                 }
-        
+
         ingestion_metadata_map = await run_sync(_get_ingestion_metadata)
         
         documents = []
@@ -2055,7 +2060,7 @@ async def get_all_documents(request: Request):
                                 except:
                                     pass
         
-        # Get document IDs from ALL sources (corpus_nodes, docstore, AND filesystem)
+        # Get document IDs from ALL sources (corpus_nodes, docstore, filesystem, AND DB)
         # Combine all sources to ensure we get all documents
         all_filenames = set(seen_filenames)  # Start with corpus_nodes filenames
         
@@ -2104,7 +2109,20 @@ async def get_all_documents(request: Request):
                         if os.path.isfile(file_path):
                             all_filenames.add(filename)
         
-        logger.info(f"Found {len(all_filenames)} total unique documents across all sources")
+        # Source 3: Ensure all filenames from ingestion metadata are included,
+        # even if they are not yet in the vector index or filesystem. This
+        # makes the admin list reflect the database state, independent of RAG.
+        if ingestion_metadata_map:
+            for filename in ingestion_metadata_map.keys():
+                if filename:
+                    all_filenames.add(filename)
+
+        logger.info(
+            "admin_documents_sources_summary",
+            total_unique=len(all_filenames),
+            from_corpus=len(seen_filenames),
+            from_ingestion=len(ingestion_metadata_map),
+        )
         
         # Convert to list for processing
         doc_ids = list(all_filenames)
@@ -2116,7 +2134,10 @@ async def get_all_documents(request: Request):
         logger.info(f"Total unique documents: {len(doc_ids)}")
         
         if not doc_ids:
-            logger.warning("No documents found in corpus_nodes, docstore, or filesystem")
+            logger.warning(
+                "admin_documents_no_docs_found",
+                message="No documents found in corpus_nodes, docstore, filesystem, or ingestion metadata",
+            )
             return {"documents": [], "total": 0}
         
         # Build document list (optimized - no nested loops)
