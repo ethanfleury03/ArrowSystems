@@ -63,11 +63,29 @@ export async function iamBackendRequest(
     const response = await client.request(requestConfig);
 
     // Convert the response to a standard Response object
+    // Preserve all headers from the backend response, especially Set-Cookie for auth
+    const responseHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    
+    // Copy important headers from backend response
+    if (response.headers) {
+      // Preserve Set-Cookie header for authentication
+      if (response.headers['set-cookie']) {
+        responseHeaders['set-cookie'] = response.headers['set-cookie'];
+      }
+      // Preserve other useful headers
+      const headersToPreserve = ['content-type', 'cache-control', 'etag'];
+      headersToPreserve.forEach(headerName => {
+        if (response.headers[headerName]) {
+          responseHeaders[headerName] = response.headers[headerName];
+        }
+      });
+    }
+
     return new Response(JSON.stringify(response.data), {
       status: response.status,
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: responseHeaders,
     });
   } catch (error: any) {
     console.error('IAM Backend Request Error:', {
@@ -79,11 +97,18 @@ export async function iamBackendRequest(
 
     // If the error has a response, return it as a Response object
     if (error.response) {
+      const errorHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      
+      // Preserve headers even in error responses
+      if (error.response.headers && error.response.headers['set-cookie']) {
+        errorHeaders['set-cookie'] = error.response.headers['set-cookie'];
+      }
+      
       return new Response(JSON.stringify(error.response.data || { detail: 'Backend request failed' }), {
         status: error.response.status || 500,
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: errorHeaders,
       });
     }
 

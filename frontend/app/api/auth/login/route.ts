@@ -74,7 +74,10 @@ export async function POST(request: NextRequest) {
       response.headers.set('set-cookie', setCookieHeader);
     }
     
-    console.log(`Login successful for user: ${email} (role: ${user.role})`);
+    // Only log in development to reduce production log noise
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`Login successful for user: ${email} (role: ${user.role})`);
+    }
     return response;
   } catch (error) {
     console.error('Login error:', error);

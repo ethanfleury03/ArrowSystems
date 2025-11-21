@@ -39,7 +39,9 @@ class AuthConfig:
         # In production, always use secure cookies
         # In development, allow HTTP for local testing
         self.AUTH_COOKIE_SECURE = self._get_cookie_secure()
-        self.AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "lax")
+        # SameSite=None is required for cross-origin cookies (frontend/backend on different domains)
+        # This requires Secure=true (HTTPS only)
+        self.AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "none" if settings.is_prod else "lax")
         self.AUTH_COOKIE_HTTPONLY = True  # Always HTTP-only for security
         self.AUTH_COOKIE_PATH = "/"
         

@@ -64,6 +64,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy .next/static for static assets
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# Copy sharp for image optimization in standalone mode
+# Sharp needs its native bindings which aren't included in standalone by default
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/sharp ./node_modules/sharp
+
 USER nextjs
 
 EXPOSE 3000
