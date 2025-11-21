@@ -19,12 +19,12 @@ export async function POST(
 
     const body = await request.json();
 
-    // Forward JWT in Authorization header to backend
+    // Forward JWT in custom header to backend (X-User-Token)
     const response = await iamBackendPost(
       `/admin/documents/${encodeURIComponent(params.filename)}/toggle`, 
       body,
       {
-        'Authorization': `Bearer ${token}`,
+        'X-User-Token': token,
       }
     );
 

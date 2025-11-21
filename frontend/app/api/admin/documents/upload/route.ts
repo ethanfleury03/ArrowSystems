@@ -69,10 +69,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Forward JWT in Authorization header to backend
+    // Forward JWT in custom header to backend (X-User-Token)
     const headers: any = {
       ...backendFormData.getHeaders(),
-      'Authorization': `Bearer ${token}`,
+      'X-User-Token': token,
     };
 
     const response = await client.request({

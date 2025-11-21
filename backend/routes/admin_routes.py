@@ -8,7 +8,6 @@ import sys
 
 import jwt
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import select, func, desc, and_, or_, case, text, inspect
 from sqlalchemy.orm import Session
@@ -80,7 +79,6 @@ class MachineCreateRequest(BaseModel):
 
 def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager]]) -> APIRouter:
     router = APIRouter(prefix="/admin", tags=["admin"])
-    security = HTTPBearer()
 
     async def get_db_manager() -> DatabaseManager:
         manager = db_manager_getter()
@@ -89,13 +87,28 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         return manager
 
     async def get_current_admin(
-        credentials: HTTPAuthorizationCredentials = Depends(security),
+        request: Request,
         manager: DatabaseManager = Depends(get_db_manager),
     ) -> Dict[str, str]:
-        if not credentials or not credentials.credentials:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization token")
+        """
+        Get the current admin user from the JWT.
 
-        token = credentials.credentials
+        IMPORTANT:
+        - The Cloud Run backend is protected by IAM and uses the Authorization
+          header for the Google ID token.
+        - Our own user JWT is passed separately in the `X-User-Token` header
+          by the Next.js API routes.
+        - Do NOT try to read the user JWT from the Authorization header here,
+          or you'll be decoding the Google IAM token instead of our HS256 JWT.
+        """
+        # Prefer custom header for user JWT (set by frontend API routes)
+        token = request.headers.get("X-User-Token")
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing user token",
+            )
+
         try:
             payload = decode_access_token(token)
         except jwt.ExpiredSignatureError:
