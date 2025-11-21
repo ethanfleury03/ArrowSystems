@@ -62,23 +62,23 @@ jobs:
             echo "✅ JWT_SECRET_KEY required in production"
           fi
 
-      - name: Validate Deployment Workflows
+      - name: Validate Deployment Configuration
         run: |
           echo "🔍 Validating Deployment Configuration..."
           
-          # Backend has JWT secret
-          if ! grep -q 'JWT_SECRET_KEY.*secrets.JWT_SECRET_KEY' .github/workflows/deploy-backend.yml; then
-            echo "❌ Backend workflow missing JWT_SECRET_KEY!"
+          # Check CI workflow has JWT secret for backend deployment
+          if ! grep -q 'JWT_SECRET_KEY.*secrets.JWT_SECRET_KEY' .github/workflows/ci.yml; then
+            echo "❌ CI workflow missing JWT_SECRET_KEY!"
             exit 1
           fi
-          echo "✅ Backend workflow configured"
+          echo "✅ Backend deployment configured with JWT_SECRET_KEY"
           
-          # Frontend has API URL
-          if ! grep -q 'NEXT_PUBLIC_API_URL' .github/workflows/deploy-frontend.yml; then
-            echo "❌ Frontend workflow missing API URL!"
+          # Check CI workflow has API URL for frontend
+          if ! grep -q 'NEXT_PUBLIC_API_URL' .github/workflows/ci.yml; then
+            echo "❌ CI workflow missing API URL!"
             exit 1
           fi
-          echo "✅ Frontend workflow configured"
+          echo "✅ Frontend deployment configured with API URL"
           
           echo ""
           echo "✅ All secrets and configuration validated!"
@@ -406,7 +406,6 @@ jobs:
             --port=3000 \
             --set-env-vars=NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app \
             --set-env-vars=NODE_ENV=production \
-            --set-env-vars=PORT=3000 \
             --set-env-vars=SESSION_SECRET="${{ secrets.FRONTEND_SESSION_SECRET }}" \
             --allow-unauthenticated \
             --quiet
