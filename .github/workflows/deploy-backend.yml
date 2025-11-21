@@ -66,6 +66,7 @@ jobs:
             --concurrency 80 \
             --cpu-boost \
             --set-cloudsql-instances arrow-rag-support-prod:us-central1:rag-postgres \
+            --set-env-vars JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars DATABASE_URL="${{ secrets.DATABASE_URL }}" \
             --set-env-vars HF_HOME=/tmp/hf \
             --set-env-vars TRANSFORMERS_CACHE=/tmp/hf \
