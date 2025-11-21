@@ -89,8 +89,6 @@ export default function AdminAnalyticsPage() {
 
   // Fetch analytics data
   const fetchAnalytics = useCallback(async () => {
-    if (!authToken) return;
-
     setIsLoadingAnalytics(true);
     setAnalyticsError(null);
 
@@ -109,28 +107,29 @@ export default function AdminAnalyticsPage() {
       }
 
       const baseUrl = `${apiBaseUrl}/admin/analytics`;
+      // Cookie-based JWT is automatically sent with fetch requests
       const [queriesOverTime, queriesPerUser, queriesByMachine, tokenUsage, tokenUsagePerUser, documentUsage, topKeywords] =
         await Promise.all([
           fetch(`${baseUrl}/queries_over_time?${params}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: "include",
           }).then((r) => r.json()),
           fetch(`${baseUrl}/queries_per_user?${params}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: "include",
           }).then((r) => r.json()),
           fetch(`${baseUrl}/queries_by_machine?${params}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: "include",
           }).then((r) => r.json()),
           fetch(`${baseUrl}/token_usage?${params}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: "include",
           }).then((r) => r.json()),
           fetch(`${baseUrl}/token_usage_per_user?${params}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: "include",
           }).then((r) => r.json()),
           fetch(`${baseUrl}/document_usage?${params}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: "include",
           }).then((r) => r.json()),
           fetch(`${baseUrl}/top_keywords?${params}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: "include",
           }).then((r) => r.json()),
         ]);
 
@@ -149,14 +148,14 @@ export default function AdminAnalyticsPage() {
     } finally {
       setIsLoadingAnalytics(false);
     }
-  }, [authToken, apiBaseUrl, getDateRange, selectedUserId, selectedMachine]);
+  }, [apiBaseUrl, getDateRange, selectedUserId, selectedMachine]);
 
   // Fetch on mount and when filters change
   useEffect(() => {
-    if (isAdmin && authToken) {
+    if (isAdmin) {
       fetchAnalytics();
     }
-  }, [isAdmin, authToken, fetchAnalytics]);
+  }, [isAdmin, fetchAnalytics]);
 
   // Calculate KPIs
   const kpis = useMemo(() => {
