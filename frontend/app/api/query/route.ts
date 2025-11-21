@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getBackendUrl } from '@/lib/backend-url';
+import { iamBackendPost } from '@/lib/iam-backend';
 
 // Query summarization configuration
 const SUMMARIZE_ENABLED = process.env.ENABLE_QUERY_SUMMARIZATION !== 'false'; // Default: enabled
@@ -9,20 +9,14 @@ const SUMMARIZE_MIN_LENGTH = parseInt(process.env.QUERY_SUMMARIZE_MIN_LENGTH || 
  * Summarize a long query using the backend summarization endpoint.
  * Only called if query exceeds min_length threshold.
  */
-async function summarizeQuery(query: string, backendUrl: string, authToken?: string | null): Promise<{ summary: string; wasSummarized: boolean; contentType?: string }> {
+async function summarizeQuery(query: string, authToken?: string | null): Promise<{ summary: string; wasSummarized: boolean; contentType?: string }> {
   try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
+    const headers: Record<string, string> = {};
     if (authToken) {
       headers['Authorization'] = `Bearer ${authToken}`;
     }
     
-    const response = await fetch(`${backendUrl}/summarize-query`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ query }),
-    });
+    const response = await iamBackendPost('/summarize-query', { query }, headers);
 
     if (!response.ok) {
       // If summarization fails, return original query
@@ -45,9 +39,6 @@ async function summarizeQuery(query: string, backendUrl: string, authToken?: str
 
 export async function POST(request: NextRequest) {
   try {
-    // Detect backend URL from request hostname (for network access)
-    const BACKEND_URL = getBackendUrl(request);
-    
     const body = await request.json();
     let query = body.query;
     let summarizationInfo = null;
@@ -57,7 +48,7 @@ export async function POST(request: NextRequest) {
     
     // Summarize long queries if enabled
     if (SUMMARIZE_ENABLED && query && query.length >= SUMMARIZE_MIN_LENGTH) {
-      const result = await summarizeQuery(query, BACKEND_URL, authToken);
+      const result = await summarizeQuery(query, authToken);
       query = result.summary;
       if (result.wasSummarized) {
         summarizationInfo = {
@@ -72,32 +63,16 @@ export async function POST(request: NextRequest) {
     // Update body with potentially summarized query
     const processedBody = { ...body, query };
     
-    // Add timeout and better error handling
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
-    
     try {
-      // Extract JWT token from request headers (sent by frontend)
-      const authToken = request.headers.get('X-Auth-Token');
-      
       // Build headers for backend request
-      const backendHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
+      const backendHeaders: Record<string, string> = {};
       
       // Forward Authorization header to backend if token is present
       if (authToken) {
         backendHeaders['Authorization'] = `Bearer ${authToken}`;
       }
       
-      const response = await fetch(`${BACKEND_URL}/query`, {
-        method: 'POST',
-        headers: backendHeaders,
-        body: JSON.stringify(processedBody),
-        signal: controller.signal,
-      });
-      
-      clearTimeout(timeoutId);
+      const response = await iamBackendPost('/query', processedBody, backendHeaders);
 
       if (!response.ok) {
         const error = await response.json();
@@ -116,13 +91,11 @@ export async function POST(request: NextRequest) {
       
       return NextResponse.json(data);
     } catch (fetchError) {
-      clearTimeout(timeoutId);
-      
-      // Check if it was aborted (timeout)
-      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-        console.error('Request timeout after 5 minutes');
+      // Check if it was a timeout or other error
+      if (fetchError instanceof Error) {
+        console.error('Request error:', fetchError.message);
         return NextResponse.json(
-          { detail: 'Request timed out. The query is taking too long to process. Please try a simpler query or check backend logs.' },
+          { detail: fetchError.message || 'Request failed' },
           { status: 504 }
         );
       }
@@ -132,27 +105,11 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('API route error:', error);
     
-    // Detect backend URL for error message (fallback if detection failed)
-    let backendUrlForError = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-    try {
-      backendUrlForError = getBackendUrl(request);
-    } catch {
-      // Use default if detection fails
-    }
-    
     // Check if it's a network error (backend not reachable)
     if (error instanceof TypeError && (error.message.includes('fetch') || error.message.includes('ECONNREFUSED'))) {
       return NextResponse.json(
-        { detail: `Cannot connect to backend at ${backendUrlForError}. Please check your backend URL configuration.` },
+        { detail: 'Cannot connect to backend. Please check your backend configuration.' },
         { status: 503 }
-      );
-    }
-    
-    // Check for timeout
-    if (error instanceof Error && error.name === 'AbortError') {
-      return NextResponse.json(
-        { detail: 'Request timed out. The query is taking too long to process.' },
-        { status: 504 }
       );
     }
     

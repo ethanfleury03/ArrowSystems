@@ -1,15 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendPost } from '@/lib/iam-backend';
 
 export async function POST(request: NextRequest) {
   try {
-    const response = await fetch(`${BACKEND_URL}/admin/summaries/generate-batch`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    const response = await iamBackendPost('/admin/summaries/generate-batch', {});
 
     if (!response.ok) {
       const error = await response.json();

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendPost } from '@/lib/iam-backend';
 
 export async function POST(
   request: NextRequest,
@@ -9,13 +8,7 @@ export async function POST(
   try {
     const body = await request.json();
 
-    const response = await fetch(`${BACKEND_URL}/admin/documents/${encodeURIComponent(params.filename)}/metadata`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+    const response = await iamBackendPost(`/admin/documents/${encodeURIComponent(params.filename)}/metadata`, body);
 
     if (!response.ok) {
       const error = await response.json();

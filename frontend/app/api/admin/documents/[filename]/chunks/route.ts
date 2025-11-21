@@ -1,18 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendGet } from '@/lib/iam-backend';
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { filename: string } }
 ) {
   try {
-    const response = await fetch(`${BACKEND_URL}/admin/documents/${encodeURIComponent(params.filename)}/chunks`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    const response = await iamBackendGet(`/admin/documents/${encodeURIComponent(params.filename)}/chunks`);
 
     if (!response.ok) {
       const error = await response.json();

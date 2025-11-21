@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { setLoginSession } from '@/lib/auth';
+import { iamBackendPost } from '@/lib/iam-backend';
 
-const BACKEND_URL =
-  process.env.BACKEND_URL ||
-  process.env.NEXT_PUBLIC_API_URL ||
-  process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.SEED_ADMIN_EMAIL;
 const ADMIN_PASSWORD =
   process.env.ADMIN_PASSWORD || process.env.SEED_ADMIN_PASSWORD;
@@ -20,14 +17,9 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const loginResponse = await fetch(`${BACKEND_URL}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: ADMIN_EMAIL,
-        password: ADMIN_PASSWORD,
-      }),
-      cache: 'no-store',
+    const loginResponse = await iamBackendPost('/auth/login', {
+      email: ADMIN_EMAIL,
+      password: ADMIN_PASSWORD,
     });
 
     if (!loginResponse.ok) {
