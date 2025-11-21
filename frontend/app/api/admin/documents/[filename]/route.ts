@@ -1,12 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { iamBackendDelete } from '@/lib/iam-backend';
+import { extractJwtFromCookie } from '@/lib/authClient';
 
 export async function DELETE(
   request: NextRequest,
   { params }: { params: { filename: string } }
 ) {
   try {
-    const response = await iamBackendDelete(`/admin/documents/${encodeURIComponent(params.filename)}`);
+    // Extract JWT from cookie
+    const token = await extractJwtFromCookie();
+    
+    if (!token) {
+      return NextResponse.json(
+        { detail: 'Not authenticated' },
+        { status: 401 }
+      );
+    }
+
+    // Forward JWT in Authorization header to backend
+    const response = await iamBackendDelete(
+      `/admin/documents/${encodeURIComponent(params.filename)}`,
+      {
+        'Authorization': `Bearer ${token}`,
+      }
+    );
 
     if (!response.ok) {
       const error = await response.json();
