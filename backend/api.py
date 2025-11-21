@@ -24,11 +24,12 @@ from contextlib import asynccontextmanager
 warnings.filterwarnings('ignore', message='.*TRANSFORMERS_CACHE.*')
 warnings.filterwarnings('ignore', message='.*HF_HOME.*')
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
+import jwt
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -995,13 +996,44 @@ async def auth_logout(response: Response):
 
 
 @app.get("/auth/me", response_model=UserResponse)
-async def auth_get_current_user(
-    request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user_from_token)
-):
-    """Get current authenticated user information from JWT."""
+async def auth_get_current_user(request: Request):
+    """
+    Get current authenticated user information from JWT.
+    
+    IMPORTANT: This endpoint reads the user JWT from X-User-Token header, NOT Authorization.
+    Authorization header is reserved for Google IAM token (frontend→backend auth).
+    X-User-Token contains the HS256 JWT for user sessions.
+    """
     if not db_manager:
         raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Read user JWT from custom header (NOT Authorization - that's for IAM)
+    token = request.headers.get("X-User-Token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing user token",
+        )
+    
+    # Debug logging to verify we're decoding the right token type
+    try:
+        import jwt as pyjwt
+        header = pyjwt.get_unverified_header(token)
+        logger.info(f"[/auth/me] Decoding token: alg={header.get('alg')}, typ={header.get('typ')}, token_prefix={token[:20]}...")
+    except Exception as e:
+        logger.error(f"[/auth/me] Failed to read token header: {e}")
+        raise HTTPException(status_code=401, detail="Invalid token format")
+    
+    # Decode and validate the user JWT
+    try:
+        from .security import decode_access_token
+        current_user = decode_access_token(token)
+    except jwt.ExpiredSignatureError:
+        logger.warning(f"[/auth/me] Token expired")
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.PyJWTError as e:
+        logger.error(f"[/auth/me] JWT decode failed: {e}, alg={header.get('alg')}")
+        raise HTTPException(status_code=401, detail="Invalid token")
     
     # Get email from JWT payload
     email = current_user.get("email")
@@ -1012,6 +1044,8 @@ async def auth_get_current_user(
     user = await db_manager.get_user_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    logger.info(f"[/auth/me] Successfully authenticated user: {email}")
     return user
 
 

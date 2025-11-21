@@ -14,13 +14,14 @@ export async function GET(request: NextRequest) {
       );
     }
     
-    // Call backend with JWT in Authorization header
+    // Call backend with user JWT in custom header (NOT Authorization - that's for IAM)
+    // Authorization header is used for Google IAM token, X-User-Token is for our app JWT
     const response = await iamBackendGet('/auth/me', {
-      'Authorization': `Bearer ${token}`,
+      'X-User-Token': token,
     });
 
     if (!response.ok) {
-      const error = await response.json();
+      const error = await response.json().catch(() => ({ detail: 'Failed to fetch user' }));
       return NextResponse.json(
         { detail: error.detail || 'Failed to fetch user' },
         { status: response.status }
