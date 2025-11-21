@@ -23,7 +23,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      secrets: read
 
     steps:
       - name: Checkout code
