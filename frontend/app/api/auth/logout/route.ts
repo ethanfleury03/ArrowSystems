@@ -3,8 +3,7 @@ import { iamBackendPost } from '@/lib/iam-backend';
 
 export async function POST(request: NextRequest) {
   try {
-    // Call backend logout endpoint
-    // Backend will clear the JWT cookie
+    // Call backend logout endpoint (optional - backend also clears its cookie)
     const backendResponse = await iamBackendPost('/auth/logout', {});
 
     if (!backendResponse.ok) {
@@ -12,18 +11,13 @@ export async function POST(request: NextRequest) {
       // Even if backend fails, clear the cookie on frontend
     }
 
-    // Forward Set-Cookie header from backend (cookie clearing)
-    const setCookieHeader = backendResponse.headers.get('set-cookie');
-    
     const response = NextResponse.json(
       { message: 'Logged out successfully' },
       { status: 200 }
     );
     
-    // Forward cookie-clearing headers from backend
-    if (setCookieHeader) {
-      response.headers.set('set-cookie', setCookieHeader);
-    }
+    // Clear the frontend's JWT cookie
+    response.cookies.delete('access_token');
     
     return response;
   } catch (error) {

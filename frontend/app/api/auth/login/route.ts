@@ -55,9 +55,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Forward Set-Cookie header from backend to browser
-    // The backend sets the JWT in an HTTP-only cookie
+    // Extract JWT token from backend's Set-Cookie header
+    // Backend sets the cookie on its domain, but we need it on the frontend domain
+    let jwtToken: string | null = null;
     const setCookieHeader = backendResponse.headers.get('set-cookie');
+    if (setCookieHeader) {
+      const match = setCookieHeader.match(/access_token=([^;]+)/);
+      if (match) {
+        jwtToken = match[1];
+      }
+    }
+    
+    if (!jwtToken) {
+      console.error('No JWT token found in backend response');
+      return NextResponse.json(
+        { error: 'Authentication token not received from backend' },
+        { status: 502 }
+      );
+    }
     
     const response = NextResponse.json(
       {
@@ -69,9 +84,15 @@ export async function POST(request: NextRequest) {
       { status: 200 }
     );
     
-    // Forward the cookie from backend
-    if (setCookieHeader) {
-      response.headers.set('set-cookie', setCookieHeader);
+    // Set JWT cookie on the frontend domain
+    if (jwtToken) {
+      response.cookies.set('access_token', jwtToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+        path: '/',
+        maxAge: undefined, // Session cookie - expires when browser closes
+      });
     }
     
     // Only log in development to reduce production log noise
