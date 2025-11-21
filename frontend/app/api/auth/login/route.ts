@@ -84,14 +84,14 @@ export async function POST(request: NextRequest) {
       { status: 200 }
     );
     
-    // Set JWT cookie on the frontend domain
+    // Set JWT cookie on the frontend domain (overwrites any existing cookie)
     if (jwtToken) {
       response.cookies.set('access_token', jwtToken, {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
         path: '/',
-        maxAge: undefined, // Session cookie - expires when browser closes
+        // No maxAge = session cookie (expires when browser closes)
       });
     }
     

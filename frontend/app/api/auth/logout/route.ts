@@ -17,7 +17,14 @@ export async function POST(request: NextRequest) {
     );
     
     // Clear the frontend's JWT cookie
-    response.cookies.delete('access_token');
+    // Use set with max-age=0 to ensure it's cleared across all browsers
+    response.cookies.set('access_token', '', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      path: '/',
+      maxAge: 0,
+    });
     
     return response;
   } catch (error) {
