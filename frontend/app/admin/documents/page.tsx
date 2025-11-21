@@ -61,7 +61,6 @@ const getStatusLabel = (status: string | null | undefined): string => {
 };
 
 export default function AdminDocumentsPage() {
-  const [authToken, setAuthToken] = useState<string | null>(null);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loadingTable, setLoadingTable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -140,25 +139,15 @@ export default function AdminDocumentsPage() {
   };
 
   const fetchAllowedMachineModels = useCallback(
-    async (token: string) => {
+    async () => {
       try {
         // Fetch selectable machine models (excludes "Any" and includes "GENERAL")
         // For documents, we want all models except "Any" (which is only for user machine access)
+        // Cookie-based JWT is automatically sent with fetch requests
         const response = await fetch(`${apiBaseUrl}/admin/machine_models`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          credentials: "include",
         });
         if (!response.ok) {
-          // Handle 401 Unauthorized - clear token and redirect to login
-          if (response.status === 401) {
-            console.warn("Authentication failed - clearing token and redirecting to login");
-            localStorage.removeItem("auth_token");
-            localStorage.removeItem("user_profile");
-            setAuthToken(null);
-            window.location.href = "/login";
-            return;
-          }
           console.warn(`Failed to fetch machine models: ${response.status}`);
           return;
         }
@@ -177,26 +166,15 @@ export default function AdminDocumentsPage() {
   );
 
   const fetchDocuments = useCallback(
-    async (token: string) => {
+    async () => {
       setLoadingTable(true);
       setError(null);
       try {
+        // Cookie-based JWT is automatically sent with fetch requests
         const response = await fetch(`${apiBaseUrl}/admin/documents`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          credentials: "include",
         });
         if (!response.ok) {
-          // Handle 401 Unauthorized - clear token and redirect to login
-          if (response.status === 401) {
-            console.warn("Authentication failed - clearing token and redirecting to login");
-            localStorage.removeItem("auth_token");
-            localStorage.removeItem("user_profile");
-            setAuthToken(null);
-            // Redirect to login page
-            window.location.href = "/login";
-            return;
-          }
           throw new Error(`Failed to load documents (${response.status})`);
         }
         const data = await response.json();
@@ -221,16 +199,12 @@ export default function AdminDocumentsPage() {
   useEffect(() => {
     // Cookie-based JWT is automatically sent with fetch requests
     // Admin layout already verified user is ADMIN
-    // Set a placeholder token to satisfy the functions (they'll use cookies anyway)
-    setAuthToken("cookie-based");
-    fetchDocuments("cookie-based");
-    fetchAllowedMachineModels("cookie-based");
+    fetchDocuments();
+    fetchAllowedMachineModels();
   }, [fetchDocuments, fetchAllowedMachineModels]);
 
   // Poll for documents with active ingestion status (only when page is visible)
   useEffect(() => {
-    if (!authToken) return;
-
     const activeStatuses = ['PENDING_INGESTION', 'CHUNKING', 'READY_FOR_EMBEDDING', 'EMBEDDING', 'DELETING', 'REBUILDING_INDEX'];
     
     // Check if there are any active ingestions
@@ -255,11 +229,11 @@ export default function AdminDocumentsPage() {
       }
       
       // Fetch documents - the effect will re-run and check if polling should continue
-      fetchDocuments(authToken);
+      fetchDocuments();
     }, 5000); // Increased to 5 seconds
 
     return () => clearInterval(interval);
-  }, [documents, authToken, fetchDocuments]);
+  }, [documents, fetchDocuments]);
 
   const filteredDocuments = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
@@ -344,16 +318,16 @@ export default function AdminDocumentsPage() {
   };
 
   const handleToggleActive = async (doc: Document) => {
-    if (!authToken) return;
     setActionSubmitting(true);
     try {
       const encodedFilename = encodeURIComponent(doc.filename);
+      // Cookie-based JWT is automatically sent with fetch requests
       const response = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}/toggle`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${authToken}`,
           "Content-Type": "application/json",
         },
+        credentials: "include",
         body: JSON.stringify({ is_active: !doc.is_active }),
       });
       if (!response.ok) {
@@ -361,7 +335,7 @@ export default function AdminDocumentsPage() {
         throw new Error(extractApiError(detail) || "Failed to toggle document status");
       }
       showToast(`✅ Document ${!doc.is_active ? "enabled" : "disabled"}`);
-      await fetchDocuments(authToken);
+      await fetchDocuments();
     } catch (err) {
       console.error("Toggle document status failed:", err);
       showToast(err instanceof Error ? err.message : "Failed to toggle document status", "error");
@@ -371,7 +345,7 @@ export default function AdminDocumentsPage() {
   };
 
   const submitUpload = async () => {
-    if (!authToken || !uploadFile) return;
+    if (!uploadFile) return;
     
     // Validate machine model is selected
     if (!editMachineModel || editMachineModel.length === 0) {
@@ -397,11 +371,10 @@ export default function AdminDocumentsPage() {
       }
 
       setUploadProgress("Uploading file to server...");
+      // Cookie-based JWT is automatically sent with fetch requests
       const response = await fetch(`${apiBaseUrl}/admin/documents/upload`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
+        credentials: "include",
         body: formData,
       });
 
@@ -418,7 +391,7 @@ export default function AdminDocumentsPage() {
       );
       
       showToast(`✅ Document uploaded and ingested successfully`);
-      await fetchDocuments(authToken);
+      await fetchDocuments();
       
       // Small delay to show completion message
       setTimeout(() => {
@@ -435,7 +408,7 @@ export default function AdminDocumentsPage() {
 
 
   const submitEdit = async () => {
-    if (!authToken || !selectedDocument) return;
+    if (!selectedDocument) return;
     setActionSubmitting(true);
     try {
       const encodedFilename = encodeURIComponent(selectedDocument.filename);
@@ -466,12 +439,13 @@ export default function AdminDocumentsPage() {
       
       // Update via metadata endpoint if any changes
       if (Object.keys(body).length > 0) {
+        // Cookie-based JWT is automatically sent with fetch requests
         const response = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}/metadata`, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
+          credentials: "include",
           body: JSON.stringify(body),
         });
         if (!response.ok) {
@@ -481,7 +455,7 @@ export default function AdminDocumentsPage() {
       }
       
       showToast("✅ Document metadata updated");
-      await fetchDocuments(authToken);
+      await fetchDocuments();
       closeAllModals();
     } catch (err) {
       console.error("Edit document failed:", err);
@@ -492,7 +466,7 @@ export default function AdminDocumentsPage() {
   };
 
   const submitDelete = async () => {
-    if (!authToken || !selectedDocument) return;
+    if (!selectedDocument) return;
     if (deleteConfirmation !== "DELETE") {
       showToast("Please type DELETE to confirm", "error");
       return;
@@ -501,22 +475,19 @@ export default function AdminDocumentsPage() {
     try {
       // Use Phase 4 delete endpoint if metadata_id is available, otherwise use old endpoint
       let response;
+      // Cookie-based JWT is automatically sent with fetch requests
       if (selectedDocument.ingestion_metadata_id) {
         // Phase 4: Use metadata_id endpoint for safe delete with reindex
         response = await fetch(`${apiBaseUrl}/admin/documents/metadata/${selectedDocument.ingestion_metadata_id}`, {
           method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-          },
+          credentials: "include",
         });
       } else {
         // Fallback to old endpoint
         const encodedFilename = encodeURIComponent(selectedDocument.filename);
         response = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}`, {
           method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-          },
+          credentials: "include",
         });
       }
       
@@ -530,7 +501,7 @@ export default function AdminDocumentsPage() {
       setDeleteConfirmation("");
       
       showToast("✅ Document deletion started. The index is rebuilding in the background.");
-      await fetchDocuments(authToken);
+      await fetchDocuments();
     } catch (err) {
       console.error("Delete document failed:", err);
       showToast(err instanceof Error ? err.message : "Failed to delete document", "error");
