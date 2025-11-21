@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { setLoginSession } from '@/lib/auth';
 import { iamBackendPost } from '@/lib/iam-backend';
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.SEED_ADMIN_EMAIL;
@@ -17,6 +16,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    // Call backend login - backend will set JWT cookie
     const loginResponse = await iamBackendPost('/auth/login', {
       email: ADMIN_EMAIL,
       password: ADMIN_PASSWORD,
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { user } = await loginResponse.json();
+    const { user, message } = await loginResponse.json();
 
     if (!user?.id) {
       return NextResponse.json(
@@ -40,17 +40,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create response and set session
+    // Forward Set-Cookie header from backend to browser
+    const setCookieHeader = loginResponse.headers.get('set-cookie');
+    
     const response = NextResponse.json(
       {
-        message: 'Bypass login successful',
+        message: message || 'Bypass login successful',
         userId: user.id,
         email: user.email,
+        user,
       },
       { status: 200 }
     );
 
-    return await setLoginSession(user.id, request, response);
+    // Forward the cookie from backend
+    if (setCookieHeader) {
+      response.headers.set('set-cookie', setCookieHeader);
+    }
+
+    return response;
   } catch (error) {
     console.error('Bypass login error:', error);
     return NextResponse.json(

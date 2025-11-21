@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { setLoginSession } from '@/lib/auth';
 import { iamBackendPost } from '@/lib/iam-backend';
 
 export async function POST(request: NextRequest) {
@@ -16,6 +15,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Delegate authentication to backend using IAM-authenticated request
+    // Backend will set JWT cookie in response
     const backendResponse = await iamBackendPost('/auth/login', { email, password });
 
     if (!backendResponse.ok) {
@@ -45,29 +45,37 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { user, token } = await backendResponse.json() as { user: { id: string; role: string }; token: string };
-    if (!user || !token) {
+    const data = await backendResponse.json();
+    const { user, message } = data;
+    
+    if (!user) {
       return NextResponse.json(
         { error: 'Invalid response from authentication service' },
         { status: 502 }
       );
     }
 
-    // Create response and set session
+    // Forward Set-Cookie header from backend to browser
+    // The backend sets the JWT in an HTTP-only cookie
+    const setCookieHeader = backendResponse.headers.get('set-cookie');
+    
     const response = NextResponse.json(
       {
-        message: 'Login successful',
+        message: message || 'Login successful',
         userId: user.id,
         role: user.role,
         user,
-        token,
       },
       { status: 200 }
     );
     
-    const sessionResponse = await setLoginSession(user.id, request, response);
+    // Forward the cookie from backend
+    if (setCookieHeader) {
+      response.headers.set('set-cookie', setCookieHeader);
+    }
+    
     console.log(`Login successful for user: ${email} (role: ${user.role})`);
-    return sessionResponse;
+    return response;
   } catch (error) {
     console.error('Login error:', error);
     return NextResponse.json(

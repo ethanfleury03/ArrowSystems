@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -35,8 +35,9 @@ from .utils.migration_runner import run_migrations, check_pending_migrations, ch
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
 from .utils.saved_response_manager import SavedResponseManager
-from .security import create_access_token
+from .security import create_access_token, get_current_user_from_token
 from .routes.admin_routes import create_admin_router
+from .config.auth import auth_config
 from .logging_config import configure_logging, get_logger
 from .middleware.logging_middleware import LoggingMiddleware
 from .logging_context import set_user_id, set_user_role, get_user_id, get_user_role
@@ -742,7 +743,7 @@ class UserResponse(BaseModel):
 
 class LoginResponse(BaseModel):
     user: UserResponse
-    token: str
+    message: str
 
 
 # Helper function to conditionally apply rate limiting
@@ -889,8 +890,8 @@ async def database_health_check():
 
 @app.post("/auth/login", response_model=LoginResponse)
 @apply_rate_limit(settings.RATE_LIMIT_LOGIN)
-async def auth_login(request: Request):
-    """Login endpoint with rate limiting."""
+async def auth_login(request: Request, response: Response):
+    """Login endpoint with rate limiting. Sets JWT in HTTP-only cookie."""
     if not db_manager:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
@@ -913,6 +914,21 @@ async def auth_login(request: Request):
         
         token = create_access_token({"email": user["email"], "role": user["role"]})
         
+        # Set JWT in HTTP-only cookie
+        cookie_options = auth_config.get_cookie_options()
+        response.set_cookie(
+            key=cookie_options["key"],
+            value=token,
+            httponly=cookie_options["httponly"],
+            secure=cookie_options["secure"],
+            samesite=cookie_options["samesite"],
+            max_age=cookie_options["max_age"],
+            path=cookie_options["path"],
+        )
+        # Include domain only if set
+        if "domain" in cookie_options:
+            response.set_cookie(domain=cookie_options["domain"])
+        
         # Audit successful login
         await audit_log(
             "user_login",
@@ -923,15 +939,16 @@ async def auth_login(request: Request):
             request=request,
         )
         
-        return {"user": user, "token": token}
+        # Return only safe user data (no token in body)
+        return {"user": user, "message": "Login successful"}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Login error for {login_request.email}: {e}", exc_info=True)
+        logger.error(f"Login error for {login_request.email if 'login_request' in locals() else 'unknown'}: {e}", exc_info=True)
         await audit_log(
             "user_login_error",
             level="error",
-            user_id=login_request.email,
+            user_id=login_request.email if 'login_request' in locals() else "unknown",
             metadata={"error": str(e)},
             request=request,
         )
@@ -941,20 +958,45 @@ async def auth_login(request: Request):
         )
 
 
+@app.post("/auth/logout")
+async def auth_logout(response: Response):
+    """Logout endpoint. Clears authentication cookie."""
+    # Clear the JWT cookie
+    cookie_options = auth_config.get_cookie_options()
+    response.delete_cookie(
+        key=cookie_options["key"],
+        path=cookie_options["path"],
+    )
+    # Also set with max_age=0 to ensure it's cleared
+    response.set_cookie(
+        key=cookie_options["key"],
+        value="",
+        httponly=cookie_options["httponly"],
+        secure=cookie_options["secure"],
+        samesite=cookie_options["samesite"],
+        max_age=0,
+        path=cookie_options["path"],
+    )
+    
+    return {"message": "Logged out successfully"}
+
+
 @app.get("/auth/me", response_model=UserResponse)
-async def auth_get_current_user():
-    """Get current authenticated user information."""
+async def auth_get_current_user(
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user_from_token)
+):
+    """Get current authenticated user information from JWT."""
     if not db_manager:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    from .logging_context import get_user_id
-    user_id = get_user_id()
+    # Get email from JWT payload
+    email = current_user.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
     
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    # user_id is the email from the JWT token
-    user = await db_manager.get_user_by_email(user_id)
+    # Fetch user from database
+    user = await db_manager.get_user_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user

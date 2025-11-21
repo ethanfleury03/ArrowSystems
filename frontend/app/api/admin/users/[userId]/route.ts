@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { iamBackendPut, iamBackendDelete } from '@/lib/iam-backend';
+import { getJwtAuthHeaders, createUnauthorizedResponse } from '@/lib/adminAuthHelpers';
 
 export async function PUT(
   request: NextRequest,
@@ -7,10 +8,14 @@ export async function PUT(
 ) {
   try {
     const body = await request.json();
-    const authHeader = request.headers.get('Authorization');
-    const headers = authHeader ? { 'Authorization': authHeader } : undefined;
+    
+    // Get JWT auth headers
+    const authHeaders = await getJwtAuthHeaders();
+    if (!authHeaders) {
+      return createUnauthorizedResponse();
+    }
 
-    const response = await iamBackendPut(`/admin/users/${params.userId}`, body, headers);
+    const response = await iamBackendPut(`/admin/users/${params.userId}`, body, authHeaders);
 
     if (!response.ok) {
       const error = await response.json();
@@ -36,10 +41,13 @@ export async function DELETE(
   { params }: { params: { userId: string } }
 ) {
   try {
-    const authHeader = request.headers.get('Authorization');
-    const headers = authHeader ? { 'Authorization': authHeader } : undefined;
+    // Get JWT auth headers
+    const authHeaders = await getJwtAuthHeaders();
+    if (!authHeaders) {
+      return createUnauthorizedResponse();
+    }
 
-    const response = await iamBackendDelete(`/admin/users/${params.userId}`, headers);
+    const response = await iamBackendDelete(`/admin/users/${params.userId}`, authHeaders);
 
     if (!response.ok) {
       const error = await response.json();

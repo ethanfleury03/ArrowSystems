@@ -1,8 +1,35 @@
 import { redirect } from 'next/navigation';
-import { getUserFromSession, logout } from '@/lib/auth';
+import { extractJwtFromCookie } from '@/lib/authClient';
+import { iamBackendGet } from '@/lib/iam-backend';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import LogoutButton from './logout-button';
+
+async function getUserFromSession() {
+  // Extract JWT from cookie
+  const token = await extractJwtFromCookie();
+  
+  if (!token) {
+    return null;
+  }
+  
+  try {
+    // Call backend with JWT in Authorization header
+    const response = await iamBackendGet('/auth/me', {
+      'Authorization': `Bearer ${token}`,
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Error fetching user from session:', error);
+    return null;
+  }
+}
 
 export default async function AccountPage() {
   const user = await getUserFromSession();

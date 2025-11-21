@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { getAuthCookieName } from './lib/authClient';
 
 const disableAuth =
   process.env.DISABLE_AUTH === 'true' ||
@@ -10,8 +11,9 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Get the session cookie
-  const sessionCookie = request.cookies.get('app_session_v2');
+  // Get the JWT auth cookie
+  const authCookieName = getAuthCookieName();
+  const authCookie = request.cookies.get(authCookieName);
   const pathname = request.nextUrl.pathname;
 
   // Redirect /register to /login (registration is disabled)
@@ -21,7 +23,7 @@ export function middleware(request: NextRequest) {
 
   // Allow access to login page
   if (pathname === '/login') {
-    if (sessionCookie) {
+    if (authCookie) {
       // Redirect to home if already logged in
       return NextResponse.redirect(new URL('/', request.url));
     }
@@ -30,7 +32,7 @@ export function middleware(request: NextRequest) {
   }
 
   // Protect all other routes (including root)
-  if (!sessionCookie) {
+  if (!authCookie) {
     // Only redirect to login if not already going there (prevent redirect loops)
     // Clean the URL to avoid query parameters that might cause issues
     const loginUrl = new URL('/login', request.url);
