@@ -317,7 +317,7 @@ jobs:
             --image=us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }} \
             --region=us-central1 \
             --platform=managed \
-            --memory=4Gi \
+            --memory=8Gi \  # increased from 4Gi to prevent OOM when loading BGE large model
             --cpu=2 \
             --timeout=900 \
             --concurrency=80 \
