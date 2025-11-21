@@ -57,6 +57,26 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install --no-cache-dir -r /tmp/requirements.txt
 
+# Pre-download Hugging Face / sentence-transformers models into a dedicated
+# cache directory so they are baked into the image and available on Cloud Run.
+ENV HF_HOME=/app/.cache/huggingface \
+    TRANSFORMERS_CACHE=/app/.cache/huggingface \
+    HF_DATASETS_CACHE=/app/.cache/huggingface \
+    SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
+
+RUN mkdir -p /app/.cache/huggingface && \
+    python - << 'EOF'
+from sentence_transformers import SentenceTransformer
+
+models = [
+    "BAAI/bge-large-en-v1.5",
+]
+
+for name in models:
+    print(f"Pre-downloading {name} ...")
+    SentenceTransformer(name)
+EOF
+
 # Conditionally install development dependencies
 # This layer only rebuilds when BUILD_ENV changes or dependencies stage is invalidated
 RUN if [ "$BUILD_ENV" = "development" ]; then \
@@ -94,6 +114,9 @@ RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/hugg
 # Copy Python dependencies from dependencies stage (no build tools)
 COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=dependencies /usr/local/bin /usr/local/bin
+
+# Copy pre-downloaded Hugging Face cache from dependencies stage
+COPY --from=dependencies /app/.cache/huggingface /app/.cache/huggingface
 
 # Set working directory for app code
 WORKDIR /app

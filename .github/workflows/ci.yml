@@ -325,9 +325,9 @@ jobs:
             --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
             --set-env-vars=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            --set-env-vars=HF_HOME=/tmp/hf \
-            --set-env-vars=TRANSFORMERS_CACHE=/tmp/hf \
-            --set-env-vars=SENTENCE_TRANSFORMERS_HOME=/tmp/hf \
+            --set-env-vars=HF_HOME=/app/.cache/huggingface \
+            --set-env-vars=TRANSFORMERS_CACHE=/app/.cache/huggingface \
+            --set-env-vars=SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface \
             --set-env-vars=ENABLE_INGESTION_ON_STARTUP=false \
             --set-env-vars=PYTHONUNBUFFERED=1 \
             --set-env-vars=ENV=prod \
