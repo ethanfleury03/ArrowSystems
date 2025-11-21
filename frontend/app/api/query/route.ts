@@ -88,7 +88,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Map client body to backend QueryRequest shape
+    // Map client body to backend QueryRequest shape.
+    // NOTE: FastAPI is expecting the body to be wrapped under the "query_request"
+    // key (see 422 detail: loc ["query", "query_request"]). We therefore embed
+    // the QueryRequest fields under query_request.
     const {
       top_k,
       alpha,
@@ -99,44 +102,48 @@ export async function POST(request: NextRequest) {
       session_id,
     } = body;
 
-    const backendBody: Record<string, any> = {
+    const queryRequest: Record<string, any> = {
       query,
     };
 
     // Optional fields - only include when valid so backend defaults still work
     if (typeof session_id === 'string' && session_id.trim().length > 0) {
-      backendBody.session_id = session_id;
+      queryRequest.session_id = session_id;
     }
 
     if (top_k !== undefined && top_k !== null && top_k !== '') {
       const parsedTopK = Number(top_k);
       if (!Number.isNaN(parsedTopK)) {
-        backendBody.top_k = parsedTopK;
+        queryRequest.top_k = parsedTopK;
       }
     }
 
     if (alpha !== undefined && alpha !== null && alpha !== '') {
       const parsedAlpha = Number(alpha);
       if (!Number.isNaN(parsedAlpha)) {
-        backendBody.alpha = parsedAlpha;
+        queryRequest.alpha = parsedAlpha;
       }
     }
 
     if (typeof dynamic_windowing === 'boolean') {
-      backendBody.dynamic_windowing = dynamic_windowing;
+      queryRequest.dynamic_windowing = dynamic_windowing;
     }
 
     if (metadata_filters && typeof metadata_filters === 'object') {
-      backendBody.metadata_filters = metadata_filters;
+      queryRequest.metadata_filters = metadata_filters;
     }
 
     if (typeof machine_confirmation === 'boolean') {
-      backendBody.machine_confirmation = machine_confirmation;
+      queryRequest.machine_confirmation = machine_confirmation;
     }
 
     if (typeof selected_machine === 'string' && selected_machine.trim().length > 0) {
-      backendBody.selected_machine = selected_machine;
+      queryRequest.selected_machine = selected_machine;
     }
+
+    const backendBody: Record<string, any> = {
+      query_request: queryRequest,
+    };
 
     try {
       // Call backend /query with user JWT in X-User-Token header
