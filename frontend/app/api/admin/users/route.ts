@@ -14,9 +14,9 @@ export async function GET(request: NextRequest) {
       );
     }
     
-    // Forward JWT in Authorization header to backend
+    // Forward JWT in custom header to backend (X-User-Token)
     const response = await iamBackendGet('/admin/users', {
-      'Authorization': `Bearer ${token}`,
+      'X-User-Token': token,
     });
 
     if (!response.ok) {
@@ -52,9 +52,9 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    // Forward JWT in Authorization header to backend
+    // Forward JWT in custom header to backend (X-User-Token)
     const response = await iamBackendPost('/admin/users', body, {
-      'Authorization': `Bearer ${token}`,
+      'X-User-Token': token,
     });
 
     if (!response.ok) {

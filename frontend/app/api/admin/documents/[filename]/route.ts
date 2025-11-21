@@ -17,11 +17,11 @@ export async function DELETE(
       );
     }
 
-    // Forward JWT in Authorization header to backend
+    // Forward JWT in custom header to backend (X-User-Token)
     const response = await iamBackendDelete(
       `/admin/documents/${encodeURIComponent(params.filename)}`,
       {
-        'Authorization': `Bearer ${token}`,
+        'X-User-Token': token,
       }
     );
 

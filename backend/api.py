@@ -1939,12 +1939,14 @@ async def get_all_documents():
     Get all documents in the index with enhanced metadata.
     Returns list of documents with metadata including status, machine_model, etc.
     Also includes documents in the ingestion pipeline (Phase 2).
+
+    IMPORTANT:
+    - This admin listing endpoint should work even if the RAG pipeline
+      has not been initialized. It reads from the database and document
+      metadata tables directly.
+    - RAG pipeline readiness is enforced separately on query/ingestion
+      endpoints (e.g. /query, /admin/documents/upload processing, etc.).
     """
-    global rag_pipeline
-    
-    if not rag_pipeline or not rag_pipeline.is_initialized():
-        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
-    
     try:
         from .utils.document_metadata import get_document_metadata
         
