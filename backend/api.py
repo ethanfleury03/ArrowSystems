@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore', message='.*HF_HOME.*')
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 import uvicorn
 import jwt
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -1102,13 +1102,17 @@ async def summarize_query_endpoint(request: Dict[str, Any]):
 
 @app.post("/query", response_model=QueryResponse)
 @apply_rate_limit(settings.RATE_LIMIT_QUERY)
-async def query_knowledge_base(request: Request, query_request: QueryRequest):
+async def query_knowledge_base(request: Request):
     """
     Query the knowledge base using RAG pipeline with session-based chat memory.
     
     This endpoint accepts a query and returns a structured response with
     answer, reasoning, sources, and metadata. If session_id is provided,
     chat history is maintained and included in the LLM context.
+    
+    Request body handling:
+    - Prefer JSON of the form: {"query_request": {<QueryRequest fields>}}
+    - Also accepts legacy/unwrapped JSON: {<QueryRequest fields>}
     
     QueryRequest model for reference:
         class QueryRequest(BaseModel):
@@ -1131,6 +1135,31 @@ async def query_knowledge_base(request: Request, query_request: QueryRequest):
     
     try:
         start_time = time.time()
+
+        # Parse request body manually so we can accept both wrapped and
+        # unwrapped payloads without relying on FastAPI's automatic model
+        # binding (which was expecting a "query_request" field).
+        try:
+            body = await request.json()
+        except Exception as e:
+            logger.warning("query_invalid_json", error=str(e))
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid JSON body",
+            )
+
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="Request body must be a JSON object",
+            )
+
+        raw = body.get("query_request", body)
+        try:
+            query_request = QueryRequest(**raw)
+        except ValidationError as ve:
+            # Mirror FastAPI's 422 structure so callers see field-level errors
+            raise HTTPException(status_code=422, detail=ve.errors()) from ve
 
         # Read user JWT from X-User-Token header (set by frontend API routes)
         # and populate logging context so downstream code can resolve user_id
