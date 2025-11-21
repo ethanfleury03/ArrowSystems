@@ -18,6 +18,11 @@ export default function LoginPage() {
 
   useEffect(() => {
     console.log('LOGIN PAGE HYDRATED - Build 2025-11-21-v2');
+    
+    // Clear all auth data when landing on login page (fresh start)
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('user_profile');
+    console.log('Cleared all auth data for fresh login');
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
