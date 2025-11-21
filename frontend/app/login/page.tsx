@@ -17,12 +17,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    console.log('LOGIN PAGE HYDRATED - Build 2025-11-21-v2');
-    
-    // Clear all auth data when landing on login page (fresh start)
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user_profile');
-    console.log('Cleared all auth data for fresh login');
+    console.log('LOGIN PAGE HYDRATED - Build 2025-11-21-v3');
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -120,8 +115,8 @@ export default function LoginPage() {
         <CardHeader>
           <CardTitle>Sign in</CardTitle>
           <CardDescription>Enter your email and password to login</CardDescription>
-          <p data-build-id="login-build-2025-11-21-v2" style={{fontSize: '10px', color: '#666'}}>
-            Build: 2025-11-21-v2
+          <p data-build-id="login-build-2025-11-21-v3" style={{fontSize: '10px', color: '#666'}}>
+            Build: 2025-11-21-v3
           </p>
         </CardHeader>
         <CardContent>
