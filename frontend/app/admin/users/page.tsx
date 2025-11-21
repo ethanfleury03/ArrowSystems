@@ -120,7 +120,6 @@ const getComparableValue = (user: AdminUser, field: SortField) => {
 };
 
 export default function AdminUsersPage() {
-  const [authToken, setAuthToken] = useState<string | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loadingTable, setLoadingTable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,25 +190,15 @@ export default function AdminUsersPage() {
   };
 
   const fetchAllowedMachineModels = useCallback(
-    async (token: string) => {
+    async () => {
       try {
         // Fetch all machine models for user assignment
         // For users: includes "Any" (full access) but excludes "GENERAL" (only for documents)
+        // Cookie-based JWT is automatically sent with fetch requests
         const response = await fetch(`${apiBaseUrl}/admin/machine_models`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          credentials: "include",
         });
         if (!response.ok) {
-          // Handle 401 Unauthorized - clear token and redirect to login
-          if (response.status === 401) {
-            console.warn("Authentication failed - clearing token and redirecting to login");
-            localStorage.removeItem("auth_token");
-            localStorage.removeItem("user_profile");
-            setAuthToken(null);
-            window.location.href = "/login";
-            return;
-          }
           console.warn(`Failed to fetch machine models: ${response.status}`);
           return;
         }
@@ -227,26 +216,15 @@ export default function AdminUsersPage() {
   );
 
   const fetchUsers = useCallback(
-    async (token: string) => {
+    async () => {
       setLoadingTable(true);
       setError(null);
       try {
+        // Cookie-based JWT is automatically sent with fetch requests
         const response = await fetch(`${apiBaseUrl}/admin/users`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          credentials: "include",
         });
         if (!response.ok) {
-          // Handle 401 Unauthorized - clear token and redirect to login
-          if (response.status === 401) {
-            console.warn("Authentication failed - clearing token and redirecting to login");
-            localStorage.removeItem("auth_token");
-            localStorage.removeItem("user_profile");
-            setAuthToken(null);
-            // Redirect to login page
-            window.location.href = "/login";
-            return;
-          }
           throw new Error(`Failed to load users (${response.status})`);
         }
         const data = await response.json();
@@ -267,28 +245,10 @@ export default function AdminUsersPage() {
   );
 
   useEffect(() => {
-    try {
-      const token = localStorage.getItem("auth_token");
-      if (token) {
-        setAuthToken(token);
-        fetchUsers(token);
-        fetchAllowedMachineModels(token);
-      } else {
-        // No token found - redirect to login
-        console.warn("No authentication token found - redirecting to login");
-        setError("Please log in to access the admin dashboard.");
-        // Redirect to login after a short delay to show the error
-        setTimeout(() => {
-          window.location.href = "/login";
-        }, 2000);
-      }
-    } catch (error) {
-      console.warn("Failed to retrieve auth token:", error);
-      setError("Unable to access authentication token. Please log in.");
-      setTimeout(() => {
-        window.location.href = "/login";
-      }, 2000);
-    }
+    // Cookie-based JWT is automatically sent with fetch requests
+    // Admin layout already verified user is ADMIN
+    fetchUsers();
+    fetchAllowedMachineModels();
   }, [fetchUsers, fetchAllowedMachineModels]);
 
   const filteredUsers = useMemo(() => {
@@ -469,8 +429,6 @@ export default function AdminUsersPage() {
   const isCustomerRole = formState.role === "CUSTOMER";
   
   const submitAddUser = async () => {
-    if (!authToken) return;
-    
     // Validation: Customers must have at least one machine selected
     if (isCustomerRole && formState.machineModels.length === 0) {
       showToast("Customers must have at least one machine assigned.", "error");
@@ -500,12 +458,13 @@ export default function AdminUsersPage() {
         payload.contact_phone = null;
       }
       
+      // Cookie-based JWT is automatically sent with fetch requests
       const response = await fetch(`${apiBaseUrl}/admin/create_user`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${authToken}`,
           "Content-Type": "application/json",
         },
+        credentials: "include",
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -513,7 +472,7 @@ export default function AdminUsersPage() {
         throw new Error(extractApiError(detail) || "Failed to create user");
       }
       showToast("✅ User created");
-      await fetchUsers(authToken);
+      await fetchUsers();
       closeAllModals();
     } catch (err) {
       console.error("Create user failed:", err);
@@ -524,7 +483,7 @@ export default function AdminUsersPage() {
   };
 
   const submitEditUser = async () => {
-    if (!authToken || !selectedUser) return;
+    if (!selectedUser) return;
     
     // Validation: Customers must have at least one machine selected
     const isEditingCustomer = formState.role === "CUSTOMER";
@@ -558,12 +517,13 @@ export default function AdminUsersPage() {
         payload.contact_name = null;
         payload.contact_phone = null;
       }
+      // Cookie-based JWT is automatically sent with fetch requests
       const response = await fetch(`${apiBaseUrl}/admin/edit_user/${selectedUser.id}`, {
         method: "PUT",
         headers: {
-          Authorization: `Bearer ${authToken}`,
           "Content-Type": "application/json",
         },
+        credentials: "include",
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -571,7 +531,7 @@ export default function AdminUsersPage() {
         throw new Error(extractApiError(detail) || "Failed to update user");
       }
       showToast("✅ User updated");
-      await fetchUsers(authToken);
+      await fetchUsers();
       closeAllModals();
     } catch (err) {
       console.error("Update user failed:", err);
@@ -582,25 +542,24 @@ export default function AdminUsersPage() {
   };
 
   const submitDeleteUser = async () => {
-    if (!authToken || !selectedUser) return;
+    if (!selectedUser) return;
     if (deleteConfirmation !== "DELETE") {
       showToast("Please type DELETE to confirm", "error");
       return;
     }
     setActionSubmitting(true);
     try {
+      // Cookie-based JWT is automatically sent with fetch requests
       const response = await fetch(`${apiBaseUrl}/admin/delete_user/${selectedUser.id}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
+        credentials: "include",
       });
       if (!response.ok) {
         const detail = await response.json().catch(() => null);
         throw new Error(extractApiError(detail) || "Failed to delete user");
       }
       showToast("✅ User deleted");
-      await fetchUsers(authToken);
+      await fetchUsers();
       closeAllModals();
     } catch (err) {
       console.error("Delete user failed:", err);

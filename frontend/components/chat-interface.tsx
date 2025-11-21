@@ -78,7 +78,8 @@ export function ChatInterface() {
         }
       } catch (error) {
         console.error("Failed to fetch user info:", error)
-        // Don't block the UI if user fetch fails
+        // User is not authenticated, redirect to login
+        window.location.href = "/login"
       }
     }
     
