@@ -3,6 +3,9 @@
  * 
  * This module provides utilities for JWT cookie management and validation
  * in the Next.js frontend. It works with backend-set HTTP-only cookies.
+ * 
+ * Note: This module uses Node.js-specific APIs (jsonwebtoken) and should only
+ * be imported in API routes or server components, NOT in middleware.
  */
 
 import { cookies } from 'next/headers';
@@ -18,12 +21,8 @@ export interface JwtPayload {
   [key: string]: any;
 }
 
-/**
- * Get the configured auth cookie name from environment or use default
- */
-export function getAuthCookieName(): string {
-  return process.env.AUTH_COOKIE_NAME || 'access_token';
-}
+// Re-export getAuthCookieName from auth-config for backwards compatibility
+export { getAuthCookieName } from './auth-config';
 
 /**
  * Extract JWT from cookies (server-side only)
