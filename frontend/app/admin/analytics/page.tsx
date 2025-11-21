@@ -32,7 +32,6 @@ interface AnalyticsData {
 
 export default function AdminAnalyticsPage() {
   const router = useRouter();
-  const [authToken, setAuthToken] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [isLoadingAnalytics, setIsLoadingAnalytics] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
@@ -47,32 +46,11 @@ export default function AdminAnalyticsPage() {
 
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
 
-  // Auth guard
+  // Cookie-based JWT is automatically sent with fetch requests
+  // Admin layout already verified user is ADMIN
   useEffect(() => {
-    try {
-      const token = localStorage.getItem("auth_token");
-      if (!token) {
-        throw new Error("Missing token");
-      }
-
-      const payloadBase64 = token.split(".")[1];
-      if (!payloadBase64) {
-        throw new Error("Invalid token payload");
-      }
-      const payloadJson = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"));
-      const payload = JSON.parse(payloadJson);
-
-      if (!payload?.role || payload.role !== "ADMIN") {
-        throw new Error("Not an admin");
-      }
-
-      setAuthToken(token);
-      setIsAdmin(true);
-    } catch (error) {
-      setIsAdmin(false);
-      router.replace("/");
-    }
-  }, [router]);
+    setIsAdmin(true);
+  }, []);
 
   // Calculate date range
   const getDateRange = useCallback(() => {

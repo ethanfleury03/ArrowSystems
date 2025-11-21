@@ -219,28 +219,12 @@ export default function AdminDocumentsPage() {
   );
 
   useEffect(() => {
-    try {
-      const token = localStorage.getItem("auth_token");
-      if (token) {
-        setAuthToken(token);
-        fetchDocuments(token);
-        fetchAllowedMachineModels(token);
-      } else {
-        // No token found - redirect to login
-        console.warn("No authentication token found - redirecting to login");
-        setError("Please log in to access the admin dashboard.");
-        // Redirect to login after a short delay to show the error
-        setTimeout(() => {
-          window.location.href = "/login";
-        }, 2000);
-      }
-    } catch (error) {
-      console.warn("Failed to retrieve auth token:", error);
-      setError("Unable to access authentication token. Please log in.");
-      setTimeout(() => {
-        window.location.href = "/login";
-      }, 2000);
-    }
+    // Cookie-based JWT is automatically sent with fetch requests
+    // Admin layout already verified user is ADMIN
+    // Set a placeholder token to satisfy the functions (they'll use cookies anyway)
+    setAuthToken("cookie-based");
+    fetchDocuments("cookie-based");
+    fetchAllowedMachineModels("cookie-based");
   }, [fetchDocuments, fetchAllowedMachineModels]);
 
   // Poll for documents with active ingestion status (only when page is visible)
