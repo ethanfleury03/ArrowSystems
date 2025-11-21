@@ -536,13 +536,12 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   }, [userProfile])
 
   const displayEmail = useMemo(() => {
+    // Never use placeholder emails - if we don't have real user data, something is wrong
     if (userProfile?.email && userProfile.email.trim().length > 0) {
       return userProfile.email
     }
-    if (userProfile?.name && userProfile.name.trim().length > 0) {
-      return `${userProfile.name.replace(/\s+/g, '').toLowerCase()}@example.com`
-    }
-    return "guest@example.com"
+    // If no email, user is not properly authenticated
+    return null
   }, [userProfile])
 
   return (
@@ -572,7 +571,9 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{displayName}</p>
-                <p className="text-xs text-muted-foreground truncate">{displayEmail}</p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {displayEmail || "Not authenticated"}
+                </p>
               </div>
             </div>
             <Button
