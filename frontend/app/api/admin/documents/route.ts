@@ -4,37 +4,40 @@ import { extractJwtFromCookie } from '@/lib/authClient';
 
 export async function GET(_request: NextRequest) {
   try {
-    // Extract JWT from cookie
     const token = await extractJwtFromCookie();
-    
+
     if (!token) {
       return NextResponse.json(
-        { detail: 'Not authenticated' },
-        { status: 401 }
+        { detail: 'Missing user token' },
+        { status: 401 },
       );
     }
-    
-    // Forward JWT in custom header to backend (X-User-Token)
+
     const response = await iamBackendGet('/admin/documents', {
       'X-User-Token': token,
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      return NextResponse.json(
-        { detail: (error as any)?.detail || 'Failed to fetch documents' },
-        { status: response.status }
-      );
+      let detail = 'Failed to fetch documents';
+      try {
+        const error = await response.json();
+        if (error && typeof error === 'object' && 'detail' in error) {
+          detail = (error as any).detail ?? detail;
+        }
+      } catch {
+        // Ignore JSON parse errors and fall back to generic detail
+      }
+
+      return NextResponse.json({ detail }, { status: response.status });
     }
 
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error) {
     console.error('Admin documents API error:', error);
-    return NextResponse.json(
-      { detail: error instanceof Error ? error.message : 'Internal server error' },
-      { status: 500 }
-    );
+    const detail =
+      error instanceof Error ? error.message : 'Internal server error';
+    return NextResponse.json({ detail }, { status: 500 });
   }
 }
 
