@@ -154,7 +154,7 @@ echo ""
 # This is a one-time setup step that must be done manually in the GCP Console
 
 # Build environment variables string
-ENV_VARS="ENV=prod,DATABASE_URL=${DATABASE_URL},DOCS_BUCKET_NAME=${DOCS_BUCKET_NAME},ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY},CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS},LOG_LEVEL=INFO,HF_HOME=/tmp/hf,SENTENCE_TRANSFORMERS_HOME=/tmp/st"
+ENV_VARS="ENV=prod,DATABASE_URL=${DATABASE_URL},DOCS_BUCKET_NAME=${DOCS_BUCKET_NAME},ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY},CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS},LOG_LEVEL=INFO,HF_HOME=/app/.cache/huggingface,SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface"
 
 # Add JWT_SECRET_KEY if provided (optional - uses baked-in default if not set)
 if [ -n "$JWT_SECRET_KEY" ]; then

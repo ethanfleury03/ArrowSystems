@@ -146,8 +146,13 @@ export async function POST(request: NextRequest) {
 
       if (!response.ok) {
         const error = await response.json().catch(() => ({ detail: 'Backend request failed' }));
+        console.error('IAM Backend Request Error (query):', {
+          status: response.status,
+          path: '/query',
+          error,
+        });
         return NextResponse.json(
-          { detail: error.detail || 'Backend request failed' },
+          error ?? { detail: 'Backend request failed' },
           { status: response.status },
         );
       }
