@@ -69,6 +69,11 @@ export default function LoginPage() {
       }
 
       try {
+        // Clear any old auth data first
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user_profile');
+        
+        // Then set new auth data
         localStorage.setItem('auth_token', token);
         localStorage.setItem('user_profile', JSON.stringify(user));
       } catch (storageError) {

@@ -320,23 +320,23 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     if (isLoggingOut) return
     setIsLoggingOut(true)
     try {
+      // Clear localStorage first
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('auth_token')
+        localStorage.removeItem('user_profile')
+      }
+      
       await fetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'include',
       })
+      
+      // Force full page reload to clear all state
+      window.location.href = '/login'
     } catch (error) {
       console.error('Failed to log out:', error)
-    } finally {
-      try {
-        localStorage.removeItem('auth_token')
-        localStorage.removeItem('user_profile')
-      } catch (storageError) {
-        console.warn('Failed to clear auth storage:', storageError)
-      }
-      setIsLoggingOut(false)
-      setUserProfile(null)
-      setIsAdmin(false)
-      router.push('/login')
+      // Even if logout API fails, clear everything and redirect
+      window.location.href = '/login'
     }
   }
 
