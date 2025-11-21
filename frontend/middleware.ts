@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { getAuthCookieName } from './lib/authClient';
+import { getAuthCookieName } from './lib/auth-config';
 
 const disableAuth =
   process.env.DISABLE_AUTH === 'true' ||
