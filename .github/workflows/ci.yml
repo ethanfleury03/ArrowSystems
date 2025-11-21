@@ -16,6 +16,73 @@ env:
   NODE_VERSION: "20"
 
 jobs:
+  validate-secrets:
+    name: 🔍 Validate Secrets & Config
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Backend Secrets
+        run: |
+          echo "🔍 Validating Backend Secrets..."
+          
+          # Check JWT_SECRET_KEY
+          if [ -z "${{ secrets.JWT_SECRET_KEY }}" ]; then
+            echo "❌ JWT_SECRET_KEY is not set!"
+            echo "   📝 Add it at: Settings → Secrets → Actions"
+            echo "   🔐 Generate: python -c 'import secrets; print(secrets.token_urlsafe(64))'"
+            exit 1
+          fi
+          echo "✅ JWT_SECRET_KEY is set"
+          
+          # Check DATABASE_URL
+          if [ -z "${{ secrets.DATABASE_URL }}" ]; then
+            echo "❌ DATABASE_URL is not set!"
+            exit 1
+          fi
+          echo "✅ DATABASE_URL is set"
+
+      - name: Validate Config Files
+        run: |
+          echo "🔍 Validating Configuration..."
+          
+          # Check no random secrets in backend
+          if grep -q 'secrets.token_urlsafe' backend/config/env.py; then
+            echo "❌ Backend has random secret generation!"
+            exit 1
+          fi
+          echo "✅ No random secret generation"
+          
+          # Check JWT_SECRET_KEY is required in prod
+          if grep -q 'JWT_SECRET_KEY.*REQUIRED' backend/config/env.py; then
+            echo "✅ JWT_SECRET_KEY required in production"
+          fi
+
+      - name: Validate Deployment Workflows
+        run: |
+          echo "🔍 Validating Deployment Configuration..."
+          
+          # Backend has JWT secret
+          if ! grep -q 'JWT_SECRET_KEY.*secrets.JWT_SECRET_KEY' .github/workflows/deploy-backend.yml; then
+            echo "❌ Backend workflow missing JWT_SECRET_KEY!"
+            exit 1
+          fi
+          echo "✅ Backend workflow configured"
+          
+          # Frontend has API URL
+          if ! grep -q 'NEXT_PUBLIC_API_URL' .github/workflows/deploy-frontend.yml; then
+            echo "❌ Frontend workflow missing API URL!"
+            exit 1
+          fi
+          echo "✅ Frontend workflow configured"
+          
+          echo ""
+          echo "✅ All secrets and configuration validated!"
+
   # Backend tests are temporarily disabled until a real test suite is written
   backend-tests:
     name: Backend Tests
@@ -256,6 +323,7 @@ jobs:
             --concurrency=80 \
             --cpu-boost \
             --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
+            --set-env-vars=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
             --set-env-vars=HF_HOME=/tmp/hf \
             --set-env-vars=TRANSFORMERS_CACHE=/tmp/hf \
@@ -264,6 +332,8 @@ jobs:
             --set-env-vars=PYTHONUNBUFFERED=1 \
             --set-env-vars=ENV=prod \
             --set-env-vars=CORS_ALLOWED_ORIGINS="https://arrow-rag-frontend-70705019874.us-central1.run.app" \
+            --set-env-vars=AUTH_COOKIE_SAMESITE=none \
+            --set-env-vars=AUTH_COOKIE_SECURE=true \
             --allow-unauthenticated \
             --quiet
 
@@ -333,8 +403,10 @@ jobs:
             --cpu=1 \
             --timeout=300 \
             --concurrency=80 \
+            --port=3000 \
             --set-env-vars=NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app \
             --set-env-vars=NODE_ENV=production \
+            --set-env-vars=PORT=3000 \
             --set-env-vars=SESSION_SECRET="${{ secrets.FRONTEND_SESSION_SECRET }}" \
             --allow-unauthenticated \
             --quiet
