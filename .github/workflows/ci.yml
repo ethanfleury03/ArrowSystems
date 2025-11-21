@@ -50,8 +50,8 @@ jobs:
         run: |
           echo "🔍 Validating Configuration..."
           
-          # Check no random secrets in backend
-          if grep -q 'secrets.token_urlsafe' backend/config/env.py; then
+          # Check no random secret ASSIGNMENT (ignore comments/error messages)
+          if grep -E '=.*secrets\.token_urlsafe' backend/config/env.py; then
             echo "❌ Backend has random secret generation!"
             exit 1
           fi
