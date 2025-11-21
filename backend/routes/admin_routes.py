@@ -398,6 +398,18 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         
         return None
 
+    # REST-style alias for deleting a user. This keeps existing clients that call
+    # /admin/delete_user/{user_id} working while allowing newer clients to use
+    # the more conventional /admin/users/{user_id} path.
+    @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_user_rest(
+        user_id: int,
+        admin: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
+    ):
+        return await delete_user(user_id, admin, manager, http_request)
+
     # NOTE: Removed duplicate file-based logs endpoint that was conflicting with the audit logs endpoint.
     # The file-based endpoint was returning the wrong response format expected by the frontend.
     # If file-based logging is needed in the future, it should be at a different path like /admin/system-logs.
