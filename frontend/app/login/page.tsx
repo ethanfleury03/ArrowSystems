@@ -66,33 +66,21 @@ export default function LoginPage() {
         return;
       }
 
-      const { user, token } = data;
-      if (!user || !token) {
+      const { user } = data;
+      if (!user) {
         setError('Invalid response from server');
         setLoading(false);
         return;
       }
 
-      try {
-        // Clear any old auth data first
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user_profile');
-        
-        // Then set new auth data
-        localStorage.setItem('auth_token', token);
-        localStorage.setItem('user_profile', JSON.stringify(user));
-      } catch (storageError) {
-        console.warn('Failed to store auth token:', storageError);
-      }
-
+      // Cookie is already set by the API route (forwarded from backend)
+      // No need to store anything in localStorage
+      
       // Redirect based on user role
       // Admins go to /admin, regular users go to main chat
       // Use window.location for full page reload to ensure middleware sees the cookie
-      // Add a small delay to ensure the cookie is set before redirect
       const redirectPath = user.role === 'ADMIN' ? '/admin' : '/';
-      setTimeout(() => {
-        window.location.href = redirectPath;
-      }, 100);
+      window.location.href = redirectPath;
     } catch (err) {
       setError('An error occurred. Please try again.');
       setLoading(false);

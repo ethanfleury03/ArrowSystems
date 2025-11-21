@@ -78,19 +78,18 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     }
   }, [onNewConversationReady])
 
-  const currentUserEmail = userProfile?.email && userProfile.email.trim() !== "" ? userProfile.email : "api_user"
-
+  // Use userInfo from props (no more localStorage)
   useEffect(() => {
-    try {
-      const storedProfile = localStorage.getItem("user_profile")
-      if (storedProfile) {
-        const parsedProfile = JSON.parse(storedProfile)
-        setUserProfile(parsedProfile)
-      }
-    } catch (error) {
-      console.warn("Failed to read stored user profile:", error)
+    if (userInfo) {
+      setUserProfile({
+        name: userInfo.name || null,
+        email: userInfo.email || null,
+        role: userInfo.role || null,
+      })
     }
-  }, [])
+  }, [userInfo])
+
+  const currentUserEmail = userProfile?.email && userProfile.email.trim() !== "" ? userProfile.email : "api_user"
 
   useEffect(() => {
     if (showChatHistory && chatHistory.length === 0 && !isLoadingHistory) {
@@ -320,12 +319,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     if (isLoggingOut) return
     setIsLoggingOut(true)
     try {
-      // Clear localStorage first
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('auth_token')
-        localStorage.removeItem('user_profile')
-      }
-      
+      // Call logout API - this will clear the JWT cookie
       await fetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'include',
@@ -335,7 +329,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
       window.location.href = '/login'
     } catch (error) {
       console.error('Failed to log out:', error)
-      // Even if logout API fails, clear everything and redirect
+      // Even if logout API fails, redirect to login
       window.location.href = '/login'
     }
   }

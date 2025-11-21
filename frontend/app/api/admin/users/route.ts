@@ -1,12 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { iamBackendGet, iamBackendPost, iamBackendPut, iamBackendDelete } from '@/lib/iam-backend';
+import { extractJwtFromCookie } from '@/lib/authClient';
 
 export async function GET(request: NextRequest) {
   try {
-    const authHeader = request.headers.get('Authorization');
-    const headers = authHeader ? { 'Authorization': authHeader } : undefined;
+    // Extract JWT from cookie
+    const token = await extractJwtFromCookie();
     
-    const response = await iamBackendGet('/admin/users', headers);
+    if (!token) {
+      return NextResponse.json(
+        { detail: 'Not authenticated' },
+        { status: 401 }
+      );
+    }
+    
+    // Forward JWT in Authorization header to backend
+    const response = await iamBackendGet('/admin/users', {
+      'Authorization': `Bearer ${token}`,
+    });
 
     if (!response.ok) {
       const error = await response.json();
@@ -30,10 +41,21 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const authHeader = request.headers.get('Authorization');
-    const headers = authHeader ? { 'Authorization': authHeader } : undefined;
-
-    const response = await iamBackendPost('/admin/users', body, headers);
+    
+    // Extract JWT from cookie
+    const token = await extractJwtFromCookie();
+    
+    if (!token) {
+      return NextResponse.json(
+        { detail: 'Not authenticated' },
+        { status: 401 }
+      );
+    }
+    
+    // Forward JWT in Authorization header to backend
+    const response = await iamBackendPost('/admin/users', body, {
+      'Authorization': `Bearer ${token}`,
+    });
 
     if (!response.ok) {
       const error = await response.json();

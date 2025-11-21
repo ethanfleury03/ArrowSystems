@@ -15,43 +15,8 @@ const validateProductionEnv = () => {
       );
     }
     
-    // Require SESSION_SECRET in production
-    // Note: At build time, a placeholder is acceptable as the real secret should be set at runtime
-    // Cloud Run runtime environment variables override build-time values
-    const buildTimePlaceholder = 'BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN';
-    if (!process.env.SESSION_SECRET) {
-      errors.push(
-        'SESSION_SECRET is required in production but was not set. ' +
-        'Set a secure random string of at least 32 characters. ' +
-        'For builds, you can use a placeholder; set the real secret at runtime in Cloud Run.'
-      );
-    } else {
-      // Allow build-time placeholder (will be overridden at runtime in Cloud Run)
-      if (process.env.SESSION_SECRET === buildTimePlaceholder) {
-        console.warn('⚠️  Using build-time placeholder for SESSION_SECRET. Ensure real secret is set at runtime in Cloud Run.');
-      } else {
-        // Validate SESSION_SECRET is not a default value
-        const unsafeDefaults = [
-          'change-this-to-a-random-string-at-least-32-characters-long',
-          'dev-session-secret-not-for-production',
-          'secret',
-          'password',
-          'default-secret',
-        ];
-        
-        if (unsafeDefaults.includes(process.env.SESSION_SECRET)) {
-          errors.push(
-            'SESSION_SECRET is set to an unsafe default value. ' +
-            'In production, use a secure random string of at least 32 characters.'
-          );
-        } else if (process.env.SESSION_SECRET.length < 32) {
-          errors.push(
-            'SESSION_SECRET is too short. ' +
-            'In production, SESSION_SECRET must be at least 32 characters long.'
-          );
-        }
-      }
-    }
+    // Note: SESSION_SECRET no longer required - we now use backend JWT cookies
+    // JWT secret validation happens on backend only
     
     // Validate NEXT_PUBLIC_LOG_LEVEL if provided
     if (process.env.NEXT_PUBLIC_LOG_LEVEL) {

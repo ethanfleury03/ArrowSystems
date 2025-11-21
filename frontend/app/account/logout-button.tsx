@@ -11,18 +11,14 @@ export default function LogoutButton() {
   const handleLogout = async () => {
     setLoading(true);
     try {
-      // Clear localStorage first
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user_profile');
-      }
-      
+      // Call logout API - this will clear the JWT cookie
       await fetch('/api/auth/logout', { method: 'POST' });
       
       // Force full page reload to clear all state
       window.location.href = '/login';
     } catch (error) {
       console.error('Logout error:', error);
+      // Even on error, redirect to login
       window.location.href = '/login';
     }
   };
