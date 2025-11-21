@@ -142,9 +142,10 @@ export async function getUserFromSession() {
   }
 
   try {
-    const response = await fetch(`/api/auth/users/${session.userId}`, {
-      cache: 'no-store',
-    });
+    // Server-side: call IAM backend directly instead of going through our own API route
+    const { iamBackendGet } = await import('./iam-backend');
+    const response = await iamBackendGet(`/auth/users/${session.userId}`);
+    
     if (!response.ok) {
       return null;
     }
