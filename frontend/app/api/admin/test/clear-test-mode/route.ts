@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendPost } from '@/lib/iam-backend';
 
 export async function POST(request: NextRequest) {
   try {
@@ -14,12 +13,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const response = await fetch(`${BACKEND_URL}/admin/test/clear-test-mode`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': authHeader,
-      },
+    const response = await iamBackendPost('/admin/test/clear-test-mode', {}, {
+      'Authorization': authHeader,
     });
 
     const data = await response.json();

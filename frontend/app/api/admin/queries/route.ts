@@ -1,23 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendGet } from '@/lib/iam-backend';
 
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
-    const url = new URL(`${BACKEND_URL}/admin/queries`);
+    let path = '/admin/queries';
     
-    // Copy all query parameters
+    // Build query string if params exist
+    const params: string[] = [];
     searchParams.forEach((value, key) => {
-      url.searchParams.append(key, value);
+      params.push(`${key}=${encodeURIComponent(value)}`);
     });
+    
+    if (params.length > 0) {
+      path += '?' + params.join('&');
+    }
 
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    const response = await iamBackendGet(path);
 
     if (!response.ok) {
       const error = await response.json();

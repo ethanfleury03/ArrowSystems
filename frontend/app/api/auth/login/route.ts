@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { setLoginSession } from '@/lib/auth';
-import { getBackendUrl } from '@/lib/backend-url';
+import { iamBackendPost } from '@/lib/iam-backend';
 
 export async function POST(request: NextRequest) {
   try {
-    // Detect backend URL from request hostname (for network access)
-    const BACKEND_URL = getBackendUrl(request);
-    
     const body = await request.json();
     const { email, password } = body;
 
@@ -18,12 +15,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Delegate authentication to backend
-    const backendResponse = await fetch(`${BACKEND_URL}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
+    // Delegate authentication to backend using IAM-authenticated request
+    const backendResponse = await iamBackendPost('/auth/login', { email, password });
 
     if (!backendResponse.ok) {
       const errorData = await backendResponse.json().catch(() => null);

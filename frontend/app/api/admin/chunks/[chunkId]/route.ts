@@ -1,18 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendDelete } from '@/lib/iam-backend';
 
 export async function DELETE(
   request: NextRequest,
   { params }: { params: { chunkId: string } }
 ) {
   try {
-    const response = await fetch(`${BACKEND_URL}/admin/chunks/${params.chunkId}`, {
-      method: 'DELETE',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    const response = await iamBackendDelete(`/admin/chunks/${params.chunkId}`);
 
     if (!response.ok) {
       const error = await response.json();

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-// Use BACKEND_URL from env (set in Docker) or default to localhost for local dev
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendGet, iamBackendPost } from '@/lib/iam-backend';
 
 export async function GET(request: NextRequest) {
   try {
@@ -9,12 +7,7 @@ export async function GET(request: NextRequest) {
     const limit = searchParams.get('limit') || '50';
     const min_helpful_count = searchParams.get('min_helpful_count') || '2';
     
-    const response = await fetch(`${BACKEND_URL}/saved?limit=${limit}&min_helpful_count=${min_helpful_count}`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    const response = await iamBackendGet(`/saved?limit=${limit}&min_helpful_count=${min_helpful_count}`);
 
     if (!response.ok) {
       const error = await response.json();
@@ -29,14 +22,6 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error('API route error:', error);
     
-    // Check if it's a network error (backend not reachable)
-    if (error instanceof TypeError && error.message.includes('fetch')) {
-      return NextResponse.json(
-        { detail: `Cannot connect to backend at ${BACKEND_URL}. Please check your backend URL configuration.` },
-        { status: 503 }
-      );
-    }
-    
     return NextResponse.json(
       { detail: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
@@ -48,13 +33,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
 
-    const response = await fetch(`${BACKEND_URL}/saved`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    })
+    const response = await iamBackendPost('/saved', body)
 
     if (!response.ok) {
       let detail = 'Backend request failed'
@@ -72,13 +51,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(data)
   } catch (error) {
     console.error('API route error:', error)
-
-    if (error instanceof TypeError && error.message.includes('fetch')) {
-      return NextResponse.json(
-        { detail: `Cannot connect to backend at ${BACKEND_URL}. Please check your backend URL configuration.` },
-        { status: 503 }
-      )
-    }
 
     return NextResponse.json(
       { detail: error instanceof Error ? error.message : 'Internal server error' },

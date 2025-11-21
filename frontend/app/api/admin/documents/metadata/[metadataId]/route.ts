@@ -1,18 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendDelete } from '@/lib/iam-backend';
 
 export async function DELETE(
   request: NextRequest,
   { params }: { params: { metadataId: string } }
 ) {
   try {
-    const response = await fetch(`${BACKEND_URL}/admin/documents/metadata/${encodeURIComponent(params.metadataId)}`, {
-      method: 'DELETE',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    const response = await iamBackendDelete(`/admin/documents/metadata/${encodeURIComponent(params.metadataId)}`);
 
     if (!response.ok) {
       const error = await response.json();

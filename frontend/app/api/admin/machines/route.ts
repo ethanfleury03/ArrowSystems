@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+import { iamBackendGet, iamBackendPost } from '@/lib/iam-backend';
 
 export async function GET(request: NextRequest) {
   try {
-    const response = await fetch(`${BACKEND_URL}/admin/machines`, {
-      method: 'GET',
-      headers: {
-        'Authorization': request.headers.get('Authorization') || '',
-        'Content-Type': 'application/json',
-      },
-    });
+    const authHeader = request.headers.get('Authorization');
+    const headers = authHeader ? { 'Authorization': authHeader } : undefined;
+    
+    const response = await iamBackendGet('/admin/machines', headers);
 
     if (!response.ok) {
       const error = await response.json();
@@ -34,15 +30,10 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const authHeader = request.headers.get('Authorization');
+    const headers = authHeader ? { 'Authorization': authHeader } : undefined;
 
-    const response = await fetch(`${BACKEND_URL}/admin/machines`, {
-      method: 'POST',
-      headers: {
-        'Authorization': request.headers.get('Authorization') || '',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+    const response = await iamBackendPost('/admin/machines', body, headers);
 
     if (!response.ok) {
       const error = await response.json();

@@ -1,8 +1,9 @@
 import axios from 'axios';
-import { resolveApiBaseUrl } from '@/config/api';
 
+// Use Next.js API routes as proxy to backend (with IAM authentication)
+// All requests go through /api/* routes which handle IAM auth to Cloud Run backend
 const apiClient = axios.create({
-  baseURL: resolveApiBaseUrl(),
+  baseURL: '/api',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -16,18 +17,9 @@ apiClient.interceptors.request.use(
     if (typeof window !== 'undefined') {
       const authToken = localStorage.getItem('auth_token');
       if (authToken && config.headers) {
-        // Determine if calling Next.js API route or backend directly
-        const baseURL = config.baseURL || '';
-        const isApiRoute = baseURL.startsWith('/') || baseURL.includes('/api') || 
-                          (typeof config.url === 'string' && config.url.startsWith('/api'));
-        
-        if (isApiRoute) {
-          // If calling Next.js API route, send custom header
-          config.headers['X-Auth-Token'] = authToken;
-        } else {
-          // If calling backend directly, send Authorization header
-          config.headers['Authorization'] = `Bearer ${authToken}`;
-        }
+        // Send JWT token as X-Auth-Token header to Next.js API routes
+        // The API routes will forward it to the backend after IAM authentication
+        config.headers['X-Auth-Token'] = authToken;
       }
     }
     return config;
