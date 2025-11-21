@@ -8,6 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Toaster } from "@/components/ui/toaster";
 import type { ReactNode } from "react";
 import { Menu, Users, FileText, Activity, ArrowLeft, X, BarChart3, Settings, Cog } from "lucide-react";
+import { getCurrentUser } from "@/lib/api";
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -38,45 +39,38 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
 
   // Validate token and ensure admin access
   useEffect(() => {
-    let redirected = false;
-    try {
-      const storedProfile = localStorage.getItem("user_profile");
-      if (storedProfile) {
-        try {
-          setUserProfile(JSON.parse(storedProfile));
-        } catch (error) {
-          console.warn("Failed to parse stored user profile:", error);
+    let isMounted = true;
+
+    const checkAdminAccess = async () => {
+      try {
+        // Call /api/auth/me to get user from cookie-based JWT
+        const user = await getCurrentUser();
+
+        if (!isMounted) return;
+
+        // Verify user has ADMIN role
+        if (user.role !== "ADMIN") {
+          toast({
+            title: "Access denied",
+            description: "Administrator permissions are required.",
+            variant: "destructive",
+          });
+          setIsAdmin(false);
+          router.replace("/");
+          return;
         }
-      }
 
-      const token = localStorage.getItem("auth_token");
-      if (!token) {
-        throw new Error("Missing token");
-      }
+        // User is admin, set state
+        setIsAdmin(true);
+        setUserProfile({
+          email: user.email,
+          name: user.name || null,
+          role: user.role,
+        });
+      } catch (error) {
+        if (!isMounted) return;
 
-      const payloadBase64 = token.split(".")[1];
-      if (!payloadBase64) {
-        throw new Error("Invalid token payload");
-      }
-      const payloadJson = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"));
-      const payload = JSON.parse(payloadJson);
-
-      if (!payload?.role || payload.role !== "ADMIN") {
-        throw new Error("Not an admin");
-      }
-
-      setIsAdmin(true);
-      if (payload?.email || payload?.name || payload?.role) {
-        setUserProfile((prev) => ({
-          ...prev,
-          email: prev?.email ?? payload?.email ?? undefined,
-          name: prev?.name ?? payload?.name ?? undefined,
-          role: payload.role,
-        }));
-      }
-    } catch (error) {
-      if (!redirected) {
-        redirected = true;
+        console.error("Admin access check failed:", error);
         toast({
           title: "Access denied",
           description: "Administrator permissions are required.",
@@ -85,7 +79,13 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
         setIsAdmin(false);
         router.replace("/");
       }
-    }
+    };
+
+    checkAdminAccess();
+
+    return () => {
+      isMounted = false;
+    };
   }, [router, toast]);
 
   const displayName = useMemo(() => {
