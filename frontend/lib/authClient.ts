@@ -10,6 +10,7 @@
 
 import { cookies } from 'next/headers';
 import jwt from 'jsonwebtoken';
+import { getAuthCookieName } from './auth-config';
 
 /**
  * JWT payload structure from backend
@@ -20,9 +21,6 @@ export interface JwtPayload {
   exp: number;
   [key: string]: any;
 }
-
-// Re-export getAuthCookieName from auth-config for backwards compatibility
-export { getAuthCookieName } from './auth-config';
 
 /**
  * Extract JWT from cookies (server-side only)
