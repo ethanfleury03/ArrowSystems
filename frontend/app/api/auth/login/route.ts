@@ -14,34 +14,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Delegate authentication to backend using IAM-authenticated request
-    // Backend will set JWT cookie in response
+    // Delegate authentication to backend using IAM-authenticated request.
+    // Backend sets the auth cookie in its response; we mirror that cookie on
+    // the frontend domain so the browser sends it to /api/* routes.
     const backendResponse = await iamBackendPost('/auth/login', { email, password });
 
     if (!backendResponse.ok) {
-      const errorData = await backendResponse.json().catch(() => null);
-      console.error(`Login failed for ${email}:`, errorData);
-      
-      // Handle FastAPI validation errors (array of error objects)
-      let errorMessage = 'Invalid email or password';
-      if (errorData) {
-        if (errorData.detail) {
-          if (Array.isArray(errorData.detail)) {
-            // Pydantic validation errors: array of {type, loc, msg, input}
-            errorMessage = errorData.detail.map((err: any) => 
-              `${err.loc?.join('.') || 'field'}: ${err.msg || 'Invalid value'}`
-            ).join(', ');
-          } else if (typeof errorData.detail === 'string') {
-            errorMessage = errorData.detail;
-          }
-        } else if (errorData.error && typeof errorData.error === 'string') {
-          errorMessage = errorData.error;
-        }
+      let errorBody: any = null;
+      try {
+        errorBody = await backendResponse.json();
+      } catch {
+        // ignore JSON parse errors; fall back to generic error
       }
-      
+
+      console.error('IAM Backend Request Error (login):', {
+        path: '/auth/login',
+        status: backendResponse.status,
+        error: errorBody,
+      });
+
+      // Forward backend status code and body directly where possible so the
+      // browser sees 401/403/503 instead of a generic 500 from this route.
       return NextResponse.json(
-        { error: errorMessage },
-        { status: backendResponse.status === 401 ? 401 : 500 }
+        errorBody ?? { detail: 'Backend request failed' },
+        { status: backendResponse.status },
       );
     }
 
@@ -49,8 +45,9 @@ export async function POST(request: NextRequest) {
     const { user, message } = data;
     
     if (!user) {
+      console.error('Login backend response missing user object:', data);
       return NextResponse.json(
-        { error: 'Invalid response from authentication service' },
+        { detail: 'Invalid response from authentication service' },
         { status: 502 }
       );
     }
@@ -69,7 +66,7 @@ export async function POST(request: NextRequest) {
     if (!jwtToken) {
       console.error('No JWT token found in backend response');
       return NextResponse.json(
-        { error: 'Authentication token not received from backend' },
+        { detail: 'Authentication token not received from backend' },
         { status: 502 }
       );
     }
@@ -103,7 +100,10 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Login error:', error);
     return NextResponse.json(
-      { error: 'Internal server error', details: error instanceof Error ? error.message : 'Unknown error' },
+      {
+        detail: 'Internal server error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      },
       { status: 500 }
     );
   }
