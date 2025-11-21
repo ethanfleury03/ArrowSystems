@@ -79,17 +79,17 @@ ENV BUILD_ENV=${BUILD_ENV}
 ENV ENV=dev
 
 # Set HuggingFace cache directory (models download here at runtime)
-# Using /tmp for Cloud Run compatibility (Cloud Run cannot write to /root/.cache or /app/.cache)
-# These can be overridden at runtime via environment variables
-ENV HF_HOME=/tmp/hf
-ENV TRANSFORMERS_CACHE=/tmp/hf
-ENV HF_DATASETS_CACHE=/tmp/hf
-ENV SENTENCE_TRANSFORMERS_HOME=/tmp/st
+# Use an application-owned, writable directory under /app instead of /tmp/hf
+# so Cloud Run permission issues on /tmp/hf/hub are avoided.
+# These can still be overridden at runtime via environment variables if needed.
+ENV HF_HOME=/app/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+ENV HF_DATASETS_CACHE=/app/.cache/huggingface
+ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
 
 # Create necessary directories
 # TODO: In production, mount GCS bucket for /data and use vector DB for latest_model
-# Note: /tmp directories are ephemeral in Cloud Run (models re-download on cold start)
-RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /tmp/hf /tmp/st
+RUN mkdir -p /app/data /app/latest_model /app/logs /app/storage /app/.cache/huggingface
 
 # Copy Python dependencies from dependencies stage (no build tools)
 COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
@@ -215,8 +215,7 @@ RUN sed -i 's/\r$//' /app/run_backend.sh && chmod +x /app/run_backend.sh
 
 # Database is managed via DATABASE_URL environment variable (PostgreSQL)
 
-# Set ownership and permissions
-# Note: /tmp directories don't need chmod (they're world-writable by default)
+# Set ownership and permissions so appuser can write to caches and app directories
 RUN chown -R appuser:appuser /app
 
 # Switch to non-root user

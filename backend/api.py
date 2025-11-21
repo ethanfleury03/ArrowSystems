@@ -1109,6 +1109,17 @@ async def query_knowledge_base(request: Request, query_request: QueryRequest):
     This endpoint accepts a query and returns a structured response with
     answer, reasoning, sources, and metadata. If session_id is provided,
     chat history is maintained and included in the LLM context.
+    
+    QueryRequest model for reference:
+        class QueryRequest(BaseModel):
+            query: str
+            session_id: Optional[str]
+            top_k: int = 10
+            alpha: float = 0.5
+            metadata_filters: Optional[Dict[str, Any]]
+            dynamic_windowing: bool = True
+            machine_confirmation: Optional[bool]
+            selected_machine: Optional[str]
     """
     global rag_pipeline, db_manager, saved_response_manager
     
@@ -1120,7 +1131,29 @@ async def query_knowledge_base(request: Request, query_request: QueryRequest):
     
     try:
         start_time = time.time()
-        
+
+        # Read user JWT from X-User-Token header (set by frontend API routes)
+        # and populate logging context so downstream code can resolve user_id
+        # and role consistently with admin endpoints.
+        try:
+            token = request.headers.get("X-User-Token")
+            if token and db_manager:
+                from .security import decode_access_token
+                from .logging_context import set_user_id, set_user_role
+
+                payload = decode_access_token(token)
+                email = payload.get("email")
+                role = payload.get("role")
+                if email:
+                    set_user_id(email)
+                if role:
+                    set_user_role(role)
+        except Exception as e:
+            # Don't fail the query on auth context issues; RAG pipeline will
+            # still run, but user-specific behavior (like machine scoping)
+            # may be limited.
+            logger.warning("query_user_token_decode_failed", error=str(e), exc_info=True)
+
         # Generate or use provided session_id
         session_id = query_request.session_id
         if not session_id:
@@ -2593,11 +2626,19 @@ async def toggle_document_status(http_request: Request, filename: str, request: 
     """
     Enable or disable a document.
     Inactive documents are excluded from search retrieval.
+
+    IMPORTANT:
+    - This endpoint MUST work even if the RAG pipeline is not initialized.
+      The database is always the source of truth for document active state.
+    - When the RAG pipeline is available, we may optionally update the index,
+      but RAG availability must NOT block admin toggling.
     """
     global rag_pipeline
-    
-    if not rag_pipeline or not rag_pipeline.is_initialized():
-        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+
+    # RAG pipeline is optional for this endpoint; determine availability but
+    # do not fail the request if it's not ready.
+    pipeline_available = rag_pipeline is not None and rag_pipeline.is_initialized()
+    rag_warning: Optional[str] = None
     
     user_id = get_user_id()
     user_role = get_user_role()
@@ -2613,10 +2654,41 @@ async def toggle_document_status(http_request: Request, filename: str, request: 
         is_active = request.get("is_active", True)
         
         from .utils.document_metadata import set_document_active
+        # 1) Always update DB state first (source of truth for active flag)
         set_document_active(filename, is_active)
         
         status = "enabled" if is_active else "disabled"
-        logger.info(f"Document {filename} {status}")
+        logger.info(
+            "admin_document_toggled",
+            filename=filename,
+            is_active=is_active,
+            status=status,
+            pipeline_available=pipeline_available,
+        )
+
+        # 2) Optionally try to notify/update RAG pipeline when available.
+        # Any failures here should NOT affect the HTTP response.
+        if pipeline_available:
+            try:
+                # TODO: Implement index update if/when orchestrator supports
+                # document-level activation. For now, we just log that DB
+                # state has changed while RAG is available.
+                logger.info(
+                    "admin_document_toggle_rag_update_skipped",
+                    filename=filename,
+                    message="RAG pipeline is available but index update hook is not implemented",
+                )
+            except Exception as e:
+                logger.warning(
+                    "admin_document_toggle_rag_update_failed",
+                    filename=filename,
+                    error=str(e),
+                    exc_info=True,
+                )
+                rag_warning = "RAG pipeline update failed; database state is updated."
+        else:
+            # RAG pipeline is not initialized; DB state is still updated.
+            rag_warning = "RAG pipeline not initialized; only database state was updated."
         
         # Audit log document toggle
         await audit_log(
@@ -2632,11 +2704,15 @@ async def toggle_document_status(http_request: Request, filename: str, request: 
             request=http_request,
         )
         
-        return {
+        response: Dict[str, Any] = {
             "status": "success",
             "message": f"Document {filename} {status}",
-            "is_active": is_active
+            "is_active": is_active,
         }
+        if rag_warning:
+            response["rag_warning"] = rag_warning
+        
+        return response
         
     except HTTPException:
         raise
