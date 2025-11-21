@@ -14,9 +14,15 @@ from __future__ import annotations
 import os
 import time
 import asyncio
+import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
+
+# Suppress noisy transformers cache warnings
+# (env vars are set in Cloud Run, but warning still appears during import)
+warnings.filterwarnings('ignore', message='.*TRANSFORMERS_CACHE.*')
+warnings.filterwarnings('ignore', message='.*HF_HOME.*')
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
