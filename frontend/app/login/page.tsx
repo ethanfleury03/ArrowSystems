@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -16,8 +16,13 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    console.log('LOGIN PAGE HYDRATED - Build 2025-11-21-v2');
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    console.log('LOGIN HANDLE SUBMIT FIRED');
     setError('');
     setLoading(true);
 
@@ -110,6 +115,9 @@ export default function LoginPage() {
         <CardHeader>
           <CardTitle>Sign in</CardTitle>
           <CardDescription>Enter your email and password to login</CardDescription>
+          <p data-build-id="login-build-2025-11-21-v2" style={{fontSize: '10px', color: '#666'}}>
+            Build: 2025-11-21-v2
+          </p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
