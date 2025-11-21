@@ -67,11 +67,11 @@ steps:
       - '--timeout'
       - '3600'
       - '--set-env-vars'
-      - 'PYTHONPATH=/app'
-      - '--set-env-vars'
-      - 'HF_HOME=/tmp/hf,TRANSFORMERS_CACHE=/tmp/hf,SENTENCE_TRANSFORMERS_HOME=/tmp/st'
+      - 'PYTHONPATH=/app,ENV=prod,LOG_LEVEL=INFO,HF_HOME=/tmp/hf,SENTENCE_TRANSFORMERS_HOME=/tmp/st'
       - '--set-secrets'
-      - 'ANTHROPIC_API_KEY=anthropic-api-key:latest'
+      - 'ANTHROPIC_API_KEY=anthropic-api-key:latest,DATABASE_URL=database-url:latest,CORS_ALLOWED_ORIGINS=cors-allowed-origins:latest'
+      # Note: JWT_SECRET_KEY is optional - uses baked-in default if not provided
+      # To use custom JWT secret, add: --set-secrets JWT_SECRET_KEY=jwt-secret-key:latest
 
 # Store images in Container Registry
 images:

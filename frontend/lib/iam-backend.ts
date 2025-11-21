@@ -11,7 +11,7 @@
 
 import { GoogleAuth } from 'google-auth-library';
 
-const BACKEND_URL = 'https://arrow-rag-backend-70705019874.us-central1.run.app';
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'https://arrow-rag-backend-akymgh2oxq-uc.a.run.app';
 
 /**
  * Make an authenticated request to the backend using Google IAM identity tokens.

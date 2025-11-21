@@ -67,6 +67,20 @@ mock_*.py
 
 # Cleanup and migration files (one-time use)
 CLEANUP_SUMMARY.md
+*_SUMMARY.md
+*_FIXES*.md
+*_INSTRUCTIONS.md
+*_NOTES.md
+*_FIX_*.md
+QUICK_FIX*.md
+FIX_*.md
+FIX_*.txt
+
+# One-time scripts
+fix_*.sh
+fix_*.ps1
+verify_*.sh
+validate_*.ps1
 
 # HuggingFace cache (too large for git)
 .cache/
