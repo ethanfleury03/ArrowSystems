@@ -86,6 +86,10 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
         email: userInfo.email || null,
         role: userInfo.role || null,
       })
+      // Set isAdmin based on userInfo.role
+      setIsAdmin(userInfo.role === 'ADMIN')
+    } else {
+      setIsAdmin(false)
     }
   }, [userInfo])
 
@@ -482,36 +486,8 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   const [isAdmin, setIsAdmin] = useState(false)
   const activeRoute = useMemo(() => pathname, [pathname])
 
-  useEffect(() => {
-    try {
-      const token = localStorage.getItem("auth_token")
-      if (!token) {
-        setIsAdmin(false)
-        return
-      }
-      const payloadBase64 = token.split(".")[1]
-      if (!payloadBase64) {
-        setIsAdmin(false)
-        return
-      }
-      const payloadJson = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"))
-      const payload = JSON.parse(payloadJson)
-      setIsAdmin(payload?.role === "ADMIN")
-      if (payload?.email || payload?.role || payload?.name) {
-        setUserProfile((prev) => {
-          const existing = prev ?? {}
-          return {
-            name: existing.name ?? payload?.name ?? existing.name ?? undefined,
-            email: existing.email ?? payload?.email ?? existing.email ?? undefined,
-            role: payload?.role ?? existing.role ?? undefined,
-          }
-        })
-      }
-    } catch (error) {
-      console.warn("Failed to parse auth token:", error)
-      setIsAdmin(false)
-    }
-  }, [])
+  // isAdmin is now set from userInfo prop in the useEffect above
+  // Removed old localStorage logic - JWT is in cookie, not localStorage
 
   const handleNavigateHome = () => {
     router.push("/")
