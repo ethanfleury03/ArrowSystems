@@ -21,9 +21,8 @@ ARG SESSION_SECRET
 ENV NODE_ENV=${NODE_ENV}
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 ENV SESSION_SECRET=${SESSION_SECRET}
-# Ensure google-auth-library and form-data are installed for IAM authentication and file uploads
-RUN npm install google-auth-library form-data
 # Build the app - this creates .next/standalone directory
+# Note: google-auth-library and form-data are already installed via npm ci from package.json
 RUN npm run build
 
 # =============================================================================
