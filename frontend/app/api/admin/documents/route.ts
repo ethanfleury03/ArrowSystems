@@ -1,9 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { iamBackendGet } from '@/lib/iam-backend';
+import { extractJwtFromCookie } from '@/lib/authClient';
 
 export async function GET(request: NextRequest) {
   try {
-    const response = await iamBackendGet('/admin/documents');
+    // Extract JWT from cookie
+    const token = await extractJwtFromCookie();
+    
+    if (!token) {
+      return NextResponse.json(
+        { detail: 'Not authenticated' },
+        { status: 401 }
+      );
+    }
+    
+    // Forward JWT in Authorization header to backend
+    const response = await iamBackendGet('/admin/documents', {
+      'Authorization': `Bearer ${token}`,
+    });
 
     if (!response.ok) {
       const error = await response.json();

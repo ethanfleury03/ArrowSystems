@@ -1,11 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleAuth } from 'google-auth-library';
 import FormData from 'form-data';
+import { extractJwtFromCookie } from '@/lib/authClient';
 
 const BACKEND_URL = 'https://arrow-rag-backend-70705019874.us-central1.run.app';
 
 export async function POST(request: NextRequest) {
   try {
+    // Extract JWT from cookie for authentication
+    const token = await extractJwtFromCookie();
+    
+    if (!token) {
+      return NextResponse.json(
+        { detail: 'Not authenticated' },
+        { status: 401 }
+      );
+    }
+
     // Validate content type
     const contentType = request.headers.get('content-type');
     
@@ -58,14 +69,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Get Authorization header if provided
-    const authHeader = request.headers.get('Authorization');
+    // Forward JWT in Authorization header to backend
     const headers: any = {
       ...backendFormData.getHeaders(),
+      'Authorization': `Bearer ${token}`,
     };
-    if (authHeader) {
-      headers['Authorization'] = authHeader;
-    }
 
     const response = await client.request({
       url: `${BACKEND_URL}/admin/documents/upload`,
