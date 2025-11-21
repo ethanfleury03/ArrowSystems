@@ -47,7 +47,6 @@ function Modal({ title, onClose, children }: ModalProps) {
 }
 
 export default function MachineModelsPage() {
-  const [authToken, setAuthToken] = useState<string | null>(null);
   const [machines, setMachines] = useState<MachineModel[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,23 +59,17 @@ export default function MachineModelsPage() {
   const [submitting, setSubmitting] = useState(false);
   const { toast } = useToast();
 
-  useEffect(() => {
-    const token = localStorage.getItem("auth_token");
-    setAuthToken(token);
-  }, []);
-
   const fetchMachines = useCallback(async () => {
-    if (!authToken) return;
-
     setLoading(true);
     setError(null);
 
     try {
+      // Cookie-based JWT is automatically sent with fetch requests
       const response = await fetch("/api/admin/machines", {
         headers: {
-          Authorization: `Bearer ${authToken}`,
           "Content-Type": "application/json",
         },
+        credentials: "include",
       });
 
       if (!response.ok) {
@@ -139,7 +132,7 @@ export default function MachineModelsPage() {
     } finally {
       setLoading(false);
     }
-  }, [authToken, toast]);
+  }, [toast]);
 
   useEffect(() => {
     fetchMachines();
@@ -155,24 +148,16 @@ export default function MachineModelsPage() {
       return;
     }
 
-    if (!authToken) {
-      toast({
-        title: "Error",
-        description: "Authentication required",
-        variant: "destructive",
-      });
-      return;
-    }
-
     setSubmitting(true);
 
     try {
+      // Cookie-based JWT is automatically sent with fetch requests
       const response = await fetch("/api/admin/machines", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${authToken}`,
           "Content-Type": "application/json",
         },
+        credentials: "include",
         body: JSON.stringify({ name: newMachineName.trim() }),
       });
 
