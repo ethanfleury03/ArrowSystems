@@ -142,7 +142,7 @@ export async function getUserFromSession() {
   }
 
   try {
-    const response = await fetch(`${BACKEND_URL}/auth/users/${session.userId}`, {
+    const response = await fetch(`/api/auth/users/${session.userId}`, {
       cache: 'no-store',
     });
     if (!response.ok) {
