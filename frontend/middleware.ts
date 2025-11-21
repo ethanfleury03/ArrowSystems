@@ -22,8 +22,8 @@ export function middleware(request: NextRequest) {
   // Allow access to login page
   if (pathname === '/login') {
     if (sessionCookie) {
-      // Redirect to account if already logged in
-      return NextResponse.redirect(new URL('/account', request.url));
+      // Redirect to home if already logged in
+      return NextResponse.redirect(new URL('/', request.url));
     }
     // Allow access to login page - don't redirect if already on login
     return NextResponse.next();
