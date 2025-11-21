@@ -1934,7 +1934,7 @@ async def get_user_documents():
 
 
 @app.get("/admin/documents")
-async def get_all_documents():
+async def get_all_documents(request: Request):
     """
     Get all documents in the index with enhanced metadata.
     Returns list of documents with metadata including status, machine_model, etc.
@@ -1948,6 +1948,59 @@ async def get_all_documents():
       endpoints (e.g. /query, /admin/documents/upload processing, etc.).
     """
     try:
+        # NOTE: This admin listing endpoint should be available even when the
+        # RAG pipeline is not initialized. We only use the pipeline for
+        # optional enrichment (chunk counts, corpus metadata). The core list
+        # comes from the database / ingestion metadata.
+        global rag_pipeline, db_manager
+
+        # Enforce admin authentication using the same pattern as other /admin
+        # endpoints: user JWT is passed in X-User-Token by the frontend API.
+        if not db_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not initialized",
+            )
+
+        token = request.headers.get("X-User-Token")
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing user token",
+            )
+
+        try:
+            from .security import decode_access_token
+
+            payload = decode_access_token(token)
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+            ) from None
+        except jwt.PyJWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+            ) from None
+
+        email = payload.get("email")
+        role = payload.get("role")
+        if not email or not role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token payload"
+            )
+
+        user = await db_manager.get_user_by_email(email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User no longer exists",
+            )
+        if user.get("role") != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin privileges required",
+            )
+
         from .utils.document_metadata import get_document_metadata
         
         # Get ingestion metadata for all documents in the pipeline
@@ -1975,8 +2028,11 @@ async def get_all_documents():
         doc_chunks = {}
         doc_pages = {}
         seen_filenames = set()
+
+        # Determine whether the RAG pipeline is available for enrichment.
+        pipeline_available = rag_pipeline is not None and rag_pipeline.is_initialized()
         
-        if hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
+        if pipeline_available and hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
             retriever = rag_pipeline.orchestrator.retriever
             if hasattr(retriever, 'corpus_nodes') and retriever.corpus_nodes:
                 logger.info(f"Found {len(retriever.corpus_nodes)} nodes in corpus_nodes")
@@ -2006,7 +2062,7 @@ async def get_all_documents():
         # Build a filename -> doc_id map from docstore for O(1) lookups (optimization)
         filename_to_doc_id = {}
         docstore = None
-        if rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'docstore') and rag_pipeline.orchestrator.index.docstore:
+        if pipeline_available and rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'docstore') and rag_pipeline.orchestrator.index.docstore:
             docstore = rag_pipeline.orchestrator.index.docstore
             docstore_ids = list(docstore.docs.keys())
             logger.info(f"Found {len(docstore_ids)} documents in docstore")
@@ -2084,7 +2140,7 @@ async def get_all_documents():
                 chunk_count = 0
                 
                 # Method 1: Query vector store directly for accurate count (source of truth)
-                if rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'vector_store'):
+                if pipeline_available and rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'vector_store'):
                     try:
                         vector_store = rag_pipeline.orchestrator.index.vector_store
                         if vector_store:
