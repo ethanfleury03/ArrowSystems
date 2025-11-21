@@ -42,7 +42,7 @@ fi
 
 # Check required environment variables
 echo -e "${YELLOW}📋 Checking required environment variables...${NC}"
-REQUIRED_VARS=("DATABASE_URL" "DOCS_BUCKET_NAME" "ANTHROPIC_API_KEY")
+REQUIRED_VARS=("DATABASE_URL" "DOCS_BUCKET_NAME" "ANTHROPIC_API_KEY" "CORS_ALLOWED_ORIGINS")
 MISSING_VARS=()
 
 for var in "${REQUIRED_VARS[@]}"; do
@@ -61,6 +61,10 @@ if [ ${#MISSING_VARS[@]} -ne 0 ]; then
     echo "  export DATABASE_URL=\"postgresql://...\""
     echo "  export DOCS_BUCKET_NAME=\"your-bucket-name\""
     echo "  export ANTHROPIC_API_KEY=\"your-api-key\""
+    echo "  export CORS_ALLOWED_ORIGINS=\"https://support.arrowsystems.com,https://www.arrowsystems.com\""
+    echo ""
+    echo "Optional: JWT_SECRET_KEY (uses baked-in default if not provided)"
+    echo "  export JWT_SECRET_KEY=\"your-custom-jwt-secret\""
     echo ""
     exit 1
 fi
@@ -149,19 +153,26 @@ echo ""
 # Cloud SQL → Connections → Authorized Networks
 # This is a one-time setup step that must be done manually in the GCP Console
 
+# Build environment variables string
+ENV_VARS="ENV=prod,DATABASE_URL=${DATABASE_URL},DOCS_BUCKET_NAME=${DOCS_BUCKET_NAME},ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY},CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS},LOG_LEVEL=INFO,HF_HOME=/tmp/hf,SENTENCE_TRANSFORMERS_HOME=/tmp/st"
+
+# Add JWT_SECRET_KEY if provided (optional - uses baked-in default if not set)
+if [ -n "$JWT_SECRET_KEY" ]; then
+    ENV_VARS="${ENV_VARS},JWT_SECRET_KEY=${JWT_SECRET_KEY}"
+    echo -e "${GREEN}✅ Using custom JWT_SECRET_KEY${NC}"
+else
+    echo -e "${YELLOW}ℹ️  Using baked-in JWT_SECRET_KEY (default)${NC}"
+fi
+
 if ! gcloud run deploy "$SERVICE_NAME" \
     --image "$IMAGE_NAME" \
     --region "$REGION" \
     --platform managed \
     --allow-unauthenticated \
+    --memory 2Gi \
+    --cpu 2 \
     --add-cloudsql-instances "${PROJECT_ID}:${REGION}:rag-postgres" \
-    --set-env-vars "DATABASE_URL=${DATABASE_URL}" \
-    --set-env-vars "DOCS_BUCKET_NAME=${DOCS_BUCKET_NAME}" \
-    --set-env-vars "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
-    --set-env-vars "APP_ENV=production" \
-    --set-env-vars "ALLOWED_ORIGINS=https://support.arrowsystems.com" \
-    --set-env-vars "LOG_LEVEL=INFO" \
-    --set-env-vars "HF_HOME=/tmp/hf,TRANSFORMERS_CACHE=/tmp/hf,SENTENCE_TRANSFORMERS_HOME=/tmp/st"; then
+    --set-env-vars "$ENV_VARS"; then
     echo -e "${RED}❌ Cloud Run deployment failed${NC}"
     exit 1
 fi

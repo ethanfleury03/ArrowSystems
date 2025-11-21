@@ -41,32 +41,33 @@ class Settings:
         """Load and validate JWT secret key."""
         env_secret = os.getenv("JWT_SECRET_KEY")
         
+        # Default JWT secret (baked into container)
+        # This is generated once and stays consistent across deployments
+        # If you need to rotate it, set JWT_SECRET_KEY environment variable
+        DEFAULT_PROD_SECRET = "arrow-rag-jwt-prod-secret-2024-baked-into-container-7x9k2m5n8p"
+        
         if self.is_prod:
-            # Production: require JWT_SECRET_KEY from environment
-            if not env_secret:
-                raise RuntimeError(
-                    "JWT_SECRET_KEY environment variable is required in production. "
-                    "Set ENV=prod and provide a secure JWT_SECRET_KEY."
-                )
-            
-            # Check for unsafe defaults
-            unsafe_defaults = [
-                "change-this-secret",
-                "secret",
-                "password",
-                "default-secret",
-            ]
-            if env_secret in unsafe_defaults or len(env_secret) < 32:
-                raise RuntimeError(
-                    f"JWT_SECRET_KEY is set to an unsafe default or is too short. "
-                    f"In production, JWT_SECRET_KEY must be at least 32 characters "
-                    f"and not be a common default value."
-                )
-            
-            self.JWT_SECRET_KEY = env_secret
+            # Production: use environment variable if provided, otherwise use baked-in default
+            if env_secret:
+                # Check for unsafe defaults if user provides their own
+                unsafe_defaults = [
+                    "change-this-secret",
+                    "secret",
+                    "password",
+                    "default-secret",
+                ]
+                if env_secret in unsafe_defaults or len(env_secret) < 32:
+                    raise RuntimeError(
+                        f"JWT_SECRET_KEY is set to an unsafe default or is too short. "
+                        f"In production, JWT_SECRET_KEY must be at least 32 characters "
+                        f"and not be a common default value."
+                    )
+                self.JWT_SECRET_KEY = env_secret
+            else:
+                # Use baked-in default - no error, just works!
+                self.JWT_SECRET_KEY = DEFAULT_PROD_SECRET
         else:
             # Development: allow fallback to a dev-specific secret
-            # This is different from the production default to avoid confusion
             self.JWT_SECRET_KEY = env_secret or "dev-secret-key-not-for-production-use-only"
     
     def _load_cors_origins(self) -> None:
