@@ -130,8 +130,19 @@ export async function setLoginSession(userId: string, req: NextRequest, res: Nex
 }
 
 export async function logout(req: NextRequest, res: NextResponse): Promise<NextResponse> {
-  // Delete the session cookie
+  // Delete the session cookie with explicit options
+  // Must match the same path/domain/secure settings used when setting the cookie
+  res.cookies.set(sessionOptions.cookieName, '', {
+    httpOnly: true,
+    secure: req.url.startsWith('https://') || req.headers.get('x-forwarded-proto') === 'https',
+    sameSite: 'lax',
+    maxAge: 0, // Expire immediately
+    path: '/',
+  });
+  
+  // Also try the delete method
   res.cookies.delete(sessionOptions.cookieName);
+  
   return res;
 }
 
