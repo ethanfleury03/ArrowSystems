@@ -920,20 +920,27 @@ async def auth_login(request: Request, response: Response):
         
         token = create_access_token({"email": user["email"], "role": user["role"]})
         
-        # Set JWT in HTTP-only cookie
+        # Set JWT in HTTP-only cookie (session cookie - expires when browser closes)
         cookie_options = auth_config.get_cookie_options()
-        response.set_cookie(
-            key=cookie_options["key"],
-            value=token,
-            httponly=cookie_options["httponly"],
-            secure=cookie_options["secure"],
-            samesite=cookie_options["samesite"],
-            max_age=cookie_options["max_age"],
-            path=cookie_options["path"],
-        )
+        set_cookie_params = {
+            "key": cookie_options["key"],
+            "value": token,
+            "httponly": cookie_options["httponly"],
+            "secure": cookie_options["secure"],
+            "samesite": cookie_options["samesite"],
+            "path": cookie_options["path"],
+        }
+        
+        # Include max_age only if specified (for persistent cookies)
+        # If not set, cookie becomes a session cookie (expires when browser closes)
+        if "max_age" in cookie_options:
+            set_cookie_params["max_age"] = cookie_options["max_age"]
+        
         # Include domain only if set
         if "domain" in cookie_options:
-            response.set_cookie(domain=cookie_options["domain"])
+            set_cookie_params["domain"] = cookie_options["domain"]
+        
+        response.set_cookie(**set_cookie_params)
         
         # Audit successful login
         await audit_log(

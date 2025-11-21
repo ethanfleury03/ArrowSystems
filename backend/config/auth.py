@@ -83,7 +83,9 @@ class AuthConfig:
             "httponly": self.AUTH_COOKIE_HTTPONLY,
             "secure": self.AUTH_COOKIE_SECURE,
             "samesite": self.AUTH_COOKIE_SAMESITE,
-            "max_age": self.get_cookie_max_age(),
+            # SESSION COOKIE: No max_age means cookie expires when browser closes
+            # Users must log in again each time they open the browser
+            # "max_age": self.get_cookie_max_age(),  # Commented out for session-only cookies
             "path": self.AUTH_COOKIE_PATH,
         }
         
