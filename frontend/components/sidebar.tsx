@@ -547,9 +547,11 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{displayName}</p>
-                <p className="text-xs text-muted-foreground truncate">
-                  {displayEmail || "Not authenticated"}
-                </p>
+                {displayEmail && (
+                  <p className="text-xs text-muted-foreground truncate">
+                    {displayEmail}
+                  </p>
+                )}
               </div>
             </div>
             <Button
