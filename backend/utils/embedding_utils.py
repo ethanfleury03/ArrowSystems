@@ -16,12 +16,16 @@ def build_offline_embedding(
     device: str = "cpu"
 ) -> HuggingFaceEmbedding:
     """
-    Build a HuggingFaceEmbedding model in offline mode.
+    Offline-safe embedding loader compatible with all LlamaIndex versions.
+    
+    Ensures no network calls by setting HF_HUB_OFFLINE=1 and relying on
+    pre-downloaded models in the cache directory.
     
     This function ensures:
     - All required environment variables are set consistently
-    - Offline mode is enforced (HF_HUB_OFFLINE=1, local_files_only=True)
+    - Offline mode is enforced via HF_HUB_OFFLINE=1
     - The same cache directory is used everywhere
+    - Compatible with older LlamaIndex versions (no model_kwargs)
     
     Args:
         model_name: HuggingFace model identifier (e.g., "BAAI/bge-base-en-v1.5")
@@ -35,34 +39,23 @@ def build_offline_embedding(
         RuntimeError: If model cannot be loaded from cache (offline mode)
     """
     # Determine cache directory
-    if cache_dir is None:
-        cache_dir = os.getenv("HF_HOME", "/app/.cache/huggingface")
+    cache_dir = cache_dir or os.getenv("HF_HOME", "/app/.cache/huggingface")
     
-    # Ensure cache directory structure (HuggingFace expects 'hub' subdirectory)
-    if not cache_dir.endswith("hub"):
-        # HuggingFace models are typically in a 'hub' subdirectory
-        # But we store them directly in the cache_dir, so use it as-is
-        pass
+    # Enforce offline environment variables
+    # These ensure SentenceTransformers only loads from cache
+    os.environ["HF_HOME"] = cache_dir
+    os.environ["TRANSFORMERS_CACHE"] = cache_dir
+    os.environ["HF_DATASETS_CACHE"] = cache_dir
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = cache_dir
+    os.environ["HF_HUB_OFFLINE"] = "1"  # Critical: prevents network calls
     
-    # Enforce consistent environment variables
-    os.environ.setdefault("HF_HOME", cache_dir)
-    os.environ.setdefault("TRANSFORMERS_CACHE", cache_dir)
-    os.environ.setdefault("HF_DATASETS_CACHE", cache_dir)
-    os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", cache_dir)
-    
-    # Enforce offline mode for HuggingFace Hub
-    # This prevents any network calls at runtime
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    
-    # Build embedding model with offline constraints
+    # IMPORTANT: No model_kwargs — older HuggingFaceEmbedding does not support it
+    # Rely on cache-only behavior + HF_HUB_OFFLINE=1 to forbid downloads
     return HuggingFaceEmbedding(
         model_name=model_name,
         cache_folder=cache_dir,
         trust_remote_code=True,
         device=device,
-        model_kwargs={
-            "local_files_only": True,  # Critical: only load from local cache
-            "trust_remote_code": True,
-        },
+        # No model_kwargs here - not supported in all LlamaIndex versions
     )
 
