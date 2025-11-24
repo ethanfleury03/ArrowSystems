@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore", message=".*validate_default.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from .orchestrator import RAGOrchestrator, StructuredResponse
 from .logging_config import get_logger
 
@@ -50,36 +50,48 @@ class RAGPipeline:
         )
         self._initialized = False
         
-    def initialize(self, storage_dir="latest_model"):
+    def initialize(self, storage_dir="latest_model") -> bool:
         """
         Initialize models and load index.
         
         Args:
             storage_dir: Directory containing the vector index
         
+        Returns:
+            True if initialization succeeded (both model and index loaded), False otherwise
+        
         Raises:
-            RuntimeError: If ingestion is disabled or models cannot be loaded
+            RuntimeError: If model loading fails (in production, this should abort startup)
         """
         if self._initialized:
             logger.info("rag_pipeline_already_initialized", storage_dir=storage_dir)
-            return
+            return True
             
         logger.info("rag_pipeline_initializing", storage_dir=storage_dir)
         
-        # Initialize models (model loading is always allowed, even on Cloud Run)
-        self.orchestrator.initialize_models()
-        
-        # Load index (will handle missing index gracefully if ingestion is disabled)
-        self.orchestrator.load_index(storage_dir=storage_dir)
-        
-        # Check if index was actually loaded (might be None if ingestion disabled)
-        if self.orchestrator.index is None:
-            logger.warning("rag_pipeline_index_not_loaded", message="Index is None, pipeline will not be functional")
-            # Don't set _initialized to True if index is None
-            return
-        
-        self._initialized = True
-        logger.info("rag_pipeline_initialized", storage_dir=storage_dir)
+        try:
+            # Initialize models (model loading is always allowed, even on Cloud Run)
+            # This will raise RuntimeError if models cannot be loaded from cache
+            self.orchestrator.initialize_models()
+            
+            # Load index (will handle missing index gracefully if ingestion is disabled)
+            self.orchestrator.load_index(storage_dir=storage_dir)
+            
+            # Check if index was actually loaded (might be None if ingestion disabled)
+            if self.orchestrator.index is None:
+                logger.warning("rag_pipeline_index_not_loaded", message="Index is None, pipeline will not be functional")
+                self._initialized = False
+                return False
+            
+            self._initialized = True
+            logger.info("rag_pipeline_initialized", storage_dir=storage_dir)
+            return True
+            
+        except Exception as e:
+            logger.error("rag_pipeline_init_failed", error=str(e), exc_info=True)
+            self._initialized = False
+            # Re-raise the exception so caller can handle it (fail-fast in prod)
+            raise
     
     def query(
         self,
@@ -218,7 +230,7 @@ def get_rag_pipeline(cache_dir="/root/.cache/huggingface/hub", db_manager=None) 
     return _pipeline_instance
 
 
-def initialize_rag_pipeline(storage_dir="latest_model", cache_dir="/root/.cache/huggingface/hub", db_manager=None) -> RAGPipeline:
+def initialize_rag_pipeline(storage_dir="latest_model", cache_dir="/root/.cache/huggingface/hub", db_manager=None) -> Tuple[RAGPipeline, bool]:
     """
     Initialize and return RAG pipeline instance.
     
@@ -231,11 +243,13 @@ def initialize_rag_pipeline(storage_dir="latest_model", cache_dir="/root/.cache/
         db_manager: Optional database manager
         
     Returns:
-        Initialized RAGPipeline instance
+        Tuple of (RAGPipeline instance, success: bool)
+        - success is True if both model and index loaded successfully
+        - success is False if initialization failed (e.g., index missing)
     """
     pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
-    pipeline.initialize(storage_dir=storage_dir)
-    return pipeline
+    success = pipeline.initialize(storage_dir=storage_dir)
+    return pipeline, success
 
 
 # Legacy compatibility functions for existing code

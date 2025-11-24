@@ -415,81 +415,88 @@ async def lifespan(app: FastAPI):
     logger.info("database_connection_check_passed", message=integrity_message)
     
     # Initialize RAG pipeline
-    # Note: Model loading is always allowed (for query embeddings)
-    # Ingestion (index building) is disabled on Cloud Run via should_skip_ingestion()
+    # In production: fail-fast if RAG cannot initialize (model or index missing)
+    # In dev/test: allow startup without RAG (queries will return 503)
     from backend.utils.cloud_run import should_skip_ingestion
+    from backend.utils.storage_path import resolve_storage_path
+    from backend.utils.test_mode import is_test_mode, get_index_dir
     
+    rag_ok = False
     try:
-        # Check if test mode is enabled
-        from backend.utils.test_mode import is_test_mode, get_index_dir
-        
+        # Resolve storage path (handles prod vs dev paths)
         if is_test_mode():
-            # In test mode, use test directory
             storage_path = get_index_dir()
             logger.info("test_mode_enabled", storage_path=storage_path)
-            # Create directory if it doesn't exist (will be handled by load_index)
             if not os.path.exists(storage_path):
                 os.makedirs(storage_path, exist_ok=True)
         else:
-            # Production mode: check multiple locations
-            possible_paths = [
-                "latest_model",  # Current directory
-                "../latest_model",  # Parent directory (for scripts/)
-                "/workspace/latest_model",  # RunPod workspace
-                "/workspace/ArrowSystems/latest_model",  # RunPod with ArrowSystems
-                "/workspace/storage",  # Old storage location
-                "./storage"  # Local storage
-            ]
-            
-            storage_path = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    storage_path = path
-                    break
-            
-            if not storage_path:
-                # If ingestion is disabled, allow startup without index (models will still load)
-                if should_skip_ingestion():
-                    logger.warning("Index missing but ingestion disabled — Cloud Run startup continuing without index.")
-                    storage_path = "latest_model"  # Use default path, load_index will handle missing index gracefully
-                else:
-                    raise FileNotFoundError(
-                        "Index not found. Please run 'python -m backend.ingest' first, "
-                        "or ensure the latest_model directory exists. "
-                        f"Checked paths: {possible_paths}"
-                    )
+            storage_path_obj = resolve_storage_path()
+            if storage_path_obj is None:
+                storage_path = None
+            else:
+                storage_path = str(storage_path_obj)
         
-        # Always try to initialize pipeline (models will load, index will load if available)
+        # In production, missing index is fatal
+        if storage_path is None:
+            if settings.is_prod:
+                raise FileNotFoundError(
+                    "RAG index not found in production. "
+                    "Expected index at /app/latest_model (mounted from GCS). "
+                    "Ensure index is built and uploaded to GCS bucket."
+                )
+            else:
+                logger.warning("rag_index_not_found", message="Index not found, continuing without RAG in non-prod")
+                storage_path = "latest_model"  # Default path for graceful degradation
+        
         logger.info("rag_pipeline_storage_path", storage_path=storage_path, test_mode=is_test_mode())
         
-        # Use environment variable for cache directory if set
-        # Default to /tmp/hf for Cloud Run compatibility
-        cache_dir = os.getenv('HF_HOME', '/tmp/hf')
-        # Ensure hub subdirectory exists for HuggingFace cache structure
-        if not cache_dir.endswith('hub'):
-            cache_dir = os.path.join(cache_dir, 'hub')
+        # Use cache directory from environment (set in Dockerfile: /app/.cache/huggingface)
+        # This must match the directory where models were pre-downloaded
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+        # Note: HuggingFace may expect 'hub' subdirectory, but our models are in the root
+        # The embedding_utils helper will handle this correctly
         
-        # Initialize RAG pipeline (will load models and index if available)
-        # load_index() will handle missing index gracefully if ingestion is disabled
-        rag_pipeline = initialize_rag_pipeline(
+        # Initialize RAG pipeline (returns tuple: (pipeline, success))
+        pipeline_result = initialize_rag_pipeline(
             storage_dir=storage_path,
             cache_dir=cache_dir,
             db_manager=db_manager
         )
         
-        if rag_pipeline and rag_pipeline.is_initialized():
+        if isinstance(pipeline_result, tuple):
+            rag_pipeline, rag_ok = pipeline_result
+        else:
+            # Backward compatibility: if function returns single value
+            rag_pipeline = pipeline_result
+            rag_ok = rag_pipeline.is_initialized() if rag_pipeline else False
+        
+        if rag_ok:
             logger.info("rag_pipeline_initialized", storage_path=storage_path, cache_dir=cache_dir)
         else:
-            logger.warning("rag_pipeline_initialized_without_index", message="Pipeline initialized but index not loaded (ingestion disabled or index missing)")
+            logger.warning("rag_pipeline_initialized_without_index", 
+                         message="Pipeline initialized but index not loaded (ingestion disabled or index missing)")
             
     except Exception as e:
         logger.error("rag_pipeline_init_failed", error=str(e), exc_info=True)
-        # On Cloud Run, allow startup even if pipeline init fails
-        if should_skip_ingestion():
-            logger.warning("Pipeline initialization failed but ingestion disabled — continuing startup without RAG pipeline.")
-            rag_pipeline = None
+        rag_ok = False
+        rag_pipeline = None
+        
+        # Fail-fast in production: abort startup if RAG cannot initialize
+        if settings.is_prod:
+            logger.error("rag_init_failed_in_prod", 
+                        message="RAG pipeline failed to initialize in production. Aborting startup.")
+            raise RuntimeError(
+                f"RAG pipeline failed to initialize in production: {e}. "
+                "This revision will not receive traffic. Check logs for details."
+            )
         else:
-            raise
+            logger.warning("rag_init_failed_non_prod", 
+                         message="RAG init failed; continuing without RAG in non-prod.")
+    
+    # Store pipeline instance (may be None if init failed in non-prod)
+    if not rag_ok and not settings.is_prod:
+        logger.info("server_starting_without_rag", 
+                   message="Server starting without RAG pipeline (non-prod mode)")
     
     # Initialize query summarizer
     try:
@@ -813,9 +820,25 @@ async def health_check():
         and (migration_pending is None or not migration_pending)  # Fail if migrations pending
     )
     
+    # Check RAG pipeline initialization status
+    rag_initialized = False
+    try:
+        rag_initialized = bool(rag_pipeline and rag_pipeline.is_initialized())
+    except Exception:
+        rag_initialized = False
+    
+    # Determine database status string
+    database_status = "ok"
+    if db_manager is None:
+        database_status = "not_initialized"
+    elif database_query_success is False:
+        database_status = "error"
+    elif database_query_success is None:
+        database_status = "unknown"
+    
     response = HealthResponse(
         status="ok" if is_healthy else "unhealthy",
-        rag_pipeline_initialized=rag_pipeline is not None and rag_pipeline.is_initialized(),
+        rag_pipeline_initialized=rag_initialized,
         database_connected=db_manager is not None,
         database_query_success=database_query_success,
         database="postgres",

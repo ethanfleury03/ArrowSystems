@@ -33,6 +33,7 @@ from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageCon
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.schema import NodeWithScore, TextNode, ImageNode, Document
+from backend.utils.embedding_utils import build_offline_embedding
 
 # DOCX and Markdown support
 try:

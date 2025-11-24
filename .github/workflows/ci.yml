@@ -205,6 +205,18 @@ jobs:
           build-args: |
             BUILD_ENV=production
 
+      - name: Check RAG embedding model offline
+        run: |
+          echo "🔍 Checking that embedding model can be loaded offline from built image..."
+          docker run --rm \
+            -e HF_HOME=/app/.cache/huggingface \
+            -e TRANSFORMERS_CACHE=/app/.cache/huggingface \
+            -e HF_DATASETS_CACHE=/app/.cache/huggingface \
+            -e SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface \
+            -e HF_HUB_OFFLINE=1 \
+            duraflex-backend:ci \
+            python -m backend.scripts.check_rag_offline
+
       - name: Build frontend Docker image
         uses: docker/build-push-action@v5
         with:
