@@ -43,8 +43,8 @@ def upload_directory_to_gcs(
             f"(missing docstore.json): {local_dir}"
         )
     
-    print(f"📦 Uploading RAG index from: {local_dir}")
-    print(f"   To GCS bucket: {bucket_name}/{gcs_prefix}/")
+    print(f"[UPLOAD] Uploading RAG index from: {local_dir}")
+    print(f"         To GCS bucket: {bucket_name}/{gcs_prefix}/")
     print()
     
     # Initialize GCS client
@@ -82,28 +82,28 @@ def upload_directory_to_gcs(
             
             # Check if file already exists
             if blob.exists() and not overwrite:
-                print(f"   ⏭️  Skipping (exists): {gcs_blob_path}")
+                print(f"   [SKIP] Skipping (exists): {gcs_blob_path}")
                 skipped_count += 1
                 continue
             
             # Upload file
             try:
                 blob.upload_from_filename(str(local_file_path))
-                print(f"   ✅ Uploaded: {gcs_blob_path}")
+                print(f"   [OK] Uploaded: {gcs_blob_path}")
                 uploaded_count += 1
             except Exception as e:
-                print(f"   ❌ Failed to upload {gcs_blob_path}: {e}")
+                print(f"   [ERROR] Failed to upload {gcs_blob_path}: {e}")
                 raise
     
     print()
     print("=" * 70)
-    print(f"✅ Upload complete!")
-    print(f"   Uploaded: {uploaded_count} files")
+    print(f"[SUCCESS] Upload complete!")
+    print(f"         Uploaded: {uploaded_count} files")
     if skipped_count > 0:
-        print(f"   Skipped: {skipped_count} files (already exist)")
+        print(f"         Skipped: {skipped_count} files (already exist)")
     print()
-    print(f"📋 Index is now available at: gs://{bucket_name}/{gcs_prefix}/")
-    print(f"   Cloud Run will mount this at: /app/latest_model")
+    print(f"[INFO] Index is now available at: gs://{bucket_name}/{gcs_prefix}/")
+    print(f"       Cloud Run will mount this at: /app/latest_model")
     print("=" * 70)
 
 

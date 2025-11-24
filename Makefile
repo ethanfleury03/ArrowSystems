@@ -9,8 +9,11 @@ help:
 	@echo "  make check-index     - Verify local index directory exists"
 
 upload-index:
-	@echo "📦 Uploading RAG index to GCS..."
-	python -m backend.scripts.upload_index_to_gcs --dir latest_model
+	@echo "[UPLOAD] Uploading RAG index to GCS..."
+	@echo "         Using gsutil for reliable large file uploads..."
+	gsutil -m cp -r latest_model/* gs://arrow-rag-support-prod-rag/latest_model/
+	@echo "[SUCCESS] Index uploaded successfully!"
+	@echo "         Verify with: gsutil ls gs://arrow-rag-support-prod-rag/latest_model/"
 
 check-index:
 	@echo "🔍 Checking local RAG index..."
