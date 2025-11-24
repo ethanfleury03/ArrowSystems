@@ -205,6 +205,17 @@ jobs:
           build-args: |
             BUILD_ENV=production
 
+      - name: Build backend Docker image for testing
+        run: |
+          echo "🔨 Building backend Docker image for offline model check..."
+          docker build \
+            -t duraflex-backend:ci \
+            -f backend/Dockerfile.backend \
+            --build-arg BUILD_ENV=production \
+            .
+          echo "✅ Image built successfully"
+          docker images | grep duraflex-backend
+
       - name: Check RAG embedding model offline
         run: |
           echo "🔍 Checking that embedding model can be loaded offline from built image..."
