@@ -362,6 +362,8 @@ jobs:
             --concurrency=80 \
             --cpu-boost \
             --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
+            --add-volume=name=rag-index-volume,type=gcs,bucket=arrow-rag-support-prod-rag \
+            --add-volume-mount=volume=rag-index-volume,mount-path=/app/latest_model,read-only \
             --set-env-vars=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
             --set-env-vars=HF_HOME=/app/.cache/huggingface \
