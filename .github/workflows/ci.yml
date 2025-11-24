@@ -321,6 +321,22 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set up Python for index upload
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install GCS dependencies
+        run: |
+          pip install --upgrade pip
+          pip install google-cloud-storage
+
+      - name: Upload RAG index to GCS
+        run: |
+          echo "📦 Uploading RAG index to GCS bucket..."
+          python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag
+        continue-on-error: true  # Don't fail deploy if index already exists
+
       - name: Build & Push Backend Image
         uses: docker/build-push-action@v5
         with:

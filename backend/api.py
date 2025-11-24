@@ -473,8 +473,19 @@ async def lifespan(app: FastAPI):
         if rag_ok:
             logger.info("rag_pipeline_initialized", storage_path=storage_path, cache_dir=cache_dir)
         else:
-            logger.warning("rag_pipeline_initialized_without_index", 
-                         message="Pipeline initialized but index not loaded (ingestion disabled or index missing)")
+            # In production, initialization failure is fatal
+            if settings.is_prod:
+                logger.error("rag_init_failed_in_prod", 
+                            message="RAG pipeline failed to initialize in production (index or model load failed). Aborting startup.")
+                raise RuntimeError(
+                    f"RAG pipeline failed to initialize in production. "
+                    f"Index path: {storage_path}. "
+                    "This revision will not receive traffic. "
+                    "Check logs for details and ensure index is uploaded to GCS bucket."
+                )
+            else:
+                logger.warning("rag_pipeline_initialized_without_index", 
+                             message="Pipeline initialized but index not loaded (ingestion disabled or index missing)")
             
     except Exception as e:
         logger.error("rag_pipeline_init_failed", error=str(e), exc_info=True)
