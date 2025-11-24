@@ -4,7 +4,7 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: rag-app
+  name: arrow-rag-backend
   annotations:
     run.googleapis.com/ingress: all
     run.googleapis.com/execution-environment: gen2
