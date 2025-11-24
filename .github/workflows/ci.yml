@@ -350,20 +350,30 @@ jobs:
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
+      - name: Prepare Cloud Run Service YAML
+        run: |
+          # Update the image in the YAML file with the new build
+          # Use sed compatible with both Linux and macOS
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "s|image:.*|image: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
+          else
+            sed -i "s|image:.*|image: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
+          fi
+
       - name: Deploy Backend to Cloud Run
         run: |
-          gcloud run deploy arrow-rag-backend \
-            --image=us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }} \
+          # Deploy using YAML file (includes volume mounts for RAG index)
+          # Then update env vars and secrets using gcloud flags
+          gcloud run services replace deployment/cloud-run-service.yaml \
             --region=us-central1 \
             --platform=managed \
-            --memory=8Gi \
-            --cpu=2 \
-            --timeout=900 \
-            --concurrency=80 \
-            --cpu-boost \
+            --quiet
+          
+          # Update environment variables and secrets (YAML doesn't support secrets directly)
+          gcloud run services update arrow-rag-backend \
+            --region=us-central1 \
+            --platform=managed \
             --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
-            --add-volume=name=rag-index-volume,type=gcs,bucket=arrow-rag-support-prod-rag \
-            --add-volume-mount=volume=rag-index-volume,mount-path=/app/latest_model,read-only \
             --set-env-vars=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
             --set-env-vars=HF_HOME=/app/.cache/huggingface \
