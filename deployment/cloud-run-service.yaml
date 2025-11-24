@@ -1,40 +1,31 @@
-# Google Cloud Run Service Configuration
-# This file defines the Cloud Run service configuration
-
-apiVersion: serving.knative.dev/v1
+apiVersion: run.googleapis.com/v2
 kind: Service
 metadata:
   name: arrow-rag-backend
-  annotations:
-    run.googleapis.com/ingress: all
-    run.googleapis.com/execution-environment: gen2
 spec:
   template:
-    metadata:
-      annotations:
-        run.googleapis.com/execution-environment: gen2
-        run.googleapis.com/cpu-throttling: "false"
-        autoscaling.knative.dev/maxScale: "10"
-        autoscaling.knative.dev/minScale: "0"
-    spec:
-      containerConcurrency: 100
-      timeoutSeconds: 3600
-      containers:
+    scaling:
+      minInstanceCount: 0
+      maxInstanceCount: 10
+
+    containers:
       - image: gcr.io/ragapp-476414/rag-app:latest
         ports:
-        - containerPort: 8080
+          - containerPort: 8080
+
         env:
-        - name: PYTHONPATH
-          value: "/app"
-        - name: PORT
-          value: "8080"
+          - name: PYTHONPATH
+            value: "/app"
+          - name: PORT
+            value: "8080"
+
         resources:
+          # Match your old YAML: 2 CPUs, 8Gi memory
+          cpuIdle: false
           limits:
             cpu: "2"
             memory: "8Gi"
-          requests:
-            cpu: "1"
-            memory: "4Gi"
+
         startupProbe:
           httpGet:
             path: /health
@@ -43,6 +34,7 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
+
         livenessProbe:
           httpGet:
             path: /health
@@ -51,19 +43,20 @@ spec:
           periodSeconds: 30
           timeoutSeconds: 5
           failureThreshold: 3
+
         volumeMounts:
-        - name: data-volume
-          mountPath: /app/data
-          readOnly: true
-        - name: rag-index-volume
-          mountPath: /app/latest_model
-          readOnly: true
-      volumes:
-      - name: data-volume
-        gcs:
-          bucketName: ragapp-data
-          readOnly: true
+          - name: rag-index-volume
+            mountPath: /app/latest_model
+            readOnly: true
+          - name: data-volume
+            mountPath: /app/data
+            readOnly: true
+
+    volumes:
       - name: rag-index-volume
         gcs:
-          bucketName: arrow-rag-support-prod-rag
-          readOnly: true
+          bucket: arrow-rag-support-prod-rag
+
+      - name: data-volume
+        gcs:
+          bucket: ragapp-data
