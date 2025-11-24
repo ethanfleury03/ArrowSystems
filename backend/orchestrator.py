@@ -21,6 +21,7 @@ import time
 from llama_index.core import StorageContext, load_index_from_storage, Settings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.schema import NodeWithScore, TextNode
+from .utils.embedding_utils import build_offline_embedding
 from sentence_transformers import CrossEncoder
 from rank_bm25 import BM25Okapi
 import json
@@ -3330,53 +3331,46 @@ class RAGOrchestrator:
             logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
             logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         
-        # Embedding model options (without sentence-transformers/ prefix)
+        # Embedding model options (primary: BAAI/bge-base-en-v1.5, then fallbacks)
+        # All models must be pre-downloaded in Dockerfile for offline operation
         model_options = [
-            ("BAAI/bge-large-en-v1.5", "BGE Large"),
-            ("BAAI/bge-base-en-v1.5", "BGE Base"),
-            ("all-MiniLM-L6-v2", "MiniLM"),
-            ("all-mpnet-base-v2", "MPNet")
+            ("BAAI/bge-base-en-v1.5", "BGE Base"),              # Primary prod model
+            ("BAAI/bge-large-en-v1.5", "BGE Large"),            # Optional fallback
+            ("sentence-transformers/all-MiniLM-L6-v2", "MiniLM"),  # Fallback
+            ("sentence-transformers/all-mpnet-base-v2", "MPNet")   # Fallback
         ]
         
         for model_name, display_name in model_options:
             try:
                 logger.info(f"Loading embedding model: {display_name} ({model_name})")
                 
-                self.embed_model = HuggingFaceEmbedding(
+                # Use offline embedding helper (enforces local_files_only=True)
+                self.embed_model = build_offline_embedding(
                     model_name=model_name,
-                    cache_folder=self.cache_dir,
-                    trust_remote_code=True,
+                    cache_dir=self.cache_dir,
                     device=device
                 )
-                logger.info("embedding_model_loaded", model=display_name, device=device)
+                logger.info("embedding_model_loaded", model=display_name, device=device, offline=True)
                 break
             except Exception as e:
                 logger.warning(f"Failed to load {display_name}: {str(e)[:100]}")
-                # Try with sentence-transformers prefix if not already
-                if not model_name.startswith("sentence-transformers/"):
-                    try:
-                        full_name = f"sentence-transformers/{model_name}"
-                        self.embed_model = HuggingFaceEmbedding(
-                            model_name=full_name,
-                            cache_folder=self.cache_dir,
-                            trust_remote_code=True,
-                            device=device
-                        )
-                        logger.info("embedding_model_loaded", model=display_name, device=device, prefix=True)
-                        break
-                    except:
-                        continue
+                continue
         
         if not self.embed_model:
-            # Emergency fallback
+            # Emergency fallback - try MiniLM without sentence-transformers prefix
             try:
-                self.embed_model = HuggingFaceEmbedding(
+                logger.warning("All primary models failed, trying emergency fallback...")
+                self.embed_model = build_offline_embedding(
                     model_name="all-MiniLM-L6-v2",
-                    cache_folder=self.cache_dir
+                    cache_dir=self.cache_dir,
+                    device=device
                 )
                 logger.info("✅ Loaded with emergency fallback")
-            except:
-                raise RuntimeError("Could not load embedding model. Check internet connection.")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not load any embedding model from cache. "
+                    f"Ensure models are pre-downloaded in Dockerfile. Error: {e}"
+                )
         
         # Re-ranker model
         try:
