@@ -371,6 +371,14 @@ jobs:
             ls -la $(dirname $CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE) || echo "Credentials file directory not found"
           fi
 
+      - name: Remove stale Docker credentials
+        run: |
+          echo "Deleting stale Docker credential store..."
+          rm -f ~/.docker/config.json
+          mkdir -p ~/.docker
+          echo '{}' > ~/.docker/config.json
+          echo "Docker credential store reset."
+
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
@@ -534,6 +542,14 @@ jobs:
           if [ -n "$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" ]; then
             ls -la $(dirname $CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE) || echo "Credentials file directory not found"
           fi
+
+      - name: Remove stale Docker credentials
+        run: |
+          echo "Deleting stale Docker credential store..."
+          rm -f ~/.docker/config.json
+          mkdir -p ~/.docker
+          echo '{}' > ~/.docker/config.json
+          echo "Docker credential store reset."
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
