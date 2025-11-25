@@ -393,6 +393,8 @@ jobs:
       - name: Authenticate Docker with Artifact Registry
         run: |
           echo "Authenticating Docker with Artifact Registry using WIF credentials..."
+          echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
+          gcloud auth activate-service-account --key-file=${{ steps.auth.outputs.credentials_file_path }} --project=${{ secrets.GCP_PROJECT_ID }}
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
@@ -571,6 +573,8 @@ jobs:
       - name: Authenticate Docker with Artifact Registry
         run: |
           echo "Authenticating Docker with Artifact Registry using WIF credentials..."
+          echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
+          gcloud auth activate-service-account --key-file=${{ steps.auth.outputs.credentials_file_path }} --project=${{ secrets.GCP_PROJECT_ID }}
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
