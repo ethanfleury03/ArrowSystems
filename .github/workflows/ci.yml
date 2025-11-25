@@ -357,10 +357,19 @@ jobs:
           create_credentials_file: true
         id: auth
 
-      - name: Export WIF credential override
+      - name: Export WIF credentials for Docker + gcloud
         run: |
           echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
           echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+          echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
+
+      - name: Debug env vars
+        run: |
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
+          if [ -n "$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" ]; then
+            ls -la $(dirname $CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE) || echo "Credentials file directory not found"
+          fi
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -512,10 +521,19 @@ jobs:
           create_credentials_file: true
         id: auth
 
-      - name: Export WIF credential override
+      - name: Export WIF credentials for Docker + gcloud
         run: |
           echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
           echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+          echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
+
+      - name: Debug env vars
+        run: |
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
+          if [ -n "$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" ]; then
+            ls -la $(dirname $CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE) || echo "Credentials file directory not found"
+          fi
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
