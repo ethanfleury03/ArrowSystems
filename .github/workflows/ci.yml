@@ -375,17 +375,7 @@ jobs:
         run: |
           echo "Disabling gcloud's docker credential helper..."
           mkdir -p ~/.docker
-          cat > ~/.docker/config.json <<EOF
-{
-  "credHelpers": {
-    "us-central1-docker.pkg.dev": "none",
-    "gcr.io": "none",
-    "us.gcr.io": "none",
-    "eu.gcr.io": "none",
-    "asia.gcr.io": "none"
-  }
-}
-EOF
+          echo '{"credHelpers":{"us-central1-docker.pkg.dev":"none","gcr.io":"none","us.gcr.io":"none","eu.gcr.io":"none","asia.gcr.io":"none"}}' > ~/.docker/config.json
           cat ~/.docker/config.json
 
       - name: Setup gcloud
@@ -556,17 +546,7 @@ EOF
         run: |
           echo "Disabling gcloud's docker credential helper..."
           mkdir -p ~/.docker
-          cat > ~/.docker/config.json <<EOF
-{
-  "credHelpers": {
-    "us-central1-docker.pkg.dev": "none",
-    "gcr.io": "none",
-    "us.gcr.io": "none",
-    "eu.gcr.io": "none",
-    "asia.gcr.io": "none"
-  }
-}
-EOF
+          echo '{"credHelpers":{"us-central1-docker.pkg.dev":"none","gcr.io":"none","us.gcr.io":"none","eu.gcr.io":"none","asia.gcr.io":"none"}}' > ~/.docker/config.json
           cat ~/.docker/config.json
 
       - name: Setup gcloud
