@@ -391,10 +391,15 @@ jobs:
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
 
       - name: Authenticate Docker with Artifact Registry
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           echo "Authenticating Docker with Artifact Registry using WIF credentials..."
           echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
-          gcloud auth activate-service-account --key-file=${{ steps.auth.outputs.credentials_file_path }} --project=${{ secrets.GCP_PROJECT_ID }}
+          # Clear any cached gcloud auth to prevent using deleted account
+          gcloud config unset auth/credential_file_override 2>/dev/null || true
+          # Get access token and login to Docker
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
@@ -571,10 +576,15 @@ jobs:
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
 
       - name: Authenticate Docker with Artifact Registry
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           echo "Authenticating Docker with Artifact Registry using WIF credentials..."
           echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
-          gcloud auth activate-service-account --key-file=${{ steps.auth.outputs.credentials_file_path }} --project=${{ secrets.GCP_PROJECT_ID }}
+          # Clear any cached gcloud auth to prevent using deleted account
+          gcloud config unset auth/credential_file_override 2>/dev/null || true
+          # Get access token and login to Docker
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
