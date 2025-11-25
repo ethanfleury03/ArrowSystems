@@ -12,6 +12,9 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 warnings.filterwarnings("ignore", message=".*wrong pointing object.*")
 
 import os
+# Set ingestion-safe mode by default (disable metadata updates)
+os.environ["DISABLE_METADATA_UPDATE"] = os.environ.get("DISABLE_METADATA_UPDATE", "1")
+
 import logging
 import time
 import json
@@ -49,6 +52,10 @@ import qdrant_client
 import shutil
 import tarfile
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Try to import Anthropic (optional dependency)
 try:
     from anthropic import Anthropic
@@ -56,10 +63,6 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
     logger.warning("Anthropic package not available. Claude rewriting will be disabled.")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Suppress pypdf warnings for malformed PDFs
 logging.getLogger("pypdf").setLevel(logging.ERROR)
@@ -1811,39 +1814,48 @@ class TechnicalRAGPipeline:
             print(f"   ✅ Index saved to: Qdrant")
             logger.info("✅ Index created and saved to Qdrant")
         
-        # Step 7: Update document metadata for all ingested files
-        print("\n[Step 7/7] 📝 Updating document metadata...")
-        from backend.utils.document_metadata import ensure_metadata_entry
-
-        
-        # Collect all unique filenames from documents
-        unique_filenames = set()
-        for doc in documents:
-            filename = doc.metadata.get('file_name')
-            if filename:
-                unique_filenames.add(filename)
-        
-        # Also check from nodes (in case some documents were filtered out)
-        for node in all_nodes:
-            filename = node.metadata.get('file_name')
-            if filename:
-                unique_filenames.add(filename)
-        
-        # Update metadata for each document
+        # --------------------------
+        # STEP 7 — METADATA UPDATE
+        # --------------------------
         metadata_updated = 0
         metadata_needs_review = 0
-        for filename in unique_filenames:
-            try:
-                meta_entry = ensure_metadata_entry(filename)
-                metadata_updated += 1
-                if meta_entry.get("requires_admin_review"):
-                    metadata_needs_review += 1
-            except Exception as e:
-                logger.warning(f"Failed to update metadata for {filename}: {e}")
         
-        print(f"   ✅ Updated metadata for {metadata_updated} documents")
-        if metadata_needs_review > 0:
-            print(f"   ⚠️  {metadata_needs_review} documents require admin review (missing machine_model)")
+        if os.environ.get("DISABLE_METADATA_UPDATE", "1") == "1":
+            logger.warning("Skipping metadata update step (DISABLE_METADATA_UPDATE=1).")
+            print("\n[Step 7/7] 📝 Updating document metadata...")
+            print("   ⚠️  Metadata update disabled (DISABLE_METADATA_UPDATE=1)")
+        else:
+            # Lazy import — only if needed
+            from backend.utils.document_metadata import ensure_metadata_entry
+            
+            print("\n[Step 7/7] 📝 Updating document metadata...")
+            
+            # Collect all unique filenames from documents
+            unique_filenames = set()
+            for doc in documents:
+                filename = doc.metadata.get('file_name')
+                if filename:
+                    unique_filenames.add(filename)
+            
+            # Also check from nodes (in case some documents were filtered out)
+            for node in all_nodes:
+                filename = node.metadata.get('file_name')
+                if filename:
+                    unique_filenames.add(filename)
+            
+            # Update metadata for each document
+            for filename in unique_filenames:
+                try:
+                    meta_entry = ensure_metadata_entry(filename)
+                    metadata_updated += 1
+                    if meta_entry.get("requires_admin_review"):
+                        metadata_needs_review += 1
+                except Exception as e:
+                    logger.warning(f"Failed to update metadata for {filename}: {e}")
+            
+            print(f"   ✅ Updated metadata for {metadata_updated} documents")
+            if metadata_needs_review > 0:
+                print(f"   ⚠️  {metadata_needs_review} documents require admin review (missing machine_model)")
         
         # Final summary
         total_time = time.time() - start_time
@@ -1855,9 +1867,12 @@ class TechnicalRAGPipeline:
         print(f"📊 Text nodes created: {len(filtered_nodes)} ({skipped_nodes} filtered)")
         print(f"📊 Non-text nodes: {len(non_text_nodes)}")
         print(f"📊 Total nodes indexed: {len(all_nodes)}")
-        print(f"📝 Metadata updated: {metadata_updated} documents")
-        if metadata_needs_review > 0:
-            print(f"⚠️  Documents needing review: {metadata_needs_review}")
+        if os.environ.get("DISABLE_METADATA_UPDATE", "1") == "1":
+            print(f"📝 Metadata update: Skipped (DISABLE_METADATA_UPDATE=1)")
+        else:
+            print(f"📝 Metadata updated: {metadata_updated} documents")
+            if metadata_needs_review > 0:
+                print(f"⚠️  Documents needing review: {metadata_needs_review}")
         if self.claude_rewriter.enabled:
             print(f"🤖 Claude rewriting: Enabled (check logs for rewrite statistics)")
         print(f"⏱️  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
