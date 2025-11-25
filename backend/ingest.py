@@ -1813,7 +1813,8 @@ class TechnicalRAGPipeline:
         
         # Step 7: Update document metadata for all ingested files
         print("\n[Step 7/7] 📝 Updating document metadata...")
-        from .utils.document_metadata import ensure_metadata_entry
+        from backend.utils.document_metadata import ensure_metadata_entry
+
         
         # Collect all unique filenames from documents
         unique_filenames = set()

@@ -95,3 +95,5 @@ models/
 *.sqlite3
 rag_app.db
 
+compute-key.json
+deploy-key.json

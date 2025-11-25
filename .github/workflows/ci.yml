@@ -362,17 +362,50 @@ jobs:
 
       - name: Deploy Backend to Cloud Run
         run: |
-          # Deploy using YAML file (includes volume mounts for RAG index)
-          # Then update env vars and secrets using gcloud flags
+          # Step 1: Deploy base service configuration from YAML (Cloud Run v2)
+          echo "Deploying base service configuration..."
           gcloud run services replace deployment/cloud-run-service.yaml \
             --region=us-central1 \
             --platform=managed \
+            --project=arrow-rag-support-prod \
             --quiet
           
-          # Update environment variables and secrets (YAML doesn't support secrets directly)
+          # Step 2: Add GCS volume mounts (not supported in Cloud Run v2 YAML)
+          echo "Adding RAG index volume mount..."
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
             --platform=managed \
+            --project=arrow-rag-support-prod \
+            --add-volume=name=rag-index-volume,type=gcs,bucket=arrow-rag-support-prod-rag \
+            --add-volume-mount=volume=rag-index-volume,mount-path=/app/latest_model \
+            --quiet
+          
+          echo "Adding data volume mount..."
+          gcloud run services update arrow-rag-backend \
+            --region=us-central1 \
+            --platform=managed \
+            --project=arrow-rag-support-prod \
+            --add-volume=name=data-volume,type=gcs,bucket=ragapp-data \
+            --add-volume-mount=volume=data-volume,mount-path=/app/data \
+            --quiet
+          
+          # Step 3: Set scaling and concurrency (not supported in Cloud Run v2 YAML)
+          echo "Setting scaling and concurrency configuration..."
+          gcloud run services update arrow-rag-backend \
+            --region=us-central1 \
+            --platform=managed \
+            --project=arrow-rag-support-prod \
+            --min-instances=0 \
+            --max-instances=10 \
+            --concurrency=100 \
+            --quiet
+          
+          # Step 4: Update environment variables and secrets
+          echo "Updating environment variables and secrets..."
+          gcloud run services update arrow-rag-backend \
+            --region=us-central1 \
+            --platform=managed \
+            --project=arrow-rag-support-prod \
             --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
             --set-env-vars=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
@@ -387,6 +420,8 @@ jobs:
             --set-env-vars=AUTH_COOKIE_SECURE=true \
             --allow-unauthenticated \
             --quiet
+          
+          echo "✅ Deployment complete!"
 
       - name: Get service URL
         id: get-service-url
