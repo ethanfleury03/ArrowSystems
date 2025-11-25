@@ -45,6 +45,25 @@ jobs:
             exit 1
           fi
           echo "✅ DATABASE_URL is set"
+          
+          # Check WIF secrets
+          if [ -z "${{ secrets.WIF_PROVIDER }}" ]; then
+            echo "❌ WIF_PROVIDER is not set!"
+            exit 1
+          fi
+          echo "✅ WIF_PROVIDER is set"
+          
+          if [ -z "${{ secrets.WIF_SERVICE_ACCOUNT }}" ]; then
+            echo "❌ WIF_SERVICE_ACCOUNT is not set!"
+            exit 1
+          fi
+          echo "✅ WIF_SERVICE_ACCOUNT is set"
+          
+          if [ -z "${{ secrets.GCP_PROJECT_ID }}" ]; then
+            echo "❌ GCP_PROJECT_ID is not set!"
+            exit 1
+          fi
+          echo "✅ GCP_PROJECT_ID is set"
 
       - name: Validate Config Files
         run: |
@@ -258,12 +277,13 @@ jobs:
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: projects/70705019874/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-          service_account: github-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
-
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Validate service account authentication
         run: |
@@ -272,13 +292,12 @@ jobs:
 
       - name: Validate project access
         run: |
-          gcloud config set project arrow-rag-support-prod
-          gcloud projects describe arrow-rag-support-prod
+          gcloud projects describe ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Validate Artifact Registry access
         run: |
           gcloud artifacts repositories list \
-            --project=arrow-rag-support-prod \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --location=us-central1
 
       - name: Validate Cloud Run access
@@ -289,7 +308,7 @@ jobs:
 
       - name: Validate Cloud SQL access
         run: |
-          gcloud sql instances list --project=arrow-rag-support-prod
+          gcloud sql instances list --project=${{ secrets.GCP_PROJECT_ID }}
 
   deploy-backend:
     name: Deploy Backend to Cloud Run
@@ -306,14 +325,13 @@ jobs:
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: projects/70705019874/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-          service_account: github-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
-
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: arrow-rag-support-prod
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
@@ -343,7 +361,7 @@ jobs:
           context: .
           file: ./backend/Dockerfile.backend
           push: true
-          tags: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }}
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
@@ -355,9 +373,9 @@ jobs:
           # Update the image in the YAML file with the new build
           # Use sed compatible with both Linux and macOS
           if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' "s|image:.*|image: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
+            sed -i '' "s|image:.*|image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
           else
-            sed -i "s|image:.*|image: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
+            sed -i "s|image:.*|image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
           fi
 
       - name: Deploy Backend to Cloud Run
@@ -367,7 +385,7 @@ jobs:
           gcloud run services replace deployment/cloud-run-service.yaml \
             --region=us-central1 \
             --platform=managed \
-            --project=arrow-rag-support-prod \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --quiet
           
           # Step 2: Add GCS volume mounts (not supported in Cloud Run v2 YAML)
@@ -375,7 +393,7 @@ jobs:
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
             --platform=managed \
-            --project=arrow-rag-support-prod \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --add-volume=name=rag-index-volume,type=gcs,bucket=arrow-rag-support-prod-rag \
             --add-volume-mount=volume=rag-index-volume,mount-path=/app/latest_model \
             --quiet
@@ -384,7 +402,7 @@ jobs:
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
             --platform=managed \
-            --project=arrow-rag-support-prod \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --add-volume=name=data-volume,type=gcs,bucket=ragapp-data \
             --add-volume-mount=volume=data-volume,mount-path=/app/data \
             --quiet
@@ -394,7 +412,7 @@ jobs:
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
             --platform=managed \
-            --project=arrow-rag-support-prod \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --min-instances=0 \
             --max-instances=10 \
             --concurrency=100 \
@@ -405,7 +423,7 @@ jobs:
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
             --platform=managed \
-            --project=arrow-rag-support-prod \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
             --set-env-vars=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
@@ -448,14 +466,13 @@ jobs:
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: projects/70705019874/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-          service_account: github-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
-
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: arrow-rag-support-prod
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
@@ -469,7 +486,7 @@ jobs:
           context: ./frontend
           file: ./frontend/Dockerfile
           push: true
-          tags: us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-frontend/frontend:${{ github.sha }}
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-frontend/frontend:${{ github.sha }}
           platforms: linux/amd64
           target: production
           build-args: |
@@ -482,7 +499,7 @@ jobs:
       - name: Deploy Frontend to Cloud Run
         run: |
           gcloud run deploy arrow-rag-frontend \
-            --image=us-central1-docker.pkg.dev/arrow-rag-support-prod/arrow-rag-frontend/frontend:${{ github.sha }} \
+            --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-frontend/frontend:${{ github.sha }} \
             --region=us-central1 \
             --platform=managed \
             --memory=1Gi \
@@ -521,4 +538,3 @@ jobs:
         run: |
           echo "⚠️  Linting placeholder - ruff/black/tsc coming later"
           echo "✅ Lint job completed (placeholder)"
-
