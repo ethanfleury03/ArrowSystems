@@ -392,8 +392,7 @@ jobs:
           context: .
           file: ./backend/Dockerfile.backend
           push: true
-          tags: >-
-            us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
@@ -526,8 +525,7 @@ jobs:
           context: ./frontend
           file: ./frontend/Dockerfile
           push: true
-          tags: >-
-            us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-frontend/frontend:${{ github.sha }}
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-frontend/frontend:${{ github.sha }}
           platforms: linux/amd64
           target: production
           build-args: |
