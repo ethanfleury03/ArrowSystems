@@ -274,16 +274,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud (WIF)
+      - name: Clear old auth (important!)
+        run: rm -rf ~/.config/gcloud
+
+      - name: Authenticate via Workload Identity Federation
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - name: Set up gcloud
+      - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: "beta"
 
       - name: Validate service account authentication
         run: |
@@ -322,16 +326,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud (WIF)
+      - name: Clear old auth (important!)
+        run: rm -rf ~/.config/gcloud
+
+      - name: Authenticate via Workload Identity Federation
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - name: Set up gcloud
+      - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: "beta"
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
@@ -463,16 +471,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud (WIF)
+      - name: Clear old auth (important!)
+        run: rm -rf ~/.config/gcloud
+
+      - name: Authenticate via Workload Identity Federation
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - name: Set up gcloud
+      - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: "beta"
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
