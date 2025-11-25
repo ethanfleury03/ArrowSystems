@@ -288,8 +288,8 @@ jobs:
         with:
           install_components: "beta"
 
-      - name: Set project
-        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+      - name: Inject project ID
+        run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
 
       - name: Validate service account authentication
         run: |
@@ -310,7 +310,8 @@ jobs:
         run: |
           gcloud run services list \
             --platform=managed \
-            --region=us-central1
+            --region=us-central1 \
+            --project=${{ secrets.GCP_PROJECT_ID }}
 
       - name: Validate Cloud SQL access
         run: |
@@ -342,8 +343,8 @@ jobs:
         with:
           install_components: "beta"
 
-      - name: Set project
-        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+      - name: Inject project ID
+        run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
@@ -458,6 +459,7 @@ jobs:
         run: |
           SERVICE_URL=$(gcloud run services describe arrow-rag-backend \
             --region=us-central1 \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --format='value(status.url)')
           echo "✅ Backend deployed successfully!"
           echo "🌐 Service URL: $SERVICE_URL"
@@ -489,8 +491,8 @@ jobs:
         with:
           install_components: "beta"
 
-      - name: Set project
-        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+      - name: Inject project ID
+        run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
@@ -520,6 +522,7 @@ jobs:
             --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-frontend/frontend:${{ github.sha }} \
             --region=us-central1 \
             --platform=managed \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --memory=1Gi \
             --cpu=1 \
             --timeout=300 \
@@ -536,6 +539,7 @@ jobs:
         run: |
           SERVICE_URL=$(gcloud run services describe arrow-rag-frontend \
             --region=us-central1 \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --format='value(status.url)')
           echo "✅ Frontend deployed successfully!"
           echo "🌐 Service URL: $SERVICE_URL"
