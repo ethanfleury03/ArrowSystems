@@ -282,24 +282,45 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          create_credentials_file: true
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           install_components: "beta"
 
-      - name: Inject project ID
-        run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
-
-      - name: Validate service account authentication
+      - name: Inject project ID and disable ADC
         run: |
-          echo "Checking GCP auth..."
+          echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
+          # Explicitly unset any ADC credentials to prevent fallback
+          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
+          unset GOOGLE_APPLICATION_CREDENTIALS || true
+
+      - name: Verify WIF credentials
+        run: |
+          echo "Verifying WIF authentication..."
           gcloud auth list
+          echo "Current account:"
+          gcloud config get-value account || echo "No account set (using WIF)"
+          echo "Checking ADC credentials..."
+          if [ -n "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+            echo "GOOGLE_APPLICATION_CREDENTIALS is set: $GOOGLE_APPLICATION_CREDENTIALS"
+          else
+            echo "GOOGLE_APPLICATION_CREDENTIALS is not set (expected with WIF)"
+          fi
 
       - name: Validate project access
         run: |
+          # Ensure we're using WIF credentials, not ADC
+          export GOOGLE_APPLICATION_CREDENTIALS=""
+          unset GOOGLE_APPLICATION_CREDENTIALS || true
+          # Clear any cached ADC tokens
+          rm -rf ~/.config/gcloud/application_default_credentials.json || true
+          # Run the command with explicit project
           gcloud projects describe ${{ secrets.GCP_PROJECT_ID }} \
-            --project=${{ secrets.GCP_PROJECT_ID }}
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format=json
 
       - name: Validate Artifact Registry access
         run: |
@@ -338,6 +359,7 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -486,6 +508,7 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
