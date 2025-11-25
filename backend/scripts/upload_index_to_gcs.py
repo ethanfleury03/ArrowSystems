@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from google.cloud import storage
 from google.cloud.exceptions import NotFound
+from google.api_core import exceptions
 
 
 def upload_directory_to_gcs(
@@ -57,7 +58,7 @@ def upload_directory_to_gcs(
             "Ensure you have gcloud auth configured and the bucket exists."
         )
     
-    # Check if bucket exists
+    # Check if bucket exists (skip if we don't have permission to check)
     try:
         bucket.reload()
     except NotFound:
@@ -65,6 +66,11 @@ def upload_directory_to_gcs(
             f"Bucket '{bucket_name}' does not exist. "
             "Create it with: gsutil mb gs://{bucket_name}"
         )
+    except exceptions.Forbidden:
+        # Don't have permission to check bucket metadata, but we can still try to upload
+        print(f"[WARN] Cannot verify bucket '{bucket_name}' exists (missing storage.buckets.get permission)")
+        print("         Attempting to upload anyway...")
+        print()
     
     # Upload all files in the directory
     uploaded_count = 0
