@@ -298,7 +298,8 @@ jobs:
 
       - name: Validate project access
         run: |
-          gcloud projects describe ${{ secrets.GCP_PROJECT_ID }}
+          gcloud projects describe ${{ secrets.GCP_PROJECT_ID }} \
+            --project=${{ secrets.GCP_PROJECT_ID }}
 
       - name: Validate Artifact Registry access
         run: |
