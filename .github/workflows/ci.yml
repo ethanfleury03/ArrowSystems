@@ -355,6 +355,10 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           create_credentials_file: true
+        id: auth
+
+      - name: Export WIF credential file override
+        run: echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -365,7 +369,8 @@ jobs:
         run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
 
       - name: Configure Docker for Artifact Registry
-        run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
+        run: |
+          gcloud --quiet auth configure-docker us-central1-docker.pkg.dev --credential-helper=gcloud
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -504,6 +509,10 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           create_credentials_file: true
+        id: auth
+
+      - name: Export WIF credential file override
+        run: echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -514,7 +523,8 @@ jobs:
         run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
 
       - name: Configure Docker for Artifact Registry
-        run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
+        run: |
+          gcloud --quiet auth configure-docker us-central1-docker.pkg.dev --credential-helper=gcloud
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
