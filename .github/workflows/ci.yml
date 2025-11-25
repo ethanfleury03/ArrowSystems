@@ -433,27 +433,18 @@ jobs:
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
-      - name: Prepare Cloud Run Service YAML
+      - name: Deploy Backend to Cloud Run (v2 deploy)
         run: |
-          # Update the image in the YAML file with the new build
-          # Use sed compatible with both Linux and macOS
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' "s|image:.*|image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
-          else
-            sed -i "s|image:.*|image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}|" deployment/cloud-run-service.yaml
-          fi
-
-      - name: Deploy Backend to Cloud Run
-        run: |
-          # Step 1: Deploy base service configuration from YAML (Cloud Run v2)
-          echo "Deploying base service configuration..."
-          gcloud run services replace deployment/cloud-run-service.yaml \
+          gcloud run deploy arrow-rag-backend \
+            --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }} \
             --region=us-central1 \
             --platform=managed \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --quiet
-          
-          # Step 2: Add GCS volume mounts (not supported in Cloud Run v2 YAML)
+
+      - name: Deploy Backend to Cloud Run
+        run: |
+          # Step 1: Add GCS volume mounts (not supported in Cloud Run v2 YAML)
           echo "Adding RAG index volume mount..."
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
