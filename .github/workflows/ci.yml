@@ -371,13 +371,22 @@ jobs:
             ls -la $(dirname $CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE) || echo "Credentials file directory not found"
           fi
 
-      - name: Remove stale Docker credentials
+      - name: Disable gcloud docker credential helper
         run: |
-          echo "Deleting stale Docker credential store..."
-          rm -f ~/.docker/config.json
+          echo "Disabling gcloud's docker credential helper..."
           mkdir -p ~/.docker
-          echo '{}' > ~/.docker/config.json
-          echo "Docker credential store reset."
+          cat > ~/.docker/config.json <<EOF
+{
+  "credHelpers": {
+    "us-central1-docker.pkg.dev": "none",
+    "gcr.io": "none",
+    "us.gcr.io": "none",
+    "eu.gcr.io": "none",
+    "asia.gcr.io": "none"
+  }
+}
+EOF
+          cat ~/.docker/config.json
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -543,13 +552,22 @@ jobs:
             ls -la $(dirname $CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE) || echo "Credentials file directory not found"
           fi
 
-      - name: Remove stale Docker credentials
+      - name: Disable gcloud docker credential helper
         run: |
-          echo "Deleting stale Docker credential store..."
-          rm -f ~/.docker/config.json
+          echo "Disabling gcloud's docker credential helper..."
           mkdir -p ~/.docker
-          echo '{}' > ~/.docker/config.json
-          echo "Docker credential store reset."
+          cat > ~/.docker/config.json <<EOF
+{
+  "credHelpers": {
+    "us-central1-docker.pkg.dev": "none",
+    "gcr.io": "none",
+    "us.gcr.io": "none",
+    "eu.gcr.io": "none",
+    "asia.gcr.io": "none"
+  }
+}
+EOF
+          cat ~/.docker/config.json
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
