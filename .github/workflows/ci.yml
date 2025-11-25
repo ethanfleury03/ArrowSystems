@@ -286,8 +286,10 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
           install_components: "beta"
+
+      - name: Set project
+        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Validate service account authentication
         run: |
@@ -338,8 +340,10 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
           install_components: "beta"
+
+      - name: Set project
+        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
@@ -483,8 +487,10 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
           install_components: "beta"
+
+      - name: Set project
+        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
