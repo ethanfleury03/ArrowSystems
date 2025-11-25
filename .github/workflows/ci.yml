@@ -386,9 +386,10 @@ jobs:
         run: |
           echo "Disabling gcloud's docker credential helper (overriding gcloud auth configure-docker)..."
           mkdir -p ~/.docker
-          echo '{"credHelpers":{"us-central1-docker.pkg.dev":"none","gcr.io":"none","us.gcr.io":"none","eu.gcr.io":"none","asia.gcr.io":"none"}}' > ~/.docker/config.json
+          echo '{}' > ~/.docker/config.json
           cat ~/.docker/config.json
           echo "Docker will use GOOGLE_APPLICATION_CREDENTIALS from environment"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -558,9 +559,10 @@ jobs:
         run: |
           echo "Disabling gcloud's docker credential helper (overriding gcloud auth configure-docker)..."
           mkdir -p ~/.docker
-          echo '{"credHelpers":{"us-central1-docker.pkg.dev":"none","gcr.io":"none","us.gcr.io":"none","eu.gcr.io":"none","asia.gcr.io":"none"}}' > ~/.docker/config.json
+          echo '{}' > ~/.docker/config.json
           cat ~/.docker/config.json
           echo "Docker will use GOOGLE_APPLICATION_CREDENTIALS from environment"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
