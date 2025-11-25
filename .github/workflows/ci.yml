@@ -445,26 +445,7 @@ jobs:
 
       - name: Deploy Backend to Cloud Run
         run: |
-          # Step 1: Add GCS volume mounts (requires gen2 execution environment)
-          echo "Adding RAG index volume mount..."
-          gcloud run services update arrow-rag-backend \
-            --region=us-central1 \
-            --platform=managed \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --add-volume=name=rag-index-volume,type=gcs,bucket=arrow-rag-support-prod-rag \
-            --add-volume-mount=volume=rag-index-volume,mount-path=/app/latest_model \
-            --quiet
-          
-          echo "Adding data volume mount..."
-          gcloud run services update arrow-rag-backend \
-            --region=us-central1 \
-            --platform=managed \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --add-volume=name=data-volume,type=gcs,bucket=ragapp-data \
-            --add-volume-mount=volume=data-volume,mount-path=/app/data \
-            --quiet
-          
-          # Step 3: Set scaling and concurrency (not supported in Cloud Run v2 YAML)
+          # Step 1: Set scaling and concurrency
           echo "Setting scaling and concurrency configuration..."
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
