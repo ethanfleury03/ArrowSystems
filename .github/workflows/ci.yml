@@ -274,10 +274,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Clear old auth (important!)
+      - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
-      - name: Authenticate via Workload Identity Federation
+      - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -326,10 +326,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Clear old auth (important!)
+      - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
-      - name: Authenticate via Workload Identity Federation
+      - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -471,10 +471,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Clear old auth (important!)
+      - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
-      - name: Authenticate via Workload Identity Federation
+      - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
