@@ -390,17 +390,23 @@ jobs:
           cat ~/.docker/config.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
 
+      - name: Install google-auth library
+        run: pip install --quiet google-auth google-auth-oauthlib google-auth-httplib2
+
       - name: Authenticate Docker with Artifact Registry
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
-          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           echo "Authenticating Docker with Artifact Registry using WIF credentials..."
           echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
-          # Clear any cached gcloud auth to prevent using deleted account
-          gcloud config unset auth/credential_file_override 2>/dev/null || true
-          # Get access token and login to Docker
-          gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
+          # Get access token using Python (bypasses gcloud's cached credentials)
+          python3 -c "
+          from google.auth import default
+          from google.auth.transport.requests import Request
+          credentials, project = default()
+          credentials.refresh(Request())
+          print(credentials.token)
+          " | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
       - name: Set up Docker Buildx
@@ -575,17 +581,23 @@ jobs:
           cat ~/.docker/config.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
 
+      - name: Install google-auth library
+        run: pip install --quiet google-auth google-auth-oauthlib google-auth-httplib2
+
       - name: Authenticate Docker with Artifact Registry
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
-          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           echo "Authenticating Docker with Artifact Registry using WIF credentials..."
           echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
-          # Clear any cached gcloud auth to prevent using deleted account
-          gcloud config unset auth/credential_file_override 2>/dev/null || true
-          # Get access token and login to Docker
-          gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
+          # Get access token using Python (bypasses gcloud's cached credentials)
+          python3 -c "
+          from google.auth import default
+          from google.auth.transport.requests import Request
+          credentials, project = default()
+          credentials.refresh(Request())
+          print(credentials.token)
+          " | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
       - name: Set up Docker Buildx
