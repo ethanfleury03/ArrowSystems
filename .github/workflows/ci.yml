@@ -440,11 +440,12 @@ jobs:
             --region=us-central1 \
             --platform=managed \
             --project=${{ secrets.GCP_PROJECT_ID }} \
+            --execution-environment=gen2 \
             --quiet
 
       - name: Deploy Backend to Cloud Run
         run: |
-          # Step 1: Add GCS volume mounts (not supported in Cloud Run v2 YAML)
+          # Step 1: Add GCS volume mounts (requires gen2 execution environment)
           echo "Adding RAG index volume mount..."
           gcloud run services update arrow-rag-backend \
             --region=us-central1 \
