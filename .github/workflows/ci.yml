@@ -500,16 +500,6 @@ jobs:
             --set-env-vars=AUTH_COOKIE_SECURE=true \
             --quiet
           
-          # Step: Allow unauthenticated access
-          echo "Setting unauthenticated access..."
-          gcloud run services add-iam-policy-binding arrow-rag-backend \
-            --region=us-central1 \
-            --platform=managed \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --member="allUsers" \
-            --role="roles/run.invoker" \
-            --quiet
-          
           echo "✅ Deployment complete!"
 
       - name: Get service URL
