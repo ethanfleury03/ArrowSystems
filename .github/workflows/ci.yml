@@ -357,8 +357,10 @@ jobs:
           create_credentials_file: true
         id: auth
 
-      - name: Export WIF credential file override
-        run: echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+      - name: Export WIF credential override
+        run: |
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+          echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -510,8 +512,10 @@ jobs:
           create_credentials_file: true
         id: auth
 
-      - name: Export WIF credential file override
-        run: echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+      - name: Export WIF credential override
+        run: |
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+          echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
