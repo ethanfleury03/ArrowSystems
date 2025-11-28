@@ -465,6 +465,9 @@ jobs:
             --platform=managed \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --execution-environment=gen2 \
+            --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
+            --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --set-env-vars=ENV=prod \
             --quiet
 
       - name: Deploy Backend to Cloud Run
