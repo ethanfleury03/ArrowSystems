@@ -11,7 +11,13 @@
 
 import { GoogleAuth } from 'google-auth-library';
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'https://arrow-rag-backend-akymgh2oxq-uc.a.run.app';
+// Get backend URL from environment variable (required in production)
+// Fallback URL should match the actual Cloud Run service URL
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL || 'https://arrow-rag-backend-70705019874.us-central1.run.app';
+
+if (!BACKEND_URL) {
+  throw new Error('NEXT_PUBLIC_API_URL or BACKEND_URL environment variable must be set');
+}
 
 /**
  * Make an authenticated request to the backend using Google IAM identity tokens.
@@ -26,11 +32,18 @@ export async function iamBackendRequest(
     method?: string;
     body?: any;
     headers?: Record<string, string>;
+    retries?: number; // Optional: number of retries for 503 errors
+    retryDelay?: number; // Optional: delay between retries in ms
   } = {}
 ): Promise<Response> {
-  const { method = 'GET', body, headers = {} } = options;
+  const { method = 'GET', body, headers = {}, retries = 2, retryDelay = 500 } = options;
 
-  try {
+  // Retry logic for 503 errors (handles Cloud Run cold starts)
+  const maxRetries = retries;
+  let lastError: any = null;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
     // Initialize GoogleAuth client
     const auth = new GoogleAuth();
     
@@ -62,6 +75,20 @@ export async function iamBackendRequest(
     // Make the authenticated request
     const response = await client.request(requestConfig);
 
+    // Check if response indicates an error (google-auth-library doesn't throw on HTTP errors)
+    const statusCode = response.status || (response as any).statusCode || 200;
+    
+    // If 503 and we have retries left, retry
+    if (statusCode === 503 && attempt < maxRetries) {
+      const delay = retryDelay * Math.pow(2, attempt);
+      console.warn(`IAM Backend Request 503 (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms:`, {
+        path,
+        status: statusCode,
+      });
+      await new Promise(resolve => setTimeout(resolve, delay));
+      continue; // Retry the request
+    }
+
     // Convert the response to a standard Response object
     // Preserve all headers from the backend response, especially Set-Cookie for auth
     const responseHeaders: Record<string, string> = {
@@ -84,47 +111,95 @@ export async function iamBackendRequest(
     }
 
     return new Response(JSON.stringify(response.data), {
-      status: response.status,
+      status: statusCode,
       headers: responseHeaders,
     });
-  } catch (error: any) {
-    console.error('IAM Backend Request Error:', {
-      path,
-      error: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-    });
-
-    // If the error has a response, return it as a Response object
-    if (error.response) {
-      const errorHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
+    } catch (error: any) {
+      lastError = error;
       
-      // Preserve headers even in error responses
-      if (error.response.headers && error.response.headers['set-cookie']) {
-        errorHeaders['set-cookie'] = error.response.headers['set-cookie'];
+      // Handle network errors and connection failures (common during cold starts)
+      // Check if this is a retryable error
+      const statusCode = error.response?.status || error.status || (error.code === 'ECONNREFUSED' ? 503 : 500);
+      const isRetryable = statusCode === 503 || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT';
+      const hasRetriesLeft = attempt < maxRetries;
+      
+      if (isRetryable && hasRetriesLeft) {
+        // Exponential backoff: 500ms, 1000ms, 2000ms, etc.
+        const delay = retryDelay * Math.pow(2, attempt);
+        console.warn(`IAM Backend Request error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms:`, {
+          path,
+          error: error.message,
+          code: error.code,
+          status: statusCode,
+        });
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue; // Retry the request
       }
       
-      return new Response(JSON.stringify(error.response.data || { detail: 'Backend request failed' }), {
-        status: error.response.status || 500,
-        headers: errorHeaders,
+      // If not a 503, or no retries left, handle the error
+      console.error('IAM Backend Request Error:', {
+        path,
+        error: error.message,
+        status: statusCode,
+        data: error.response?.data,
+        attempt: attempt + 1,
       });
-    }
 
-    // Otherwise, return a generic error
+      // If the error has a response, return it as a Response object
+      if (error.response) {
+        const errorHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        
+        // Preserve headers even in error responses
+        if (error.response.headers && error.response.headers['set-cookie']) {
+          errorHeaders['set-cookie'] = error.response.headers['set-cookie'];
+        }
+        
+        return new Response(JSON.stringify(error.response.data || { detail: 'Backend request failed' }), {
+          status: error.response.status || 500,
+          headers: errorHeaders,
+        });
+      }
+
+      // Otherwise, return a generic error
+      return new Response(
+        JSON.stringify({
+          detail: error.message || 'Failed to connect to backend',
+        }),
+        {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    }
+  }
+  
+  // If we exhausted all retries, return the last error
+  if (lastError) {
+    const statusCode = lastError.response?.status || lastError.status || 503;
     return new Response(
       JSON.stringify({
-        detail: error.message || 'Failed to connect to backend',
+        detail: lastError.response?.data?.detail || lastError.message || 'Service temporarily unavailable. Please try again.',
       }),
       {
-        status: 500,
+        status: statusCode,
         headers: {
           'Content-Type': 'application/json',
         },
       }
     );
   }
+  
+  // Fallback (should never reach here)
+  return new Response(
+    JSON.stringify({ detail: 'Unknown error occurred' }),
+    { status: 500, headers: { 'Content-Type': 'application/json' } }
+  );
 }
 
 /**

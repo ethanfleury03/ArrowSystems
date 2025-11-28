@@ -402,10 +402,23 @@ async def lifespan(app: FastAPI):
         logger.info("migration_check_passed", message="Database is up to date")
     
     # Initialize database
-    db_manager = DatabaseManager()
-    saved_response_manager = SavedResponseManager(db_manager)
-    await db_manager.seed_default_users()
-    logger.info("database_initialized", database="postgres")
+    try:
+        db_manager = DatabaseManager()
+        saved_response_manager = SavedResponseManager(db_manager)
+        logger.info("database_manager_created", database="postgres")
+        
+        # Seed default users (non-critical - continue even if this fails)
+        try:
+            await db_manager.seed_default_users()
+            logger.info("default_users_seeded", database="postgres")
+        except Exception as seed_error:
+            logger.warning("seed_default_users_failed", error=str(seed_error), exc_info=True)
+            # Continue startup even if seeding fails - users can be created manually
+        
+        logger.info("database_initialized", database="postgres")
+    except Exception as db_init_error:
+        logger.error("database_initialization_failed", error=str(db_init_error), exc_info=True)
+        raise RuntimeError(f"Failed to initialize database manager: {db_init_error}") from db_init_error
     
     # Run database connection check
     is_healthy, integrity_message = check_database_integrity()
@@ -823,13 +836,14 @@ async def health_check():
     except Exception:
         pass  # Migration check failed, but don't fail health check
     
+    # Service is healthy if database is ready (RAG is optional)
+    # This allows /auth/login and other non-RAG endpoints to work even when RAG is disabled
     is_healthy = (
-        rag_pipeline is not None 
-        and rag_pipeline.is_initialized() 
-        and db_manager is not None
+        db_manager is not None
         and (database_query_success is None or database_query_success)
         and (migration_pending is None or not migration_pending)  # Fail if migrations pending
     )
+    # Note: RAG pipeline initialization is optional and doesn't affect health status
     
     # Check RAG pipeline initialization status
     rag_initialized = False
@@ -934,7 +948,11 @@ async def database_health_check():
 async def auth_login(request: Request, response: Response):
     """Login endpoint with rate limiting. Sets JWT in HTTP-only cookie."""
     if not db_manager:
-        raise HTTPException(status_code=503, detail="Database not initialized")
+        logger.error("login_attempted_before_db_init", message="Login attempted before database manager was initialized")
+        raise HTTPException(
+            status_code=503, 
+            detail="Service temporarily unavailable. Database is still initializing. Please try again in a moment."
+        )
 
     try:
         # Parse request body manually to avoid FastAPI parameter resolution issues with rate limiter
