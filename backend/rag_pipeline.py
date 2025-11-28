@@ -72,26 +72,54 @@ class RAGPipeline:
         try:
             # Initialize models (model loading is always allowed, even on Cloud Run)
             # This will raise RuntimeError if models cannot be loaded from cache
+            logger.info("rag_pipeline_initializing_models", storage_dir=storage_dir)
             self.orchestrator.initialize_models()
+            logger.info("rag_pipeline_models_initialized", storage_dir=storage_dir)
             
             # Load index (will handle missing index gracefully if ingestion is disabled)
+            logger.info("rag_pipeline_loading_index", storage_dir=storage_dir)
             self.orchestrator.load_index(storage_dir=storage_dir)
             
             # Check if index was actually loaded (might be None if ingestion disabled)
             if self.orchestrator.index is None:
-                logger.warning("rag_pipeline_index_not_loaded", message="Index is None, pipeline will not be functional")
+                logger.warning("rag_pipeline_index_not_loaded", 
+                             storage_dir=storage_dir,
+                             message="Index is None after load_index() call. Pipeline will not be functional.")
+                self._initialized = False
+                return False
+            
+            # Verify index is a valid object
+            if not hasattr(self.orchestrator.index, 'storage_context'):
+                logger.error("rag_pipeline_index_invalid",
+                           storage_dir=storage_dir,
+                           index_type=type(self.orchestrator.index).__name__,
+                           message="Index object is missing storage_context attribute - may be corrupted")
                 self._initialized = False
                 return False
             
             self._initialized = True
-            logger.info("rag_pipeline_initialized", storage_dir=storage_dir)
+            logger.info("rag_pipeline_initialized", 
+                       storage_dir=storage_dir,
+                       rag_enabled=True,
+                       index_type=type(self.orchestrator.index).__name__,
+                       message="RAG pipeline successfully initialized and ready for queries")
             return True
             
         except Exception as e:
-            logger.error("rag_pipeline_init_failed", error=str(e), exc_info=True)
+            error_type = type(e).__name__
+            error_message = str(e)
+            
+            logger.error("rag_pipeline_init_failed", 
+                        storage_dir=storage_dir,
+                        error=error_message,
+                        error_type=error_type,
+                        exc_info=True,
+                        rag_enabled=False,
+                        message=f"RAG pipeline initialization failed: {error_type}: {error_message}")
+            
             self._initialized = False
-            # Re-raise the exception so caller can handle it (fail-fast in prod)
-            raise
+            # Don't re-raise - let caller handle gracefully (non-RAG endpoints should still work)
+            return False
     
     def query(
         self,
