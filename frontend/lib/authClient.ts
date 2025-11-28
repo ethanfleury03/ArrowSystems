@@ -12,6 +12,9 @@ import { cookies } from 'next/headers';
 import jwt from 'jsonwebtoken';
 import { getAuthCookieName } from './auth-config';
 
+// Re-export getAuthCookieName for compatibility
+export { getAuthCookieName };
+
 /**
  * JWT payload structure from backend
  */
