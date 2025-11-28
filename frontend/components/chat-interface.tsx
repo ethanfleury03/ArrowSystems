@@ -10,7 +10,7 @@ import { ChatMessage } from "@/components/chat-message"
 import { Sidebar } from "@/components/sidebar"
 import { DocumentsPanel } from "@/components/documents-panel"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Send, Sparkles, Menu, MessageSquare, FileText } from "lucide-react"
+import { Send, Sparkles, Menu, MessageSquare, FileText, LogOut, AlertCircle } from "lucide-react"
 import { sendQuery, getChatHistory, ChatHistoryItem, getCurrentUser, UserInfo } from "@/lib/api"
 import type { Message, MessageSource } from "@/types/message"
 import { QuerySettings } from "@/components/sidebar"
@@ -24,6 +24,7 @@ export function ChatInterface() {
   const [machineConfirmation, setMachineConfirmation] = useState(false)
   const [selectedMachine, setSelectedMachine] = useState<string | null>(null)
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null)
+  const [ragEnabled, setRagEnabled] = useState<boolean | null>(null) // null = checking, true/false = known
   const onboardingShownRef = useRef(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -42,12 +43,26 @@ export function ChatInterface() {
     scrollToBottom()
   }, [messages])
 
-  // Fetch user info and show onboarding message on mount
+  // Fetch user info and RAG status, show onboarding message on mount
   useEffect(() => {
     const fetchUserAndShowOnboarding = async () => {
       try {
         const user = await getCurrentUser()
         setUserInfo(user)
+        
+        // Check RAG status
+        try {
+          const ragResponse = await fetch('/api/rag/status')
+          if (ragResponse.ok) {
+            const ragData = await ragResponse.json()
+            setRagEnabled(ragData.rag_enabled === true)
+          } else {
+            setRagEnabled(false)
+          }
+        } catch (error) {
+          console.error("Failed to fetch RAG status:", error)
+          setRagEnabled(false)
+        }
         
         // Only show onboarding for customers and if not already shown and no messages
         if (user.role?.toUpperCase() === "CUSTOMER" && !onboardingShownRef.current && messages.length === 0) {
@@ -86,9 +101,32 @@ export function ChatInterface() {
     fetchUserAndShowOnboarding()
   }, [messages.length]) // Re-check when messages change (e.g., when loading a conversation)
 
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+      window.location.href = '/login'
+    } catch (error) {
+      console.error('Logout failed:', error)
+      // Still redirect to login even if logout API fails
+      window.location.href = '/login'
+    }
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!input.trim() || isLoading) return
+    
+    // Don't allow queries if RAG is disabled
+    if (ragEnabled === false) {
+      const errorMessage: Message = {
+        id: Date.now().toString(),
+        role: "assistant",
+        content: "Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.",
+        timestamp: new Date(),
+      }
+      setMessages((prev) => [...prev, errorMessage])
+      return
+    }
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -369,8 +407,30 @@ export function ChatInterface() {
               <Sparkles className="h-5 w-5" />
               <h1 className="text-lg font-semibold">Arrow Systems Support</h1>
             </div>
+            <div className="flex items-center gap-2">
+              {userInfo && (
+                <span className="text-sm text-muted-foreground hidden sm:inline">
+                  {userInfo.email}
+                </span>
+              )}
+              <Button variant="ghost" size="icon" onClick={handleLogout} title="Logout">
+                <LogOut className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </header>
+
+        {/* RAG Status Banner */}
+        {ragEnabled === false && (
+          <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-3">
+            <div className="mx-auto max-w-4xl flex items-center gap-2 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 flex-shrink-0" />
+              <span>
+                Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Messages Container with Tabs */}
         <div className="flex-1 overflow-hidden relative z-10">

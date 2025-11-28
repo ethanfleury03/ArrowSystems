@@ -18,6 +18,24 @@ export default function LoginPage() {
 
   useEffect(() => {
     console.log('LOGIN PAGE HYDRATED - Build 2025-11-21-v3');
+    
+    // Check if user is already authenticated
+    const checkAuth = async () => {
+      try {
+        const response = await fetch('/api/auth/me');
+        if (response.ok) {
+          const data = await response.json();
+          // User is authenticated, redirect to home
+          const redirectPath = data.role === 'ADMIN' ? '/admin' : '/';
+          window.location.href = redirectPath;
+        }
+      } catch (error) {
+        // Not authenticated, stay on login page
+        console.log('User not authenticated, showing login form');
+      }
+    };
+    
+    checkAuth();
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
