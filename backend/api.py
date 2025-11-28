@@ -17,6 +17,7 @@ import asyncio
 import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 # Suppress noisy transformers cache warnings
@@ -470,6 +471,8 @@ async def lifespan(app: FastAPI):
     
     try:
         # Resolve storage path (handles prod vs dev paths)
+        logger.info("rag_init_starting", message="Starting RAG pipeline initialization")
+        
         if is_test_mode():
             storage_path = get_index_dir()
             logger.info("test_mode_enabled", storage_path=storage_path)
@@ -479,16 +482,64 @@ async def lifespan(app: FastAPI):
             storage_path_obj = resolve_storage_path()
             if storage_path_obj is None:
                 storage_path = None
+                logger.warning("rag_storage_path_resolution_failed", 
+                             message="resolve_storage_path() returned None - no valid index directory found")
             else:
                 storage_path = str(storage_path_obj)
+                logger.info("rag_storage_path_resolved", storage_path=storage_path)
         
-        # If storage path is None, log warning but continue (RAG will be disabled)
+        # Validate storage path and check for required files
         if storage_path is None:
             logger.warning("rag_index_not_found", 
                          message="RAG index not found. Continuing startup without RAG. "
                                 "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
                                 "RAG endpoints (e.g., /query) will return 503.")
             storage_path = "latest_model"  # Default path for initialization attempt
+        else:
+            # Check if directory exists and has required files
+            storage_path_obj_check = Path(storage_path)
+            if not storage_path_obj_check.exists():
+                logger.warning("rag_storage_directory_missing", 
+                             storage_path=storage_path,
+                             message=f"Storage directory does not exist: {storage_path}")
+            elif not storage_path_obj_check.is_dir():
+                logger.warning("rag_storage_path_not_directory", 
+                             storage_path=storage_path,
+                             message=f"Storage path exists but is not a directory: {storage_path}")
+            else:
+                # Check for required index files
+                required_files = [
+                    "docstore.json",
+                    "default__vector_store.json",
+                    "index_store.json",
+                ]
+                missing_files = []
+                for req_file in required_files:
+                    file_path = storage_path_obj_check / req_file
+                    if not file_path.exists():
+                        missing_files.append(req_file)
+                
+                if missing_files:
+                    logger.warning("rag_index_files_missing", 
+                                 storage_path=storage_path,
+                                 missing_files=missing_files,
+                                 message=f"Index directory exists but missing required files: {', '.join(missing_files)}")
+                else:
+                    logger.info("rag_index_files_present", 
+                             storage_path=storage_path,
+                             message="All required index files found")
+                    
+                    # Log directory contents for debugging
+                    try:
+                        dir_contents = os.listdir(storage_path)
+                        logger.info("rag_storage_directory_contents", 
+                                  storage_path=storage_path,
+                                  file_count=len(dir_contents),
+                                  files=dir_contents[:10])  # Log first 10 files
+                    except Exception as list_error:
+                        logger.warning("rag_storage_directory_list_failed", 
+                                     storage_path=storage_path,
+                                     error=str(list_error))
         
         logger.info("rag_pipeline_storage_path", storage_path=storage_path, test_mode=is_test_mode())
         
@@ -513,12 +564,41 @@ async def lifespan(app: FastAPI):
             rag_ok = rag_pipeline.is_initialized() if rag_pipeline else False
         
         if rag_ok:
-            logger.info("rag_pipeline_initialized", storage_path=storage_path, cache_dir=cache_dir)
+            logger.info("rag_pipeline_initialized", 
+                       storage_path=storage_path, 
+                       cache_dir=cache_dir,
+                       message="RAG pipeline successfully initialized and ready for queries")
             app.state.rag_enabled = True
         else:
+            # Log detailed reason why RAG is not initialized
             logger.warning("rag_pipeline_initialized_without_index", 
-                         message="Pipeline initialized but index not loaded (ingestion disabled or index missing). "
+                         storage_path=storage_path,
+                         message="Pipeline initialized but index not loaded. "
+                                "Possible reasons: ingestion disabled, index missing, or index files invalid. "
                                 "RAG endpoints will return 503.")
+            
+            # Add debug info about why initialization failed
+            if storage_path and os.path.exists(storage_path):
+                try:
+                    dir_contents = os.listdir(storage_path)
+                    logger.warning("rag_init_failed_debug", 
+                                 storage_path=storage_path,
+                                 directory_exists=True,
+                                 file_count=len(dir_contents),
+                                 files=dir_contents,
+                                 message="Index directory exists but index was not loaded. Check file contents above.")
+                except Exception as e:
+                    logger.warning("rag_init_failed_debug", 
+                                 storage_path=storage_path,
+                                 directory_exists=True,
+                                 error=str(e),
+                                 message="Could not list directory contents for debugging")
+            else:
+                logger.warning("rag_init_failed_debug", 
+                             storage_path=storage_path,
+                             directory_exists=False,
+                             message="Index directory does not exist")
+            
             app.state.rag_enabled = False
             
     except Exception as e:
@@ -532,9 +612,35 @@ async def lifespan(app: FastAPI):
         rag_pipeline = None
         app.state.rag_enabled = False
         
+        # Add debug info about storage path when exception occurs
+        if storage_path:
+            try:
+                if os.path.exists(storage_path):
+                    dir_contents = os.listdir(storage_path)
+                    logger.error("rag_init_exception_debug", 
+                               storage_path=storage_path,
+                               directory_exists=True,
+                               file_count=len(dir_contents),
+                               files=dir_contents,
+                               message="Exception occurred during RAG init. Directory exists with files listed above.")
+                else:
+                    logger.error("rag_init_exception_debug", 
+                               storage_path=storage_path,
+                               directory_exists=False,
+                               message="Exception occurred during RAG init. Directory does not exist.")
+            except Exception as debug_error:
+                logger.error("rag_init_exception_debug", 
+                           storage_path=storage_path,
+                           debug_error=str(debug_error),
+                           message="Could not gather debug info about storage directory")
+        else:
+            logger.error("rag_init_exception_debug", 
+                       storage_path=None,
+                       message="Exception occurred during RAG init. No storage path was resolved.")
+        
         # Log clear message about what this means
         logger.warning("rag_init_failed_continuing", 
-                     message="RAG pipeline initialization failed. "
+                     message="RAG pipeline initialization failed with exception. "
                             "Server will start normally, but RAG endpoints (e.g., /query) will return 503. "
                             "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
                             f"Error: {str(e)}")

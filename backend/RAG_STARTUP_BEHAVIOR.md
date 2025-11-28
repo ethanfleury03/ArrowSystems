@@ -237,19 +237,60 @@ Returns the current RAG pipeline status without requiring authentication.
 
 ### Startup Logging
 
-At server startup, RAG status is logged:
+At server startup, RAG initialization is comprehensively logged:
 
-**RAG Enabled:**
+**RAG Initialization Start:**
 ```
-INFO: rag_pipeline_initialized storage_path=/app/latest_model cache_dir=/app/.cache/huggingface
+INFO: rag_init_starting message="Starting RAG pipeline initialization"
+INFO: rag_storage_path_resolved storage_path=/app/latest_model
+INFO: rag_index_files_present storage_path=/app/latest_model message="All required index files found"
+INFO: rag_storage_directory_contents storage_path=/app/latest_model file_count=5 files=[...]
+```
+
+**RAG Enabled (Success):**
+```
+INFO: orchestrator_load_index_starting storage_dir=/app/latest_model
+INFO: orchestrator_index_check storage_dir=/app/latest_model directory_exists=True docstore_exists=True index_exists=True
+INFO: orchestrator_loading_index storage_dir=/app/latest_model message="🔄 Loading index from storage..."
+INFO: orchestrator_index_loaded storage_dir=/app/latest_model index_type=VectorStoreIndex message="Index loaded successfully from storage"
+INFO: index_and_retriever_initialized storage_dir=/app/latest_model message="✅ Index and retriever initialized successfully"
+INFO: rag_pipeline_initialized storage_path=/app/latest_model cache_dir=/app/.cache/huggingface message="RAG pipeline successfully initialized and ready for queries"
 INFO: server_started_with_rag message="Server started with RAG pipeline enabled" rag_mode="local_index" rag_enabled=True
 ```
 
-**RAG Disabled:**
+**RAG Disabled - Index Not Found:**
 ```
+INFO: rag_init_starting message="Starting RAG pipeline initialization"
+WARNING: rag_storage_path_resolution_failed message="resolve_storage_path() returned None - no valid index directory found"
 WARNING: rag_index_not_found message="RAG index not found. Continuing startup without RAG..."
-ERROR: rag_pipeline_init_failed error="..." error_type="..." storage_path=...
+WARNING: rag_pipeline_initialized_without_index storage_path=latest_model message="Pipeline initialized but index not loaded..."
 INFO: server_started_without_rag message="Server started without RAG pipeline..." rag_mode="disabled" rag_enabled=False
+```
+
+**RAG Disabled - Directory Exists But Files Missing:**
+```
+INFO: rag_init_starting message="Starting RAG pipeline initialization"
+INFO: rag_storage_path_resolved storage_path=/app/latest_model
+WARNING: rag_index_files_missing storage_path=/app/latest_model missing_files=['docstore.json', 'default__vector_store.json'] message="Index directory exists but missing required files..."
+WARNING: orchestrator_index_docstore_missing storage_dir=/app/latest_model docstore_path=/app/latest_model/docstore.json message="Index directory exists but docstore.json is missing"
+INFO: orchestrator_index_directory_contents storage_dir=/app/latest_model file_count=0 files=[] message="Directory exists with 0 items"
+WARNING: index_not_found_ingestion_disabled storage_dir=/app/latest_model directory_exists=True docstore_exists=False message="Index not found but ingestion is disabled (Cloud Run)..."
+INFO: orchestrator_load_index_aborted storage_dir=/app/latest_model reason="Index not found and ingestion disabled"
+WARNING: rag_pipeline_initialized_without_index storage_path=/app/latest_model message="Pipeline initialized but index not loaded..."
+INFO: server_started_without_rag rag_mode="disabled" rag_enabled=False
+```
+
+**RAG Disabled - Exception During Load:**
+```
+INFO: rag_init_starting message="Starting RAG pipeline initialization"
+INFO: rag_storage_path_resolved storage_path=/app/latest_model
+INFO: rag_index_files_present storage_path=/app/latest_model message="All required index files found"
+INFO: orchestrator_loading_index storage_dir=/app/latest_model message="🔄 Loading index from storage..."
+ERROR: orchestrator_index_load_failed storage_dir=/app/latest_model error="..." error_type="..." message="Failed to load index from /app/latest_model: ..."
+ERROR: rag_pipeline_init_failed error="..." error_type="..." storage_path=/app/latest_model
+ERROR: rag_init_exception_debug storage_path=/app/latest_model directory_exists=True file_count=5 files=[...] message="Exception occurred during RAG init. Directory exists with files listed above."
+WARNING: rag_init_failed_continuing message="RAG pipeline initialization failed with exception..."
+INFO: server_started_without_rag rag_mode="disabled" rag_enabled=False
 ```
 
 ### RAG-Disabled Query Attempts
@@ -270,7 +311,12 @@ This structured log allows:
 ### When RAG is Disabled
 
 RAG will remain disabled until:
-1. **Index is built locally**: Run ingestion to create `latest_model/` directory
+1. **Index is built locally**: Run ingestion to create `latest_model/` directory with required files:
+   - `docstore.json`
+   - `default__vector_store.json`
+   - `index_store.json`
+   - `graph_store.json` (optional)
+   - `image__vector_store.json` (optional)
 2. **Index is uploaded to GCS**: 
    ```bash
    gsutil -m rsync -r latest_model/ gs://arrow-rag-support-prod-rag/latest_model/
@@ -284,6 +330,53 @@ RAG will remain disabled until:
 
 - **Backend**: Call `GET /rag/status` (returns JSON with `rag_enabled`, `mode`, `details`)
 - **Frontend**: Call `/api/rag/status` (proxies to backend)
-- **Logs**: Check startup logs for `rag_mode` and `rag_enabled` fields
+- **Logs**: Check startup logs for detailed initialization flow:
+  - Look for `rag_init_starting` to see initialization began
+  - Check `rag_storage_path_resolved` to see what path was used
+  - Check `rag_index_files_present` or `rag_index_files_missing` to see file status
+  - Check `orchestrator_index_check` to see directory/file existence
+  - Check `rag_pipeline_initialized` for success or `rag_pipeline_initialized_without_index` for failure
+  - Final status: `server_started_with_rag` (enabled) or `server_started_without_rag` (disabled)
 - **Health endpoint**: `/health` includes `rag_pipeline_initialized` field
+
+### Debugging RAG Initialization Failures
+
+When RAG fails to initialize, check logs for:
+
+1. **Storage Path Resolution**:
+   - `rag_storage_path_resolved` - Shows the path that was resolved
+   - `rag_storage_path_resolution_failed` - Path resolution returned None
+
+2. **Directory and File Checks**:
+   - `rag_storage_directory_missing` - Directory doesn't exist
+   - `rag_index_files_missing` - Directory exists but files are missing
+   - `rag_storage_directory_contents` - Lists files in directory for debugging
+
+3. **Orchestrator Checks**:
+   - `orchestrator_index_check` - Shows directory_exists, docstore_exists, index_exists flags
+   - `orchestrator_index_directory_contents` - Lists directory contents when index not found
+   - `orchestrator_index_load_failed` - Exception during index loading
+
+4. **Final Status**:
+   - `rag_pipeline_initialized` - Success
+   - `rag_pipeline_initialized_without_index` - Failure (with debug info)
+   - `rag_init_exception_debug` - Exception occurred (with directory contents)
+
+### Common Failure Scenarios
+
+**Scenario 1: Index directory doesn't exist**
+- Logs: `rag_storage_directory_missing`, `orchestrator_index_directory_missing`
+- Fix: Upload index to GCS and ensure volume mount is configured
+
+**Scenario 2: Directory exists but is empty**
+- Logs: `rag_index_files_missing`, `orchestrator_index_directory_contents` shows empty files=[]
+- Fix: Ensure index files were uploaded correctly to GCS
+
+**Scenario 3: Directory exists but docstore.json missing**
+- Logs: `orchestrator_index_docstore_missing`, `orchestrator_index_directory_contents` shows files but no docstore.json
+- Fix: Re-upload index, ensuring all required files are included
+
+**Scenario 4: Files exist but index load fails**
+- Logs: `orchestrator_index_load_failed` with error details
+- Fix: Check index file integrity, may need to rebuild index
 
