@@ -60,15 +60,9 @@ def resolve_storage_path() -> Optional[Path]:
                 return candidate
     
     # No valid index found
-    # In production, this is a fatal error
-    if settings.ENV in ("prod", "production", "cloud"):
-        raise RuntimeError(
-            f"RAG index not found in production. "
-            f"Expected index at /app/latest_model (mounted from GCS bucket). "
-            f"Ensure the index is uploaded to gs://arrow-rag-support-prod-rag/latest_model/ "
-            f"and Cloud Run volume mount is configured correctly."
-        )
-    
-    # In dev/test, return None (allows graceful degradation)
+    # Return None in all environments (production and dev/test)
+    # This allows the caller to handle missing index gracefully
+    # The caller (lifespan function) will log appropriate warnings and continue startup
+    # RAG endpoints will return 503 when index is missing, but non-RAG routes will work
     return None
 

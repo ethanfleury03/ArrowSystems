@@ -428,13 +428,16 @@ async def lifespan(app: FastAPI):
     logger.info("database_connection_check_passed", message=integrity_message)
     
     # Initialize RAG pipeline
-    # In production: fail-fast if RAG cannot initialize (model or index missing)
-    # In dev/test: allow startup without RAG (queries will return 503)
+    # RAG initialization failures should NOT crash the app - non-RAG routes (like /auth/login) must work
+    # even when RAG index is missing or invalid
     from backend.utils.cloud_run import should_skip_ingestion
     from backend.utils.storage_path import resolve_storage_path
     from backend.utils.test_mode import is_test_mode, get_index_dir
     
     rag_ok = False
+    rag_pipeline = None
+    storage_path = None
+    
     try:
         # Resolve storage path (handles prod vs dev paths)
         if is_test_mode():
@@ -449,17 +452,13 @@ async def lifespan(app: FastAPI):
             else:
                 storage_path = str(storage_path_obj)
         
-        # In production, missing index is fatal
+        # If storage path is None, log warning but continue (RAG will be disabled)
         if storage_path is None:
-            if settings.is_prod:
-                raise FileNotFoundError(
-                    "RAG index not found in production. "
-                    "Expected index at /app/latest_model (mounted from GCS). "
-                    "Ensure index is built and uploaded to GCS bucket."
-                )
-            else:
-                logger.warning("rag_index_not_found", message="Index not found, continuing without RAG in non-prod")
-                storage_path = "latest_model"  # Default path for graceful degradation
+            logger.warning("rag_index_not_found", 
+                         message="RAG index not found. Continuing startup without RAG. "
+                                "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
+                                "RAG endpoints (e.g., /query) will return 503.")
+            storage_path = "latest_model"  # Default path for initialization attempt
         
         logger.info("rag_pipeline_storage_path", storage_path=storage_path, test_mode=is_test_mode())
         
@@ -485,42 +484,42 @@ async def lifespan(app: FastAPI):
         
         if rag_ok:
             logger.info("rag_pipeline_initialized", storage_path=storage_path, cache_dir=cache_dir)
+            app.state.rag_enabled = True
         else:
-            # In production, initialization failure is fatal
-            if settings.is_prod:
-                logger.error("rag_init_failed_in_prod", 
-                            message="RAG pipeline failed to initialize in production (index or model load failed). Aborting startup.")
-                raise RuntimeError(
-                    f"RAG pipeline failed to initialize in production. "
-                    f"Index path: {storage_path}. "
-                    "This revision will not receive traffic. "
-                    "Check logs for details and ensure index is uploaded to GCS bucket."
-                )
-            else:
-                logger.warning("rag_pipeline_initialized_without_index", 
-                             message="Pipeline initialized but index not loaded (ingestion disabled or index missing)")
+            logger.warning("rag_pipeline_initialized_without_index", 
+                         message="Pipeline initialized but index not loaded (ingestion disabled or index missing). "
+                                "RAG endpoints will return 503.")
+            app.state.rag_enabled = False
             
     except Exception as e:
-        logger.error("rag_pipeline_init_failed", error=str(e), exc_info=True)
+        # Log the error with full context but DO NOT raise - allow app to start
+        logger.error("rag_pipeline_init_failed", 
+                    error=str(e), 
+                    error_type=type(e).__name__,
+                    storage_path=storage_path,
+                    exc_info=True)
         rag_ok = False
         rag_pipeline = None
+        app.state.rag_enabled = False
         
-        # Fail-fast in production: abort startup if RAG cannot initialize
-        if settings.is_prod:
-            logger.error("rag_init_failed_in_prod", 
-                        message="RAG pipeline failed to initialize in production. Aborting startup.")
-            raise RuntimeError(
-                f"RAG pipeline failed to initialize in production: {e}. "
-                "This revision will not receive traffic. Check logs for details."
-            )
-        else:
-            logger.warning("rag_init_failed_non_prod", 
-                         message="RAG init failed; continuing without RAG in non-prod.")
+        # Log clear message about what this means
+        logger.warning("rag_init_failed_continuing", 
+                     message="RAG pipeline initialization failed. "
+                            "Server will start normally, but RAG endpoints (e.g., /query) will return 503. "
+                            "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
+                            f"Error: {str(e)}")
     
-    # Store pipeline instance (may be None if init failed in non-prod)
-    if not rag_ok and not settings.is_prod:
-        logger.info("server_starting_without_rag", 
-                   message="Server starting without RAG pipeline (non-prod mode)")
+    # Set RAG enabled flag on app state (for endpoints to check)
+    if not hasattr(app.state, 'rag_enabled'):
+        app.state.rag_enabled = False
+    
+    # Log final RAG status
+    if app.state.rag_enabled:
+        logger.info("server_started_with_rag", message="Server started with RAG pipeline enabled")
+    else:
+        logger.info("server_started_without_rag", 
+                   message="Server started without RAG pipeline. "
+                          "Non-RAG endpoints are functional. RAG endpoints will return 503.")
     
     # Initialize query summarizer
     try:
@@ -1182,7 +1181,7 @@ async def query_knowledge_base(request: Request):
     if not rag_pipeline or not rag_pipeline.is_initialized():
         raise HTTPException(
             status_code=503,
-            detail="RAG pipeline not initialized. Please check server logs."
+            detail="RAG pipeline not initialized. Please contact the administrator."
         )
     
     try:
