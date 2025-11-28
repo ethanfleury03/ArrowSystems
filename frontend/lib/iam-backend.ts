@@ -78,21 +78,24 @@ export async function iamBackendRequest(
     // Check if response indicates an error (google-auth-library doesn't throw on HTTP errors)
     const statusCode = response.status || (response as any).statusCode || 200;
     
-    // Check if this is a RAG-disabled error (should not retry)
-    let isRagDisabled = false;
+    // Check if this is a RAG-specific error (should not retry)
+    let isRagError = false;
+    let ragErrorCode: string | null = null;
     if (statusCode === 503 && response.data) {
       try {
         const errorData = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-        if (errorData?.code === 'RAG_NOT_INITIALIZED') {
-          isRagDisabled = true;
+        const code = errorData?.code || errorData?.detail?.code;
+        if (code === 'RAG_NOT_INITIALIZED' || code === 'RAG_WARMING' || code === 'RAG_NOT_CONFIGURED') {
+          isRagError = true;
+          ragErrorCode = code;
         }
       } catch (e) {
         // If parsing fails, treat as transient error
       }
     }
     
-    // If 503 and NOT RAG-disabled and we have retries left, retry
-    if (statusCode === 503 && !isRagDisabled && attempt < maxRetries) {
+    // If 503 and NOT RAG-specific error and we have retries left, retry
+    if (statusCode === 503 && !isRagError && attempt < maxRetries) {
       const delay = retryDelay * Math.pow(2, attempt);
       console.warn(`IAM Backend Request 503 (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms:`, {
         path,
@@ -102,9 +105,13 @@ export async function iamBackendRequest(
       continue; // Retry the request
     }
     
-    // If RAG-disabled, don't retry - return immediately
-    if (isRagDisabled) {
-      console.warn('IAM Backend Request: RAG disabled, skipping retries', { path, status: statusCode });
+    // If RAG-specific error, don't retry - return immediately
+    if (isRagError) {
+      console.warn('IAM Backend Request: RAG error, skipping retries', { 
+        path, 
+        status: statusCode, 
+        code: ragErrorCode 
+      });
     }
 
     // Convert the response to a standard Response object
@@ -139,22 +146,25 @@ export async function iamBackendRequest(
       // Check if this is a retryable error
       const statusCode = error.response?.status || error.status || (error.code === 'ECONNREFUSED' ? 503 : 500);
       
-      // Check if this is a RAG-disabled error (should not retry)
-      let isRagDisabled = false;
+      // Check if this is a RAG-specific error (should not retry)
+      let isRagError = false;
+      let ragErrorCode: string | null = null;
       if (statusCode === 503 && error.response?.data) {
         try {
           const errorData = typeof error.response.data === 'string' 
             ? JSON.parse(error.response.data) 
             : error.response.data;
-          if (errorData?.code === 'RAG_NOT_INITIALIZED') {
-            isRagDisabled = true;
+          const code = errorData?.code || errorData?.detail?.code;
+          if (code === 'RAG_NOT_INITIALIZED' || code === 'RAG_WARMING' || code === 'RAG_NOT_CONFIGURED') {
+            isRagError = true;
+            ragErrorCode = code;
           }
         } catch (e) {
           // If parsing fails, treat as transient error
         }
       }
       
-      const isRetryable = (statusCode === 503 && !isRagDisabled) || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT';
+      const isRetryable = (statusCode === 503 && !isRagError) || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT';
       const hasRetriesLeft = attempt < maxRetries;
       
       if (isRetryable && hasRetriesLeft) {
@@ -195,10 +205,19 @@ export async function iamBackendRequest(
         const errorData = error.response.data || { detail: 'Backend request failed' };
         const errorStatus = error.response.status || 500;
         
-        // Check if this is a RAG-disabled error (don't retry)
-        const isRagDisabled = errorStatus === 503 && errorData?.code === 'RAG_NOT_INITIALIZED';
-        if (isRagDisabled) {
-          console.warn('IAM Backend Request: RAG disabled error, not retrying', { path, status: errorStatus });
+        // Check if this is a RAG-specific error (don't retry)
+        const code = errorData?.code || errorData?.detail?.code;
+        const isRagError = errorStatus === 503 && (
+          code === 'RAG_NOT_INITIALIZED' || 
+          code === 'RAG_WARMING' || 
+          code === 'RAG_NOT_CONFIGURED'
+        );
+        if (isRagError) {
+          console.warn('IAM Backend Request: RAG error, not retrying', { 
+            path, 
+            status: errorStatus, 
+            code 
+          });
           // Return immediately without retrying
           return new Response(JSON.stringify(errorData), {
             status: errorStatus,
