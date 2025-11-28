@@ -33,10 +33,16 @@ export async function POST(request: NextRequest) {
         error: errorBody,
       });
 
+      // Improve error messages for 503 (cold start / initialization)
+      let errorMessage = errorBody?.detail || errorBody?.error || 'Backend request failed';
+      if (backendResponse.status === 503) {
+        errorMessage = errorBody?.detail || 'Service temporarily unavailable. The server is starting up. Please try again in a few seconds.';
+      }
+      
       // Forward backend status code and body directly where possible so the
       // browser sees 401/403/503 instead of a generic 500 from this route.
       return NextResponse.json(
-        errorBody ?? { detail: 'Backend request failed' },
+        errorBody ? { ...errorBody, detail: errorMessage } : { detail: errorMessage },
         { status: backendResponse.status },
       );
     }
