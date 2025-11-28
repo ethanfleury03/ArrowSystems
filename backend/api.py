@@ -563,21 +563,26 @@ async def lifespan(app: FastAPI):
             rag_pipeline = pipeline_result
             rag_ok = rag_pipeline.is_initialized() if rag_pipeline else False
         
+        # Set app state based on pipeline initialization status
+        app.state.rag_enabled = rag_ok
+        
         if rag_ok:
             logger.info("rag_pipeline_initialized", 
                        storage_path=storage_path, 
                        cache_dir=cache_dir,
+                       rag_enabled=True,
                        message="RAG pipeline successfully initialized and ready for queries")
-            app.state.rag_enabled = True
         else:
             # Log detailed reason why RAG is not initialized
+            # The orchestrator and pipeline should have already logged the specific error
             logger.warning("rag_pipeline_initialized_without_index", 
                          storage_path=storage_path,
+                         rag_enabled=False,
                          message="Pipeline initialized but index not loaded. "
-                                "Possible reasons: ingestion disabled, index missing, or index files invalid. "
-                                "RAG endpoints will return 503.")
+                                "Possible reasons: ingestion disabled, index missing, index files invalid, or load exception. "
+                                "Check previous logs for specific error. RAG endpoints will return 503.")
             
-            # Add debug info about why initialization failed
+            # Add debug info about why initialization failed (if directory exists)
             if storage_path and os.path.exists(storage_path):
                 try:
                     dir_contents = os.listdir(storage_path)
@@ -586,7 +591,7 @@ async def lifespan(app: FastAPI):
                                  directory_exists=True,
                                  file_count=len(dir_contents),
                                  files=dir_contents,
-                                 message="Index directory exists but index was not loaded. Check file contents above.")
+                                 message="Index directory exists but index was not loaded. Check file contents above and previous error logs.")
                 except Exception as e:
                     logger.warning("rag_init_failed_debug", 
                                  storage_path=storage_path,
@@ -598,8 +603,6 @@ async def lifespan(app: FastAPI):
                              storage_path=storage_path,
                              directory_exists=False,
                              message="Index directory does not exist")
-            
-            app.state.rag_enabled = False
             
     except Exception as e:
         # Log the error with full context but DO NOT raise - allow app to start
@@ -1084,6 +1087,97 @@ async def rag_status():
         mode=mode,
         details=details
     )
+
+
+class RAGSelfTestResponse(BaseModel):
+    """RAG self-test response model."""
+    status: str  # "ok" | "RAG_NOT_INITIALIZED" | "ERROR"
+    rag_enabled: bool
+    test_query: Optional[str] = None
+    num_results: Optional[int] = None
+    detail: Optional[str] = None
+    error_type: Optional[str] = None
+
+
+@app.get("/rag/self-test", response_model=RAGSelfTestResponse)
+# Note: /rag/self-test endpoint is NOT rate limited for testing/debugging
+async def rag_self_test():
+    """
+    Self-test endpoint to verify RAG pipeline is working correctly.
+    
+    This endpoint performs a simple test query to confirm:
+    - RAG pipeline is initialized
+    - Index is loaded and searchable
+    - Query execution works
+    
+    Returns:
+        - status: "ok" if test passed, "RAG_NOT_INITIALIZED" if RAG disabled, "ERROR" if test failed
+        - rag_enabled: True if RAG is ready
+        - test_query: The test query used
+        - num_results: Number of results returned (if successful)
+        - detail: Error message (if failed)
+    """
+    global rag_pipeline
+    
+    # Check if RAG is initialized
+    if not rag_pipeline or not rag_pipeline.is_initialized():
+        logger.warning("rag_self_test_not_initialized",
+                     message="RAG self-test called but pipeline is not initialized")
+        return RAGSelfTestResponse(
+            status="RAG_NOT_INITIALIZED",
+            rag_enabled=False,
+            detail="RAG pipeline not initialized"
+        )
+    
+    try:
+        # Use a simple, safe test query that should return results if index is working
+        test_query = "test"
+        logger.info("rag_self_test_starting", test_query=test_query)
+        
+        # Execute test query (use minimal parameters for speed)
+        result = rag_pipeline.query(
+            query=test_query,
+            top_k=1,  # Only need 1 result to verify it works
+            alpha=0.5,
+            dynamic_windowing=False  # Disable for faster test
+        )
+        
+        # Check if result is valid
+        num_results = 0
+        if hasattr(result, 'sources') and result.sources:
+            num_results = len(result.sources)
+        elif hasattr(result, 'document_sources') and result.document_sources:
+            num_results = len(result.document_sources)
+        
+        logger.info("rag_self_test_passed",
+                  test_query=test_query,
+                  num_results=num_results,
+                  message="RAG self-test passed successfully")
+        
+        return RAGSelfTestResponse(
+            status="ok",
+            rag_enabled=True,
+            test_query=test_query,
+            num_results=num_results
+        )
+        
+    except Exception as exc:
+        error_type = type(exc).__name__
+        error_message = str(exc)
+        
+        logger.warning("rag_self_test_failed",
+                     error_type=error_type,
+                     error=error_message,
+                     exc_info=True,
+                     message=f"RAG self-test failed: {error_type}: {error_message}")
+        
+        return RAGSelfTestResponse(
+            status="ERROR",
+            rag_enabled=True,  # Pipeline is initialized, but query failed
+            test_query="test",
+            detail=f"RAG self-test failed: {error_message}",
+            error_type=error_type
+        )
 
 
 class DatabaseHealthResponse(BaseModel):

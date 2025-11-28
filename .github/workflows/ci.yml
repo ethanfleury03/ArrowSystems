@@ -545,7 +545,24 @@ jobs:
           
           # Pre-warm RAG status endpoint (triggers RAG pipeline initialization)
           echo "🧠 Calling /rag/status endpoint..."
-          curl -sS --max-time 60 "$BACKEND_URL/rag/status" || echo "⚠️ RAG status check failed (may still be initializing)"
+          RAG_STATUS=$(curl -sS --max-time 60 "$BACKEND_URL/rag/status" || echo "{}")
+          echo "RAG Status: $RAG_STATUS"
+          
+          # Wait a bit more for any final initialization
+          echo "⏳ Waiting 5 seconds for final initialization..."
+          sleep 5
+          
+          # Run RAG self-test to verify search actually works
+          echo "🧪 Running RAG self-test..."
+          SELF_TEST=$(curl -sS --max-time 90 "$BACKEND_URL/rag/self-test" || echo "{}")
+          echo "RAG Self-Test: $SELF_TEST"
+          
+          # Check if self-test passed (optional - don't fail deploy if it's still initializing)
+          if echo "$SELF_TEST" | grep -q '"status":"ok"'; then
+            echo "✅ RAG self-test passed! RAG is fully operational."
+          else
+            echo "⚠️ RAG self-test did not pass yet (may still be initializing). Check logs for details."
+          fi
           
           echo "✅ Pre-warm complete! Service should be ready for queries."
 

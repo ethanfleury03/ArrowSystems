@@ -3503,13 +3503,45 @@ class RAGOrchestrator:
                          message="⚠️ No embedding model set - retrieval may fail!")
         
         try:
-            storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
-            logger.info("orchestrator_storage_context_created", storage_dir=storage_dir)
+            # Verify required files exist before attempting load
+            required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
+            missing_files = []
+            for req_file in required_files:
+                file_path = os.path.join(storage_dir, req_file)
+                if not os.path.exists(file_path):
+                    missing_files.append(req_file)
             
+            if missing_files:
+                logger.warning("orchestrator_index_files_missing_before_load",
+                             storage_dir=storage_dir,
+                             missing_files=missing_files,
+                             message=f"Required index files missing before load: {', '.join(missing_files)}")
+                # Don't fail yet - let load_index_from_storage try and give us a better error
+            
+            storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
+            logger.info("orchestrator_storage_context_created", 
+                       storage_dir=storage_dir,
+                       message="Storage context created, attempting to load index")
+            
+            # Load index from storage (uses default index_id)
+            # If ingestion used a custom index_id, we would need to pass it here:
+            # self.index = load_index_from_storage(storage_context, index_id="custom_id")
+            # But since ingestion uses default, we don't specify index_id
             self.index = load_index_from_storage(storage_context)
+            
+            # Verify index was actually loaded (not None)
+            if self.index is None:
+                logger.error("orchestrator_index_load_returned_none",
+                           storage_dir=storage_dir,
+                           message="load_index_from_storage returned None - index may be corrupted or incompatible")
+                self.index = None
+                self.retriever = None
+                raise ValueError("Index load returned None - index may be corrupted or incompatible")
+            
             logger.info("orchestrator_index_loaded", 
                        storage_dir=storage_dir,
-                       index_type=type(self.index).__name__ if self.index else None,
+                       index_type=type(self.index).__name__,
+                       index_id="default",  # Default index_id used
                        message="Index loaded successfully from storage")
             
             # Initialize hybrid retriever
@@ -3524,12 +3556,38 @@ class RAGOrchestrator:
                        storage_dir=storage_dir,
                        message="✅ Index and retriever initialized successfully")
         except Exception as load_error:
+            # Log comprehensive error information
+            error_type = type(load_error).__name__
+            error_message = str(load_error)
+            
             logger.error("orchestrator_index_load_failed", 
                         storage_dir=storage_dir,
-                        error=str(load_error),
-                        error_type=type(load_error).__name__,
+                        error=error_message,
+                        error_type=error_type,
                         exc_info=True,
-                        message=f"Failed to load index from {storage_dir}: {load_error}")
+                        message=f"Failed to load index from {storage_dir}: {error_type}: {error_message}")
+            
+            # Log directory contents for debugging
+            try:
+                if os.path.exists(storage_dir):
+                    dir_contents = os.listdir(storage_dir)
+                    logger.error("orchestrator_index_load_failed_debug",
+                               storage_dir=storage_dir,
+                               directory_exists=True,
+                               file_count=len(dir_contents),
+                               files=dir_contents,
+                               message="Index load failed. Directory contents listed above for debugging.")
+                else:
+                    logger.error("orchestrator_index_load_failed_debug",
+                               storage_dir=storage_dir,
+                               directory_exists=False,
+                               message="Index load failed. Directory does not exist.")
+            except Exception as debug_error:
+                logger.error("orchestrator_index_load_failed_debug",
+                           storage_dir=storage_dir,
+                           debug_error=str(debug_error),
+                           message="Could not gather debug info about storage directory")
+            
             # Set index to None so query operations fail gracefully
             self.index = None
             self.retriever = None
