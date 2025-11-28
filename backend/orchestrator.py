@@ -3405,23 +3405,63 @@ class RAGOrchestrator:
         from backend.utils.test_mode import is_test_mode
         from backend.utils.cloud_run import should_skip_ingestion
         
+        logger.info("orchestrator_load_index_starting", storage_dir=storage_dir)
+        
         # Check if directory exists or if docstore.json exists
         docstore_path = os.path.join(storage_dir, "docstore.json")
-        index_exists = os.path.exists(storage_dir) and os.path.exists(docstore_path)
+        dir_exists = os.path.exists(storage_dir)
+        docstore_exists = os.path.exists(docstore_path)
+        index_exists = dir_exists and docstore_exists
+        
+        logger.info("orchestrator_index_check", 
+                   storage_dir=storage_dir,
+                   directory_exists=dir_exists,
+                   docstore_exists=docstore_exists,
+                   index_exists=index_exists)
         
         # If directory doesn't exist or is empty, handle based on ingestion settings
         if not index_exists:
+            # Log detailed information about what's missing
+            if not dir_exists:
+                logger.warning("orchestrator_index_directory_missing", 
+                             storage_dir=storage_dir,
+                             message=f"Index directory does not exist: {storage_dir}")
+            elif not docstore_exists:
+                logger.warning("orchestrator_index_docstore_missing", 
+                             storage_dir=storage_dir,
+                             docstore_path=docstore_path,
+                             message=f"Index directory exists but docstore.json is missing: {docstore_path}")
+                
+                # List directory contents for debugging
+                try:
+                    dir_contents = os.listdir(storage_dir)
+                    logger.info("orchestrator_index_directory_contents", 
+                              storage_dir=storage_dir,
+                              file_count=len(dir_contents),
+                              files=dir_contents,
+                              message=f"Directory exists with {len(dir_contents)} items")
+                except Exception as list_error:
+                    logger.warning("orchestrator_index_directory_list_failed", 
+                                 storage_dir=storage_dir,
+                                 error=str(list_error))
+            
             # If ingestion is disabled, don't try to create index or raise error
             # This allows FastAPI to start without the index
             if should_skip_ingestion():
                 logger.warning(
                     "index_not_found_ingestion_disabled",
                     storage_dir=storage_dir,
-                    message="Index not found but ingestion is disabled. RAG pipeline will not be functional."
+                    directory_exists=dir_exists,
+                    docstore_exists=docstore_exists,
+                    message="Index not found but ingestion is disabled (Cloud Run). RAG pipeline will not be functional. "
+                           "To enable RAG, ensure index is uploaded to GCS and Cloud Run volume is mounted correctly."
                 )
                 # Set index to None so query operations fail gracefully
                 self.index = None
                 self.retriever = None
+                logger.info("orchestrator_load_index_aborted", 
+                          storage_dir=storage_dir,
+                          reason="Index not found and ingestion disabled")
                 return
             
             if is_test_mode():
@@ -3449,28 +3489,51 @@ class RAGOrchestrator:
                     f"or pull from git if using pre-built index."
                 )
         
-        logger.info("🔄 Loading index...")
+        logger.info("orchestrator_loading_index", storage_dir=storage_dir, message="🔄 Loading index from storage...")
         
         # CRITICAL: Set embedding model in Settings BEFORE loading index
         # This ensures the retriever uses the correct embedding model
         if self.embed_model:
             Settings.embed_model = self.embed_model
-            logger.info(f"✅ Set global embedding model: {type(self.embed_model).__name__}")
+            logger.info("orchestrator_embedding_model_set", 
+                      model_type=type(self.embed_model).__name__,
+                      message=f"✅ Set global embedding model: {type(self.embed_model).__name__}")
         else:
-            logger.warning("⚠️ No embedding model set - retrieval may fail!")
+            logger.warning("orchestrator_no_embedding_model", 
+                         message="⚠️ No embedding model set - retrieval may fail!")
         
-        storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
-        self.index = load_index_from_storage(storage_context)
-        
-        # Initialize hybrid retriever
-        self.retriever = HybridRetriever(
-            index=self.index,
-            embed_model=self.embed_model,
-            reranker=self.reranker,
-            document_evaluator=self.document_evaluator
-        )
-        
-        logger.info("index_and_retriever_initialized")
+        try:
+            storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
+            logger.info("orchestrator_storage_context_created", storage_dir=storage_dir)
+            
+            self.index = load_index_from_storage(storage_context)
+            logger.info("orchestrator_index_loaded", 
+                       storage_dir=storage_dir,
+                       index_type=type(self.index).__name__ if self.index else None,
+                       message="Index loaded successfully from storage")
+            
+            # Initialize hybrid retriever
+            self.retriever = HybridRetriever(
+                index=self.index,
+                embed_model=self.embed_model,
+                reranker=self.reranker,
+                document_evaluator=self.document_evaluator
+            )
+            
+            logger.info("index_and_retriever_initialized", 
+                       storage_dir=storage_dir,
+                       message="✅ Index and retriever initialized successfully")
+        except Exception as load_error:
+            logger.error("orchestrator_index_load_failed", 
+                        storage_dir=storage_dir,
+                        error=str(load_error),
+                        error_type=type(load_error).__name__,
+                        exc_info=True,
+                        message=f"Failed to load index from {storage_dir}: {load_error}")
+            # Set index to None so query operations fail gracefully
+            self.index = None
+            self.retriever = None
+            raise  # Re-raise so caller knows initialization failed
         # Initialize glossary if configured
         self._load_glossary_index()
     
