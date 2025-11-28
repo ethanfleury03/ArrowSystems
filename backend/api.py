@@ -458,20 +458,18 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"Database connection check failed: {integrity_message}")
     logger.info("database_connection_check_passed", message=integrity_message)
     
-    # Initialize RAG pipeline
-    # RAG initialization failures should NOT crash the app - non-RAG routes (like /auth/login) must work
-    # even when RAG index is missing or invalid
-    from backend.utils.cloud_run import should_skip_ingestion
+    # Resolve RAG storage path (lightweight - no heavy initialization)
+    # RAG will be initialized lazily on first use via ensure_initialized()
+    # This allows fast startup while still supporting RAG functionality
     from backend.utils.storage_path import resolve_storage_path
     from backend.utils.test_mode import is_test_mode, get_index_dir
     
-    rag_ok = False
     rag_pipeline = None
     storage_path = None
     
     try:
         # Resolve storage path (handles prod vs dev paths)
-        logger.info("rag_init_starting", message="Starting RAG pipeline initialization")
+        logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path (lazy init mode)")
         
         if is_test_mode():
             storage_path = get_index_dir()
@@ -483,187 +481,81 @@ async def lifespan(app: FastAPI):
             if storage_path_obj is None:
                 storage_path = None
                 logger.warning("rag_storage_path_resolution_failed", 
-                             message="resolve_storage_path() returned None - no valid index directory found")
+                             message="resolve_storage_path() returned None - no valid index directory found. "
+                                    "RAG will be disabled until index is available.")
             else:
                 storage_path = str(storage_path_obj)
                 logger.info("rag_storage_path_resolved", storage_path=storage_path)
         
-        # Validate storage path and check for required files
-        if storage_path is None:
-            logger.warning("rag_index_not_found", 
-                         message="RAG index not found. Continuing startup without RAG. "
-                                "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
-                                "RAG endpoints (e.g., /query) will return 503.")
-            storage_path = "latest_model"  # Default path for initialization attempt
-        else:
-            # Check if directory exists and has required files
+        # Light validation: check if directory exists and has required files (but don't load index)
+        if storage_path:
             storage_path_obj_check = Path(storage_path)
-            if not storage_path_obj_check.exists():
-                logger.warning("rag_storage_directory_missing", 
-                             storage_path=storage_path,
-                             message=f"Storage directory does not exist: {storage_path}")
-            elif not storage_path_obj_check.is_dir():
-                logger.warning("rag_storage_path_not_directory", 
-                             storage_path=storage_path,
-                             message=f"Storage path exists but is not a directory: {storage_path}")
-            else:
-                # Check for required index files
-                required_files = [
-                    "docstore.json",
-                    "default__vector_store.json",
-                    "index_store.json",
-                ]
-                missing_files = []
-                for req_file in required_files:
-                    file_path = storage_path_obj_check / req_file
-                    if not file_path.exists():
-                        missing_files.append(req_file)
+            if storage_path_obj_check.exists() and storage_path_obj_check.is_dir():
+                # Check for required index files (quick check, no loading)
+                required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
+                missing_files = [f for f in required_files if not (storage_path_obj_check / f).exists()]
                 
                 if missing_files:
                     logger.warning("rag_index_files_missing", 
                                  storage_path=storage_path,
                                  missing_files=missing_files,
-                                 message=f"Index directory exists but missing required files: {', '.join(missing_files)}")
+                                 message=f"Index directory exists but missing required files: {', '.join(missing_files)}. "
+                                        "RAG will attempt lazy initialization but may fail.")
                 else:
                     logger.info("rag_index_files_present", 
                              storage_path=storage_path,
-                             message="All required index files found")
-                    
-                    # Log directory contents for debugging
-                    try:
-                        dir_contents = os.listdir(storage_path)
-                        logger.info("rag_storage_directory_contents", 
-                                  storage_path=storage_path,
-                                  file_count=len(dir_contents),
-                                  files=dir_contents[:10])  # Log first 10 files
-                    except Exception as list_error:
-                        logger.warning("rag_storage_directory_list_failed", 
-                                     storage_path=storage_path,
-                                     error=str(list_error))
-        
-        logger.info("rag_pipeline_storage_path", storage_path=storage_path, test_mode=is_test_mode())
-        
-        # Use cache directory from environment (set in Dockerfile: /app/.cache/huggingface)
-        # This must match the directory where models were pre-downloaded
-        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-        # Note: HuggingFace may expect 'hub' subdirectory, but our models are in the root
-        # The embedding_utils helper will handle this correctly
-        
-        # Initialize RAG pipeline (returns tuple: (pipeline, success))
-        pipeline_result = initialize_rag_pipeline(
-            storage_dir=storage_path,
-            cache_dir=cache_dir,
-            db_manager=db_manager
-        )
-        
-        if isinstance(pipeline_result, tuple):
-            rag_pipeline, rag_ok = pipeline_result
-        else:
-            # Backward compatibility: if function returns single value
-            rag_pipeline = pipeline_result
-            rag_ok = rag_pipeline.is_initialized() if rag_pipeline else False
-        
-        # Set app state based on pipeline initialization status
-        app.state.rag_enabled = rag_ok
-        
-        if rag_ok:
-            logger.info("rag_pipeline_initialized", 
-                       storage_path=storage_path, 
-                       cache_dir=cache_dir,
-                       rag_enabled=True,
-                       message="RAG pipeline successfully initialized and ready for queries")
-        else:
-            # Log detailed reason why RAG is not initialized
-            # The orchestrator and pipeline should have already logged the specific error
-            logger.warning("rag_pipeline_initialized_without_index", 
-                         storage_path=storage_path,
-                         rag_enabled=False,
-                         message="Pipeline initialized but index not loaded. "
-                                "Possible reasons: ingestion disabled, index missing, index files invalid, or load exception. "
-                                "Check previous logs for specific error. RAG endpoints will return 503.")
-            
-            # Add debug info about why initialization failed (if directory exists)
-            if storage_path and os.path.exists(storage_path):
-                try:
-                    dir_contents = os.listdir(storage_path)
-                    logger.warning("rag_init_failed_debug", 
-                                 storage_path=storage_path,
-                                 directory_exists=True,
-                                 file_count=len(dir_contents),
-                                 files=dir_contents,
-                                 message="Index directory exists but index was not loaded. Check file contents above and previous error logs.")
-                except Exception as e:
-                    logger.warning("rag_init_failed_debug", 
-                                 storage_path=storage_path,
-                                 directory_exists=True,
-                                 error=str(e),
-                                 message="Could not list directory contents for debugging")
+                             message="All required index files found. RAG will initialize on first use.")
             else:
-                logger.warning("rag_init_failed_debug", 
+                logger.warning("rag_storage_directory_missing", 
                              storage_path=storage_path,
-                             directory_exists=False,
-                             message="Index directory does not exist")
-            
-    except Exception as e:
-        # Log the error with full context but DO NOT raise - allow app to start
-        logger.error("rag_pipeline_init_failed", 
-                    error=str(e), 
-                    error_type=type(e).__name__,
-                    storage_path=storage_path,
-                    exc_info=True)
-        rag_ok = False
-        rag_pipeline = None
+                             message=f"Storage directory does not exist or is not a directory: {storage_path}. "
+                                    "RAG will be disabled.")
+        else:
+            logger.warning("rag_index_not_found", 
+                         message="RAG index not found. Continuing startup without RAG. "
+                                "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
+                                "RAG endpoints (e.g., /query) will initialize lazily on first use.")
+        
+        # Create pipeline instance (but don't initialize it yet - lazy init)
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+        
+        # Store storage path in app state for lazy initialization
+        app.state.rag_storage_path = storage_path
+        
+        # RAG is not initialized yet (will be initialized on first /query or /rag/self-test call)
         app.state.rag_enabled = False
         
-        # Add debug info about storage path when exception occurs
-        if storage_path:
-            try:
-                if os.path.exists(storage_path):
-                    dir_contents = os.listdir(storage_path)
-                    logger.error("rag_init_exception_debug", 
-                               storage_path=storage_path,
-                               directory_exists=True,
-                               file_count=len(dir_contents),
-                               files=dir_contents,
-                               message="Exception occurred during RAG init. Directory exists with files listed above.")
-                else:
-                    logger.error("rag_init_exception_debug", 
-                               storage_path=storage_path,
-                               directory_exists=False,
-                               message="Exception occurred during RAG init. Directory does not exist.")
-            except Exception as debug_error:
-                logger.error("rag_init_exception_debug", 
-                           storage_path=storage_path,
-                           debug_error=str(debug_error),
-                           message="Could not gather debug info about storage directory")
-        else:
-            logger.error("rag_init_exception_debug", 
-                       storage_path=None,
-                       message="Exception occurred during RAG init. No storage path was resolved.")
-        
-        # Log clear message about what this means
-        logger.warning("rag_init_failed_continuing", 
-                     message="RAG pipeline initialization failed with exception. "
-                            "Server will start normally, but RAG endpoints (e.g., /query) will return 503. "
-                            "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
-                            f"Error: {str(e)}")
+        logger.info("rag_pipeline_created_lazy", 
+                   storage_path=storage_path,
+                   cache_dir=cache_dir,
+                   message="RAG pipeline instance created (lazy initialization). "
+                          "Pipeline will initialize on first use. Startup is fast and lightweight.")
+            
+    except Exception as e:
+        # Log the error but DO NOT raise - allow app to start
+        logger.error("rag_storage_path_resolution_failed", 
+                    error=str(e), 
+                    error_type=type(e).__name__,
+                    exc_info=True,
+                    message=f"Failed to resolve RAG storage path: {type(e).__name__}: {str(e)}. "
+                           "Server will start normally, but RAG will be disabled.")
+        storage_path = None
+        rag_pipeline = None
+        app.state.rag_storage_path = None
+        app.state.rag_enabled = False
     
-    # Set RAG enabled flag on app state (for endpoints to check)
+    # Set RAG enabled flag on app state (will be updated when lazy init completes)
     if not hasattr(app.state, 'rag_enabled'):
         app.state.rag_enabled = False
     
-    # Log final RAG status with mode
-    if app.state.rag_enabled:
-        logger.info("server_started_with_rag", 
-                   message="Server started with RAG pipeline enabled",
-                   rag_mode="local_index",
-                   rag_enabled=True)
-    else:
-        logger.info("server_started_without_rag", 
-                   message="Server started without RAG pipeline. "
-                          "Non-RAG endpoints are functional. RAG endpoints will return 503.",
-                   rag_mode="disabled",
-                   rag_enabled=False)
+    # Log final startup status
+    logger.info("server_started_lazy_rag", 
+               message="Server started with lazy RAG initialization. "
+                      "RAG will initialize on first query. Non-RAG endpoints are functional.",
+               rag_mode="lazy_init",
+               rag_enabled=False,
+               storage_path=storage_path)
     
     # Initialize query summarizer
     try:
@@ -1028,64 +920,100 @@ class RAGStatusResponse(BaseModel):
     rag_enabled: bool
     mode: str  # "local_index" | "vector_db" | "disabled"
     details: str
+    initializing: Optional[bool] = False
+    storage_dir: Optional[str] = None
+    index_id: Optional[str] = None
+    last_error: Optional[str] = None
+    status: Optional[str] = None  # "ready" | "initializing" | "disabled"
 
 
 @app.get("/rag/status", response_model=RAGStatusResponse)
 # Note: /rag/status endpoint is NOT rate limited for status checks
 async def rag_status():
     """
-    Get RAG pipeline status.
+    Get RAG pipeline status with full state information.
     
     This endpoint allows the frontend to check if RAG is available
     before attempting queries, avoiding unnecessary retries and providing
-    clear feedback to users.
-    
-    Uses the same source of truth as /query endpoint:
-    - Checks rag_pipeline.is_initialized() (primary)
-    - Falls back to app.state.rag_enabled (for consistency)
+    clear feedback to users. Returns detailed state including initialization
+    progress and error information.
     
     Returns:
         - rag_enabled: True if RAG is ready, False otherwise
+        - initializing: True if RAG is currently initializing
+        - storage_dir: Path to RAG index storage directory
+        - index_id: Index ID (if using custom index IDs)
+        - last_error: Last error message (if initialization failed)
+        - status: "ready" | "initializing" | "disabled"
         - mode: "local_index" (when using local index), "vector_db" (if using external DB), or "disabled"
         - details: Human-readable status message
     """
     global rag_pipeline
     
-    # Use same source of truth as /query endpoint
+    # Get storage path from app state
+    storage_dir = getattr(app.state, 'rag_storage_path', None)
+    
+    # Get pipeline status
     rag_initialized = False
+    rag_initializing = False
+    last_error = None
+    index_id = None
+    
     try:
-        # Primary check: pipeline's internal initialized flag
         if rag_pipeline:
             rag_initialized = rag_pipeline.is_initialized()
+            rag_initializing = rag_pipeline.is_initializing()
+            debug_status = rag_pipeline.debug_status()
+            last_error = debug_status.get("last_error")
+            index_id = debug_status.get("index_id")
+            # Use storage_dir from debug_status if available, otherwise from app state
+            if debug_status.get("storage_dir"):
+                storage_dir = debug_status["storage_dir"]
         else:
             rag_initialized = False
-        
-        # Fallback: app state flag (should match, but check for consistency)
-        app_rag_enabled = getattr(app.state, 'rag_enabled', False)
-        
-        # If they don't match, log a warning but use pipeline's state as source of truth
-        if rag_initialized != app_rag_enabled:
-            logger.warning("rag_status_flag_mismatch",
-                         pipeline_initialized=rag_initialized,
-                         app_state_rag_enabled=app_rag_enabled,
-                         message="RAG readiness flags don't match - using pipeline state")
+            rag_initializing = False
     except Exception as e:
         logger.error("rag_status_check_failed", error=str(e), exc_info=True)
         rag_initialized = False
+        rag_initializing = False
     
-    # Determine mode based on initialization status
-    # Currently we only support local_index mode
+    # Determine status and mode
     if rag_initialized:
+        status = "ready"
         mode = "local_index"
         details = "RAG pipeline initialized and ready."
+    elif rag_initializing:
+        status = "initializing"
+        mode = "local_index"
+        details = "RAG pipeline is currently initializing. Please wait."
     else:
+        status = "disabled"
         mode = "disabled"
-        details = "RAG index not loaded. Non-RAG endpoints are functional."
+        if last_error:
+            details = f"RAG pipeline initialization failed: {last_error}"
+        elif storage_dir:
+            details = "RAG index not loaded. Non-RAG endpoints are functional."
+        else:
+            details = "RAG storage path not configured. Non-RAG endpoints are functional."
+    
+    # Return extended status (we'll need to update the response model)
+    # For now, return the basic model but log the full status
+    logger.debug("rag_status_check",
+                rag_enabled=rag_initialized,
+                initializing=rag_initializing,
+                status=status,
+                storage_dir=storage_dir,
+                last_error=last_error)
     
     return RAGStatusResponse(
         rag_enabled=rag_initialized,
         mode=mode,
-        details=details
+        details=details,
+        initializing=rag_initializing,
+        storage_dir=str(storage_dir) if storage_dir else None,
+        index_id=index_id,
+        last_error=last_error,
+        status=status
     )
 
 
@@ -1106,7 +1034,7 @@ async def rag_self_test():
     Self-test endpoint to verify RAG pipeline is working correctly.
     
     This endpoint performs a simple test query to confirm:
-    - RAG pipeline is initialized
+    - RAG pipeline is initialized (triggers lazy initialization if needed)
     - Index is loaded and searchable
     - Query execution works
     
@@ -1119,14 +1047,33 @@ async def rag_self_test():
     """
     global rag_pipeline
     
-    # Check if RAG is initialized
-    if not rag_pipeline or not rag_pipeline.is_initialized():
+    # Get storage path from app state
+    storage_path = getattr(app.state, 'rag_storage_path', None)
+    
+    # Ensure pipeline instance exists
+    if rag_pipeline is None:
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+    
+    # Attempt lazy initialization if not already initialized
+    if storage_path is not None and not rag_pipeline.is_initialized():
+        logger.info("rag_self_test_triggering_lazy_init", storage_path=storage_path)
+        rag_pipeline.ensure_initialized(storage_path)
+    
+    # Check if RAG is initialized after lazy init attempt
+    if not rag_pipeline.is_initialized():
+        debug_status = rag_pipeline.debug_status()
         logger.warning("rag_self_test_not_initialized",
-                     message="RAG self-test called but pipeline is not initialized")
-        return RAGSelfTestResponse(
-            status="RAG_NOT_INITIALIZED",
-            rag_enabled=False,
-            detail="RAG pipeline not initialized"
+                     message="RAG self-test called but pipeline is not initialized",
+                     debug_status=debug_status)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "RAG_NOT_INITIALIZED",
+                "rag_enabled": False,
+                "detail": "RAG pipeline not initialized",
+                **debug_status,
+            },
         )
     
     try:
@@ -1178,6 +1125,94 @@ async def rag_self_test():
             detail=f"RAG self-test failed: {error_message}",
             error_type=error_type
         )
+
+
+@app.get("/rag/warmup")
+# Note: /rag/warmup endpoint is NOT rate limited for Cloud Scheduler warm-up pings
+async def rag_warmup(request: Request):
+    """
+    Warm-up endpoint for Cloud Scheduler to keep RAG pipeline initialized.
+    
+    This endpoint is designed to be called periodically (e.g., every 5 minutes)
+    by Cloud Scheduler to ensure the RAG pipeline stays warm and ready.
+    
+    Security:
+    - Requires X-RAG-Warmup-Token header matching RAG_WARMUP_TOKEN env var
+    - If RAG_WARMUP_TOKEN is not set, endpoint is disabled (returns 503)
+    
+    Behavior:
+    - Triggers lazy initialization if RAG is not initialized
+    - Returns current RAG status
+    - Does not perform test queries (use /rag/self-test for that)
+    
+    Returns:
+        - status: "ok" if warm-up successful, "error" if failed
+        - rag_enabled: True if RAG is ready
+        - debug_status: Full pipeline debug status
+    """
+    global rag_pipeline
+    
+    # Check warm-up token for security
+    warmup_token = os.getenv('RAG_WARMUP_TOKEN')
+    if not warmup_token:
+        logger.warning("rag_warmup_token_not_configured",
+                     message="RAG_WARMUP_TOKEN not set - warmup endpoint is disabled")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": "Warm-up endpoint is not configured. Set RAG_WARMUP_TOKEN environment variable.",
+            },
+        )
+    
+    # Verify token from request header
+    provided_token = request.headers.get("X-RAG-Warmup-Token")
+    if provided_token != warmup_token:
+        logger.warning("rag_warmup_unauthorized",
+                     message="Unauthorized warm-up attempt - invalid token")
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized. Invalid warm-up token.",
+        )
+    
+    # Get storage path from app state
+    storage_path = getattr(app.state, 'rag_storage_path', None)
+    
+    if storage_path is None:
+        logger.warning("rag_warmup_no_storage_path",
+                     message="Warm-up called but storage path is not configured")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": "RAG storage path is not configured.",
+                "rag_enabled": False,
+            },
+        )
+    
+    # Ensure pipeline instance exists
+    if rag_pipeline is None:
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+    
+    # Trigger lazy initialization if not already initialized
+    if not rag_pipeline.is_initialized():
+        logger.info("rag_warmup_triggering_init", storage_path=storage_path)
+        initialized = rag_pipeline.ensure_initialized(storage_path)
+        if initialized:
+            logger.info("rag_warmup_init_success", message="RAG pipeline initialized via warm-up")
+        else:
+            logger.warning("rag_warmup_init_failed", message="RAG pipeline initialization failed during warm-up")
+    
+    # Get debug status
+    debug_status = rag_pipeline.debug_status()
+    app.state.rag_enabled = rag_pipeline.is_initialized()
+    
+    return {
+        "status": "ok" if rag_pipeline.is_initialized() else "error",
+        "rag_enabled": rag_pipeline.is_initialized(),
+        "debug_status": debug_status,
+    }
 
 
 class DatabaseHealthResponse(BaseModel):
@@ -1527,8 +1562,54 @@ async def query_knowledge_base(request: Request):
     """
     global rag_pipeline, db_manager, saved_response_manager
     
-    if not rag_pipeline or not rag_pipeline.is_initialized():
-        return get_rag_disabled_response("/query")
+    # Lazy initialization: ensure RAG is initialized before processing query
+    storage_path = getattr(app.state, 'rag_storage_path', None)
+    
+    if storage_path is None:
+        logger.warning("rag_query_no_storage_path", path="/query")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "RAG_NOT_CONFIGURED",
+                "message": "RAG storage path is not configured.",
+            },
+        )
+    
+    # Ensure pipeline instance exists
+    if rag_pipeline is None:
+        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+    
+    # Attempt lazy initialization if not already initialized
+    if not rag_pipeline.is_initialized():
+        initialized_now = rag_pipeline.ensure_initialized(storage_path)
+        if not initialized_now:
+            # Another request is warming it, or it failed
+            status = rag_pipeline.debug_status()
+            code = "RAG_WARMING" if status["initializing"] else "RAG_NOT_INITIALIZED"
+            message = (
+                "Document search is currently warming up. Please retry shortly."
+                if code == "RAG_WARMING"
+                else "RAG pipeline is not initialized. Please contact the administrator."
+            )
+            
+            logger.warning("rag_query_rejected_not_ready",
+                         path="/query",
+                         code=code,
+                         initializing=status["initializing"],
+                         last_error=status["last_error"])
+            
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": code,
+                    "message": message,
+                    "rag_status": status,
+                },
+            )
+    
+    # Update app state to reflect RAG is now ready
+    app.state.rag_enabled = rag_pipeline.is_initialized()
     
     try:
         start_time = time.time()

@@ -159,14 +159,29 @@ export async function POST(request: NextRequest) {
           error,
         });
         
-        // Check if this is a RAG-disabled error
-        if (response.status === 503 && error?.code === 'RAG_NOT_INITIALIZED') {
-          // Return user-friendly message for RAG-disabled case
+        // Check if this is a RAG-specific error
+        const ragCode = error?.code || error?.detail?.code;
+        if (response.status === 503 && (
+          ragCode === 'RAG_NOT_INITIALIZED' || 
+          ragCode === 'RAG_WARMING' || 
+          ragCode === 'RAG_NOT_CONFIGURED'
+        )) {
+          // Return user-friendly message based on error code
+          let message = 'Document search is currently unavailable. Please contact your administrator.';
+          if (ragCode === 'RAG_WARMING') {
+            message = 'Document search is currently warming up. Please wait a moment and try again.';
+          } else if (ragCode === 'RAG_NOT_INITIALIZED') {
+            message = 'Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.';
+          } else if (ragCode === 'RAG_NOT_CONFIGURED') {
+            message = 'Document search is not configured. Please contact your administrator.';
+          }
+          
           return NextResponse.json(
             {
-              detail: 'Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.',
-              code: 'RAG_NOT_INITIALIZED',
+              detail: message,
+              code: ragCode,
               rag_enabled: false,
+              rag_status: error?.rag_status || error?.detail?.rag_status,
             },
             { status: 503 },
           );

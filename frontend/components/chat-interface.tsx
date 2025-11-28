@@ -25,6 +25,10 @@ export function ChatInterface() {
   const [selectedMachine, setSelectedMachine] = useState<string | null>(null)
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null)
   const [ragEnabled, setRagEnabled] = useState<boolean | null>(null) // null = checking, true/false = known
+  const [ragStatus, setRagStatus] = useState<'unknown' | 'ready' | 'warming' | 'disabled'>('unknown')
+  const [ragLastError, setRagLastError] = useState<string | null>(null)
+  const [checkingRag, setCheckingRag] = useState<boolean>(true)
+  const ragPollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const onboardingShownRef = useRef(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -51,18 +55,41 @@ export function ChatInterface() {
         setUserInfo(user)
         
         // Check RAG status
-        try {
-          const ragResponse = await fetch('/api/rag/status')
-          if (ragResponse.ok) {
-            const ragData = await ragResponse.json()
-            setRagEnabled(ragData.rag_enabled === true)
-          } else {
+        const checkRagStatus = async () => {
+          try {
+            const ragResponse = await fetch('/api/rag/status')
+            if (ragResponse.ok) {
+              const ragData = await ragResponse.json()
+              const enabled = ragData.rag_enabled === true
+              const initializing = ragData.initializing === true
+              const status = ragData.status || (enabled ? 'ready' : (initializing ? 'warming' : 'disabled'))
+              
+              setRagEnabled(enabled)
+              setRagStatus(status as 'ready' | 'warming' | 'disabled')
+              setRagLastError(ragData.last_error || null)
+              setCheckingRag(false)
+              
+              // If warming, start polling
+              if (status === 'warming' && !ragPollingIntervalRef.current) {
+                startRagPolling()
+              } else if (status === 'ready' && ragPollingIntervalRef.current) {
+                // Stop polling when ready
+                stopRagPolling()
+              }
+            } else {
+              setRagEnabled(false)
+              setRagStatus('disabled')
+              setCheckingRag(false)
+            }
+          } catch (error) {
+            console.error("Failed to fetch RAG status:", error)
             setRagEnabled(false)
+            setRagStatus('disabled')
+            setCheckingRag(false)
           }
-        } catch (error) {
-          console.error("Failed to fetch RAG status:", error)
-          setRagEnabled(false)
         }
+        
+        checkRagStatus()
         
         // Only show onboarding for customers and if not already shown and no messages
         if (user.role?.toUpperCase() === "CUSTOMER" && !onboardingShownRef.current && messages.length === 0) {
@@ -99,7 +126,47 @@ export function ChatInterface() {
     }
     
     fetchUserAndShowOnboarding()
+    
+    // Cleanup polling on unmount
+    return () => {
+      stopRagPolling()
+    }
   }, [messages.length]) // Re-check when messages change (e.g., when loading a conversation)
+  
+  // Polling functions for RAG status
+  const startRagPolling = () => {
+    if (ragPollingIntervalRef.current) return // Already polling
+    
+    ragPollingIntervalRef.current = setInterval(async () => {
+      try {
+        const ragResponse = await fetch('/api/rag/status')
+        if (ragResponse.ok) {
+          const ragData = await ragResponse.json()
+          const enabled = ragData.rag_enabled === true
+          const initializing = ragData.initializing === true
+          const status = ragData.status || (enabled ? 'ready' : (initializing ? 'warming' : 'disabled'))
+          
+          setRagEnabled(enabled)
+          setRagStatus(status as 'ready' | 'warming' | 'disabled')
+          setRagLastError(ragData.last_error || null)
+          
+          // Stop polling when ready or disabled
+          if (status === 'ready' || status === 'disabled') {
+            stopRagPolling()
+          }
+        }
+      } catch (error) {
+        console.error("Failed to poll RAG status:", error)
+      }
+    }, 5000) // Poll every 5 seconds
+  }
+  
+  const stopRagPolling = () => {
+    if (ragPollingIntervalRef.current) {
+      clearInterval(ragPollingIntervalRef.current)
+      ragPollingIntervalRef.current = null
+    }
+  }
 
   const handleLogout = async () => {
     try {
@@ -116,12 +183,23 @@ export function ChatInterface() {
     e.preventDefault()
     if (!input.trim() || isLoading) return
     
-    // Don't allow queries if RAG is disabled
-    if (ragEnabled === false) {
+    // Don't allow queries if RAG is not ready
+    if (ragStatus !== 'ready') {
+      let message = "Document search is currently unavailable. Please contact your administrator."
+      if (ragStatus === 'warming') {
+        message = "Document search is currently warming up. Please wait a moment and try again."
+        // Start polling if not already polling
+        if (!ragPollingIntervalRef.current) {
+          startRagPolling()
+        }
+      } else if (ragStatus === 'disabled' && ragLastError) {
+        message = `Document search is unavailable: ${ragLastError}. Please contact your administrator.`
+      }
+      
       const errorMessage: Message = {
         id: Date.now().toString(),
         role: "assistant",
-        content: "Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.",
+        content: message,
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, errorMessage])
@@ -322,8 +400,31 @@ export function ChatInterface() {
         // Silently fail - this is just for auto-refresh, not critical
         console.debug('Failed to fetch latest conversation for history:', error)
       }
-    } catch (error) {
-      const errorText = error instanceof Error ? error.message : 'Failed to get response'
+    } catch (error: any) {
+      // Check if this is a RAG_WARMING error
+      const errorData = error?.response?.data || error?.data || {}
+      const ragCode = errorData?.code || errorData?.detail?.code
+      
+      if (ragCode === 'RAG_WARMING') {
+        // Update state to warming and start polling
+        setRagStatus('warming')
+        setRagLastError(null)
+        if (!ragPollingIntervalRef.current) {
+          startRagPolling()
+        }
+        
+        const warmingMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: "Document search is currently warming up. Please wait a moment and try again.",
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, warmingMessage])
+        setIsLoading(false)
+        return
+      }
+      
+      const errorText = error instanceof Error ? error.message : (errorData?.detail || 'Failed to get response')
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
@@ -421,12 +522,22 @@ export function ChatInterface() {
         </header>
 
         {/* RAG Status Banner */}
-        {ragEnabled === false && (
+        {ragStatus === 'warming' && (
+          <div className="bg-yellow-500/10 border-b border-yellow-500/20 px-4 py-3">
+            <div className="mx-auto max-w-4xl flex items-center gap-2 text-sm text-yellow-700 dark:text-yellow-400">
+              <AlertCircle className="h-4 w-4 flex-shrink-0 animate-pulse" />
+              <span>Preparing document search. This may take ~20–40 seconds on first use.</span>
+            </div>
+          </div>
+        )}
+        {ragStatus === 'disabled' && (
           <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-3">
             <div className="mx-auto max-w-4xl flex items-center gap-2 text-sm text-destructive">
               <AlertCircle className="h-4 w-4 flex-shrink-0" />
               <span>
-                Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.
+                {ragLastError 
+                  ? `Document search is unavailable: ${ragLastError}. Please contact your administrator.`
+                  : 'Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.'}
               </span>
             </div>
           </div>
@@ -513,14 +624,15 @@ export function ChatInterface() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Send a message..."
+                placeholder={ragStatus !== 'ready' ? "Document search is not ready..." : "Send a message..."}
                 className="min-h-[60px] resize-none pr-12 leading-relaxed"
                 rows={1}
+                disabled={ragStatus !== 'ready'}
               />
               <Button
                 type="submit"
                 size="icon"
-                disabled={!input.trim() || isLoading}
+                disabled={!input.trim() || isLoading || ragStatus !== 'ready'}
                 className="absolute bottom-2 right-2 h-8 w-8"
               >
                 <Send className="h-4 w-4" />

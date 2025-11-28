@@ -187,10 +187,12 @@ jobs:
 
   docker-build:
     name: Docker Build
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
+      packages: write
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -210,41 +212,63 @@ jobs:
           echo "=== Checking buildx builder ==="
           docker buildx ls
 
-      - name: Build backend Docker image
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+        id: auth
+
+      - name: Export WIF credentials for Docker
+        run: |
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+          echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "beta"
+
+      - name: Inject project ID
+        run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Authenticate Docker with Artifact Registry
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
+        run: |
+          gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
+
+      - name: Build & Push Backend Image
         id: build-backend
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./backend/Dockerfile.backend
-          push: false
-          tags: duraflex-backend:ci
+          push: true
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
 
-      - name: Build backend Docker image for testing
-        run: |
-          echo "🔨 Building backend Docker image for offline model check..."
-          docker build \
-            -t duraflex-backend:ci \
-            -f backend/Dockerfile.backend \
-            --build-arg BUILD_ENV=production \
-            .
-          echo "✅ Image built successfully"
-          docker images | grep duraflex-backend
-
       - name: Check RAG embedding model offline
+        if: github.event_name == 'workflow_dispatch'
         run: |
           echo "🔍 Checking that embedding model can be loaded offline from built image..."
+          IMAGE_TAG="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}"
           docker run --rm \
             -e HF_HOME=/app/.cache/huggingface \
             -e TRANSFORMERS_CACHE=/app/.cache/huggingface \
             -e HF_DATASETS_CACHE=/app/.cache/huggingface \
             -e SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface \
             -e HF_HUB_OFFLINE=1 \
-            duraflex-backend:ci \
+            "$IMAGE_TAG" \
             python -m backend.scripts.check_rag_offline
 
   gcp-auth-check:
@@ -321,6 +345,7 @@ jobs:
   deploy-backend:
     name: Deploy Backend to Cloud Run
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     needs: [docker-build, gcp-auth-check]
     permissions:
       contents: read
@@ -384,9 +409,6 @@ jobs:
           # Use gcloud to get access token with the new WIF account
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Set up Python for index upload
         uses: actions/setup-python@v5
@@ -453,19 +475,6 @@ jobs:
             echo "   gsutil iam ch serviceAccount:${{ secrets.WIF_SERVICE_ACCOUNT }}:roles/storage.objectAdmin gs://arrow-rag-support-prod-rag"
             exit 0  # Don't fail the build
           }
-
-      - name: Build & Push Backend Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./backend/Dockerfile.backend
-          push: true
-          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
-          platforms: linux/amd64
-          build-args: |
-            BUILD_ENV=production
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
 
       - name: Deploy Backend to Cloud Run (v2 deploy)
         run: |

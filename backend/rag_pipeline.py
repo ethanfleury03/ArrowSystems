@@ -17,6 +17,8 @@ warnings.filterwarnings("ignore", message=".*validate_default.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 import os
+import threading
+from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from .orchestrator import RAGOrchestrator, StructuredResponse
 from .logging_config import get_logger
@@ -48,7 +50,71 @@ class RAGPipeline:
             enable_llm_evaluation=False,  # Disabled: Let LLM filter irrelevant chunks instead of pre-evaluating
             enable_llm_answers=True      # Enable LLM answer generation by default
         )
+        # State machine for lazy initialization
         self._initialized = False
+        self._initializing = False
+        self._last_error: Optional[str] = None
+        self._storage_dir: Optional[Path] = None
+        self._index_id: Optional[str] = None
+        self._init_lock = threading.Lock()  # Thread-safe initialization
+    
+    def is_initializing(self) -> bool:
+        """
+        Check if pipeline is currently initializing.
+        
+        Returns:
+            True if initialization is in progress, False otherwise
+        """
+        return self._initializing
+    
+    def debug_status(self) -> Dict[str, Any]:
+        """
+        Get detailed debug status of the pipeline.
+        
+        Returns:
+            Dictionary with initialization state, storage info, and last error
+        """
+        return {
+            "initialized": self._initialized,
+            "initializing": self._initializing,
+            "storage_dir": str(self._storage_dir) if self._storage_dir else None,
+            "index_id": self._index_id,
+            "last_error": self._last_error,
+        }
+    
+    def _load_index(self, storage_dir: str, index_id: Optional[str] = None) -> None:
+        """
+        Internal method to load the index from storage.
+        
+        This method contains the actual index loading logic and can be called
+        from both initialize() and ensure_initialized().
+        
+        Args:
+            storage_dir: Directory containing the vector index
+            index_id: Optional index ID (if using custom index IDs)
+        
+        Raises:
+            Exception: If index loading fails
+        """
+        # Initialize models first (model loading is always allowed, even on Cloud Run)
+        logger.info("rag_pipeline_initializing_models", storage_dir=storage_dir)
+        self.orchestrator.initialize_models()
+        logger.info("rag_pipeline_models_initialized", storage_dir=storage_dir)
+        
+        # Load index (will handle missing index gracefully if ingestion is disabled)
+        logger.info("rag_pipeline_loading_index", storage_dir=storage_dir)
+        self.orchestrator.load_index(storage_dir=storage_dir)
+        
+        # Check if index was actually loaded (might be None if ingestion disabled)
+        if self.orchestrator.index is None:
+            raise RuntimeError("Index is None after load_index() call. Pipeline will not be functional.")
+        
+        # Verify index is a valid object
+        if not hasattr(self.orchestrator.index, 'storage_context'):
+            raise RuntimeError(
+                f"Index object is missing storage_context attribute - may be corrupted. "
+                f"Index type: {type(self.orchestrator.index).__name__}"
+            )
         
     def initialize(self, storage_dir="latest_model") -> bool:
         """
@@ -70,34 +136,12 @@ class RAGPipeline:
         logger.info("rag_pipeline_initializing", storage_dir=storage_dir)
         
         try:
-            # Initialize models (model loading is always allowed, even on Cloud Run)
-            # This will raise RuntimeError if models cannot be loaded from cache
-            logger.info("rag_pipeline_initializing_models", storage_dir=storage_dir)
-            self.orchestrator.initialize_models()
-            logger.info("rag_pipeline_models_initialized", storage_dir=storage_dir)
-            
-            # Load index (will handle missing index gracefully if ingestion is disabled)
-            logger.info("rag_pipeline_loading_index", storage_dir=storage_dir)
-            self.orchestrator.load_index(storage_dir=storage_dir)
-            
-            # Check if index was actually loaded (might be None if ingestion disabled)
-            if self.orchestrator.index is None:
-                logger.warning("rag_pipeline_index_not_loaded", 
-                             storage_dir=storage_dir,
-                             message="Index is None after load_index() call. Pipeline will not be functional.")
-                self._initialized = False
-                return False
-            
-            # Verify index is a valid object
-            if not hasattr(self.orchestrator.index, 'storage_context'):
-                logger.error("rag_pipeline_index_invalid",
-                           storage_dir=storage_dir,
-                           index_type=type(self.orchestrator.index).__name__,
-                           message="Index object is missing storage_context attribute - may be corrupted")
-                self._initialized = False
-                return False
+            self._load_index(storage_dir=storage_dir)
             
             self._initialized = True
+            self._last_error = None
+            self._storage_dir = Path(storage_dir) if storage_dir else None
+            
             logger.info("rag_pipeline_initialized", 
                        storage_dir=storage_dir,
                        rag_enabled=True,
@@ -109,6 +153,9 @@ class RAGPipeline:
             error_type = type(e).__name__
             error_message = str(e)
             
+            self._initialized = False
+            self._last_error = f"{error_type}: {error_message}"
+            
             logger.error("rag_pipeline_init_failed", 
                         storage_dir=storage_dir,
                         error=error_message,
@@ -117,9 +164,95 @@ class RAGPipeline:
                         rag_enabled=False,
                         message=f"RAG pipeline initialization failed: {error_type}: {error_message}")
             
-            self._initialized = False
             # Don't re-raise - let caller handle gracefully (non-RAG endpoints should still work)
             return False
+    
+    def ensure_initialized(self, storage_dir: str, index_id: Optional[str] = None) -> bool:
+        """
+        Lazy initialization method - safe to call from endpoints.
+        
+        This method ensures the RAG pipeline is initialized, but only the first
+        caller actually performs the heavy work. Subsequent callers wait or return
+        immediately if initialization is already in progress.
+        
+        Args:
+            storage_dir: Directory containing the vector index (can be Path or str)
+            index_id: Optional index ID (if using custom index IDs)
+        
+        Returns:
+            True if initialization succeeded or was already complete
+            False if initialization is in progress (another thread is initializing)
+                 or if initialization failed (check debug_status() for details)
+        """
+        # Convert Path to string if needed
+        if isinstance(storage_dir, Path):
+            storage_dir = str(storage_dir)
+        
+        # Fast path: already initialized
+        if self._initialized:
+            return True
+        
+        # Check if another thread is initializing
+        if self._initializing:
+            logger.debug("rag_pipeline_initialization_in_progress", 
+                        storage_dir=storage_dir,
+                        message="Another thread is initializing RAG pipeline")
+            return False  # Caller can interpret as "warming up"
+        
+        # Acquire lock to ensure only one thread initializes
+        with self._init_lock:
+            # Double-check after acquiring lock
+            if self._initialized:
+                return True
+            if self._initializing:
+                return False
+            
+            # Mark as initializing
+            self._initializing = True
+            self._storage_dir = Path(storage_dir) if storage_dir else None
+            self._index_id = index_id
+            
+            try:
+                logger.info("rag_pipeline_lazy_init_starting", 
+                           storage_dir=storage_dir,
+                           index_id=index_id,
+                           message="Starting lazy RAG pipeline initialization")
+                
+                # Load index (this does the heavy work)
+                self._load_index(storage_dir=storage_dir)
+                
+                # Mark as initialized
+                self._initialized = True
+                self._last_error = None
+                
+                logger.info("rag_pipeline_lazy_init_success", 
+                           storage_dir=storage_dir,
+                           index_id=index_id,
+                           rag_enabled=True,
+                           index_type=type(self.orchestrator.index).__name__,
+                           message="RAG pipeline lazy initialization completed successfully")
+                return True
+                
+            except Exception as exc:
+                error_type = type(exc).__name__
+                error_message = str(exc)
+                
+                self._initialized = False
+                self._last_error = f"{error_type}: {error_message}"
+                
+                logger.warning("rag_pipeline_lazy_init_failed_soft", 
+                             storage_dir=storage_dir,
+                             index_id=index_id,
+                             error_type=error_type,
+                             error=error_message,
+                             exc_info=True,
+                             rag_enabled=False,
+                             message=f"RAG pipeline lazy initialization failed: {error_type}: {error_message}")
+                return False
+                
+            finally:
+                # Always clear initializing flag
+                self._initializing = False
     
     def query(
         self,
