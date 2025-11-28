@@ -1037,6 +1037,10 @@ async def rag_status():
     before attempting queries, avoiding unnecessary retries and providing
     clear feedback to users.
     
+    Uses the same source of truth as /query endpoint:
+    - Checks rag_pipeline.is_initialized() (primary)
+    - Falls back to app.state.rag_enabled (for consistency)
+    
     Returns:
         - rag_enabled: True if RAG is ready, False otherwise
         - mode: "local_index" (when using local index), "vector_db" (if using external DB), or "disabled"
@@ -1044,10 +1048,26 @@ async def rag_status():
     """
     global rag_pipeline
     
+    # Use same source of truth as /query endpoint
     rag_initialized = False
     try:
-        rag_initialized = bool(rag_pipeline and rag_pipeline.is_initialized())
-    except Exception:
+        # Primary check: pipeline's internal initialized flag
+        if rag_pipeline:
+            rag_initialized = rag_pipeline.is_initialized()
+        else:
+            rag_initialized = False
+        
+        # Fallback: app state flag (should match, but check for consistency)
+        app_rag_enabled = getattr(app.state, 'rag_enabled', False)
+        
+        # If they don't match, log a warning but use pipeline's state as source of truth
+        if rag_initialized != app_rag_enabled:
+            logger.warning("rag_status_flag_mismatch",
+                         pipeline_initialized=rag_initialized,
+                         app_state_rag_enabled=app_rag_enabled,
+                         message="RAG readiness flags don't match - using pipeline state")
+    except Exception as e:
+        logger.error("rag_status_check_failed", error=str(e), exc_info=True)
         rag_initialized = False
     
     # Determine mode based on initialization status
@@ -1238,49 +1258,97 @@ async def auth_get_current_user(request: Request):
     """
     Get current authenticated user information from JWT.
     
-    IMPORTANT: This endpoint reads the user JWT from X-User-Token header, NOT Authorization.
-    Authorization header is reserved for Google IAM token (frontend→backend auth).
-    X-User-Token contains the HS256 JWT for user sessions.
+    IMPORTANT: This endpoint reads the user JWT from:
+    1. X-User-Token header (preferred, used by frontend API routes with IAM auth)
+    2. Cookie (fallback, direct browser access)
+    3. Authorization Bearer header (fallback, for compatibility)
+    
+    Authorization header is also used for Google IAM token (frontend→backend auth),
+    but user JWT can come from X-User-Token or cookie.
     """
     if not db_manager:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    # Read user JWT from custom header (NOT Authorization - that's for IAM)
+    # Try to get token from multiple sources (priority: X-User-Token > Cookie > Authorization)
+    token = None
+    
+    # 1. Check X-User-Token header (used by frontend API routes)
     token = request.headers.get("X-User-Token")
+    
+    # 2. If not found, check cookies directly (fallback for direct browser access)
     if not token:
+        from .security import get_jwt_from_request
+        token = get_jwt_from_request(request)
+    
+    # 3. If still not found, return 401 with proper logging
+    if not token:
+        logger.info(
+            "auth_me_no_credentials",
+            path="/auth/me",
+            reason="no token/cookie present",
+            x_user_token_present=bool(request.headers.get("X-User-Token")),
+            cookie_present=bool(request.cookies.get(auth_config.AUTH_COOKIE_NAME)),
+            authorization_header_present=bool(request.headers.get("Authorization")),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing user token",
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Debug logging to verify we're decoding the right token type
-    try:
-        import jwt as pyjwt
-        header = pyjwt.get_unverified_header(token)
-        logger.info(f"[/auth/me] Decoding token: alg={header.get('alg')}, typ={header.get('typ')}, token_prefix={token[:20]}...")
-    except Exception as e:
-        logger.error(f"[/auth/me] Failed to read token header: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token format")
     
     # Decode and validate the user JWT
     try:
         from .security import decode_access_token
         current_user = decode_access_token(token)
     except jwt.ExpiredSignatureError:
-        logger.warning(f"[/auth/me] Token expired")
-        raise HTTPException(status_code=401, detail="Token expired")
+        logger.info(
+            "auth_me_invalid_token",
+            path="/auth/me",
+            reason="Token expired",
+            status=401,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except jwt.PyJWTError as e:
-        logger.error(f"[/auth/me] JWT decode failed: {e}, alg={header.get('alg')}")
-        raise HTTPException(status_code=401, detail="Invalid token")
+        logger.info(
+            "auth_me_invalid_token",
+            path="/auth/me",
+            reason=f"Invalid token: {str(e)}",
+            status=401,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     # Get email from JWT payload
     email = current_user.get("email")
     if not email:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
+        logger.info(
+            "auth_me_invalid_token",
+            path="/auth/me",
+            reason="Invalid token payload: missing email",
+            status=401,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     # Fetch user from database
     user = await db_manager.get_user_by_email(email)
     if not user:
+        logger.warning(
+            "auth_me_user_not_found",
+            path="/auth/me",
+            email=email,
+            status=404,
+        )
         raise HTTPException(status_code=404, detail="User not found")
     
     logger.info(f"[/auth/me] Successfully authenticated user: {email}")

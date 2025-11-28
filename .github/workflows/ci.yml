@@ -488,7 +488,7 @@ jobs:
             --region=us-central1 \
             --platform=managed \
             --project=${{ secrets.GCP_PROJECT_ID }} \
-            --min-instances=0 \
+            --min-instances=1 \
             --max-instances=10 \
             --concurrency=100 \
             --quiet
@@ -525,6 +525,29 @@ jobs:
           echo "✅ Backend deployed successfully!"
           echo "🌐 Service URL: $SERVICE_URL"
           echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+      - name: Pre-warm Backend Service
+        run: |
+          echo "🔥 Pre-warming backend service to trigger initialization..."
+          BACKEND_URL="https://arrow-rag-backend-70705019874.us-central1.run.app"
+          
+          # Wait a few seconds for the service to be ready
+          echo "⏳ Waiting 5 seconds for service to be ready..."
+          sleep 5
+          
+          # Pre-warm health endpoint (triggers container start and basic initialization)
+          echo "🏥 Calling /health endpoint..."
+          curl -sS --max-time 30 "$BACKEND_URL/health" || echo "⚠️ Health check failed (may still be starting)"
+          
+          # Wait a bit more for RAG initialization
+          echo "⏳ Waiting 10 seconds for RAG initialization..."
+          sleep 10
+          
+          # Pre-warm RAG status endpoint (triggers RAG pipeline initialization)
+          echo "🧠 Calling /rag/status endpoint..."
+          curl -sS --max-time 60 "$BACKEND_URL/rag/status" || echo "⚠️ RAG status check failed (may still be initializing)"
+          
+          echo "✅ Pre-warm complete! Service should be ready for queries."
 
   deploy-frontend:
     name: Deploy Frontend to Cloud Run
