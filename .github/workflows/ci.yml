@@ -398,35 +398,61 @@ jobs:
           pip install --upgrade pip
           pip install google-cloud-storage
 
-      - name: Grant GCS permissions to service account
+      - name: Check GCS permissions
         run: |
-          echo "Granting GCS permissions to service account..."
-          # Get the service account from WIF credentials or use the WIF service account
+          echo "Checking GCS permissions for service account..."
           SERVICE_ACCOUNT="${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          BUCKET_NAME="arrow-rag-support-prod-rag"
+          
           if [ -z "$SERVICE_ACCOUNT" ]; then
-            echo "WARNING: WIF_SERVICE_ACCOUNT secret not set, skipping permission grant"
+            echo "⚠️  WIF_SERVICE_ACCOUNT secret not set, cannot verify permissions"
             exit 0
           fi
           
-          BUCKET_NAME="arrow-rag-support-prod-rag"
-          
-          # Grant storage.objectAdmin at project level (for bucket access)
-          gcloud projects add-iam-policy-binding ${{ secrets.GCP_PROJECT_ID }} \
+          # Try to grant permissions (may fail if service account doesn't have IAM admin rights)
+          echo "Attempting to grant storage.objectAdmin role..."
+          if gcloud projects add-iam-policy-binding ${{ secrets.GCP_PROJECT_ID }} \
             --member="serviceAccount:${SERVICE_ACCOUNT}" \
             --role="roles/storage.objectAdmin" \
             --condition=None \
-            --project=${{ secrets.GCP_PROJECT_ID }} || echo "Project-level permission may already exist"
+            --project=${{ secrets.GCP_PROJECT_ID }} 2>&1; then
+            echo "✅ Project-level permission granted"
+          else
+            echo "⚠️  Could not grant project-level permission (may already exist or require admin rights)"
+          fi
           
-          # Grant storage.objectAdmin at bucket level (more specific)
-          gsutil iam ch serviceAccount:${SERVICE_ACCOUNT}:roles/storage.objectAdmin gs://${BUCKET_NAME} || echo "Bucket-level permission may already exist"
+          if gsutil iam ch serviceAccount:${SERVICE_ACCOUNT}:roles/storage.objectAdmin gs://${BUCKET_NAME} 2>&1; then
+            echo "✅ Bucket-level permission granted"
+          else
+            echo "⚠️  Could not grant bucket-level permission (may already exist or require admin rights)"
+          fi
           
-          echo "✅ GCS permissions granted to ${SERVICE_ACCOUNT}"
+          echo ""
+          echo "ℹ️  If upload fails with 403, manually grant permissions:"
+          echo "   gcloud projects add-iam-policy-binding ${{ secrets.GCP_PROJECT_ID }} \\"
+          echo "     --member=\"serviceAccount:${SERVICE_ACCOUNT}\" \\"
+          echo "     --role=\"roles/storage.objectAdmin\""
+          echo "   gsutil iam ch serviceAccount:${SERVICE_ACCOUNT}:roles/storage.objectAdmin gs://${BUCKET_NAME}"
 
       - name: Upload RAG index to GCS
         run: |
           echo "📦 Uploading RAG index to GCS bucket..."
-          python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag
-        continue-on-error: true  # Don't fail deploy if index already exists
+          echo "ℹ️  This step requires storage.objects.create permission on the bucket"
+          echo "   If it fails, grant permissions manually or ensure index already exists"
+          echo ""
+          python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag || {
+            echo ""
+            echo "⚠️  Upload failed. This is non-critical if:"
+            echo "   1. The index already exists in GCS, OR"
+            echo "   2. You'll upload it manually later"
+            echo ""
+            echo "   To grant permissions manually, run:"
+            echo "   gcloud projects add-iam-policy-binding ${{ secrets.GCP_PROJECT_ID }} \\"
+            echo "     --member=\"serviceAccount:${{ secrets.WIF_SERVICE_ACCOUNT }}\" \\"
+            echo "     --role=\"roles/storage.objectAdmin\""
+            echo "   gsutil iam ch serviceAccount:${{ secrets.WIF_SERVICE_ACCOUNT }}:roles/storage.objectAdmin gs://arrow-rag-support-prod-rag"
+            exit 0  # Don't fail the build
+          }
 
       - name: Build & Push Backend Image
         uses: docker/build-push-action@v5
