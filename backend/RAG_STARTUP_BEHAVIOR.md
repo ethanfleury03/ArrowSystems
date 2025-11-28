@@ -199,6 +199,7 @@ Returns the current RAG pipeline status without requiring authentication.
 ```json
 {
   "rag_enabled": true,
+  "mode": "local_index",
   "details": "RAG pipeline initialized and ready."
 }
 ```
@@ -207,16 +208,49 @@ Returns the current RAG pipeline status without requiring authentication.
 ```json
 {
   "rag_enabled": false,
+  "mode": "disabled",
   "details": "RAG index not loaded. Non-RAG endpoints are functional."
 }
 ```
 
+**Response Fields:**
+- `rag_enabled`: Boolean indicating if RAG is available
+- `mode`: One of:
+  - `"local_index"`: RAG is using a local index (current implementation)
+  - `"vector_db"`: RAG is using an external vector database (future)
+  - `"disabled"`: RAG is not available
+- `details`: Human-readable status message
+
 **Use Cases:**
 - Frontend can check RAG status after login to enable/disable query UI
+- Show banner/warning when RAG is disabled
 - Monitoring and health dashboards
 - Pre-flight checks before attempting queries
 
+**Frontend Integration:**
+- Frontend calls `/api/rag/status` (Next.js API route)
+- API route proxies to backend `/rag/status` with IAM authentication
+- ChatInterface checks status on mount and shows banner if disabled
+- Query input is disabled when RAG is disabled to prevent spam
+
 ## Logging
+
+### Startup Logging
+
+At server startup, RAG status is logged:
+
+**RAG Enabled:**
+```
+INFO: rag_pipeline_initialized storage_path=/app/latest_model cache_dir=/app/.cache/huggingface
+INFO: server_started_with_rag message="Server started with RAG pipeline enabled" rag_mode="local_index" rag_enabled=True
+```
+
+**RAG Disabled:**
+```
+WARNING: rag_index_not_found message="RAG index not found. Continuing startup without RAG..."
+ERROR: rag_pipeline_init_failed error="..." error_type="..." storage_path=...
+INFO: server_started_without_rag message="Server started without RAG pipeline..." rag_mode="disabled" rag_enabled=False
+```
 
 ### RAG-Disabled Query Attempts
 
@@ -230,4 +264,26 @@ This structured log allows:
 - Easy filtering in Cloud Logging
 - Monitoring of RAG-disabled query attempts
 - Distinguishing from other 503 errors in logs
+
+## Interpreting RAG Status
+
+### When RAG is Disabled
+
+RAG will remain disabled until:
+1. **Index is built locally**: Run ingestion to create `latest_model/` directory
+2. **Index is uploaded to GCS**: 
+   ```bash
+   gsutil -m rsync -r latest_model/ gs://arrow-rag-support-prod-rag/latest_model/
+   ```
+3. **Cloud Run volume is mounted**: Ensure Cloud Run service has volume mount:
+   - GCS bucket: `arrow-rag-support-prod-rag`
+   - Object prefix: `latest_model/`
+   - Mount path: `/app/latest_model`
+
+### Checking RAG Status
+
+- **Backend**: Call `GET /rag/status` (returns JSON with `rag_enabled`, `mode`, `details`)
+- **Frontend**: Call `/api/rag/status` (proxies to backend)
+- **Logs**: Check startup logs for `rag_mode` and `rag_enabled` fields
+- **Health endpoint**: `/health` includes `rag_pipeline_initialized` field
 

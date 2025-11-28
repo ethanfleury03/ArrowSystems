@@ -543,13 +543,18 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, 'rag_enabled'):
         app.state.rag_enabled = False
     
-    # Log final RAG status
+    # Log final RAG status with mode
     if app.state.rag_enabled:
-        logger.info("server_started_with_rag", message="Server started with RAG pipeline enabled")
+        logger.info("server_started_with_rag", 
+                   message="Server started with RAG pipeline enabled",
+                   rag_mode="local_index",
+                   rag_enabled=True)
     else:
         logger.info("server_started_without_rag", 
                    message="Server started without RAG pipeline. "
-                          "Non-RAG endpoints are functional. RAG endpoints will return 503.")
+                          "Non-RAG endpoints are functional. RAG endpoints will return 503.",
+                   rag_mode="disabled",
+                   rag_enabled=False)
     
     # Initialize query summarizer
     try:
@@ -912,6 +917,7 @@ async def health_check():
 class RAGStatusResponse(BaseModel):
     """RAG status response model."""
     rag_enabled: bool
+    mode: str  # "local_index" | "vector_db" | "disabled"
     details: str
 
 
@@ -924,6 +930,11 @@ async def rag_status():
     This endpoint allows the frontend to check if RAG is available
     before attempting queries, avoiding unnecessary retries and providing
     clear feedback to users.
+    
+    Returns:
+        - rag_enabled: True if RAG is ready, False otherwise
+        - mode: "local_index" (when using local index), "vector_db" (if using external DB), or "disabled"
+        - details: Human-readable status message
     """
     global rag_pipeline
     
@@ -933,16 +944,20 @@ async def rag_status():
     except Exception:
         rag_initialized = False
     
+    # Determine mode based on initialization status
+    # Currently we only support local_index mode
     if rag_initialized:
-        return RAGStatusResponse(
-            rag_enabled=True,
-            details="RAG pipeline initialized and ready."
-        )
+        mode = "local_index"
+        details = "RAG pipeline initialized and ready."
     else:
-        return RAGStatusResponse(
-            rag_enabled=False,
-            details="RAG index not loaded. Non-RAG endpoints are functional."
-        )
+        mode = "disabled"
+        details = "RAG index not loaded. Non-RAG endpoints are functional."
+    
+    return RAGStatusResponse(
+        rag_enabled=rag_initialized,
+        mode=mode,
+        details=details
+    )
 
 
 class DatabaseHealthResponse(BaseModel):

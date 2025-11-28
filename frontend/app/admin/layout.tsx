@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { Toaster } from "@/components/ui/toaster";
 import type { ReactNode } from "react";
-import { Menu, Users, FileText, Activity, ArrowLeft, X, BarChart3, Settings, Cog } from "lucide-react";
+import { Menu, Users, FileText, Activity, ArrowLeft, X, BarChart3, Settings, Cog, LogOut } from "lucide-react";
 import { getCurrentUser } from "@/lib/api";
 
 interface AdminLayoutProps {
@@ -113,6 +113,17 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
   const closeSidebar = () => setIsSidebarOpen(false);
 
   const isRouteActive = (href: string) => pathname.startsWith(href);
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    } catch (error) {
+      console.error('Logout failed:', error);
+      // Still redirect to login even if logout API fails
+      window.location.href = '/login';
+    }
+  };
 
   if (isAdmin === null) {
     return (
@@ -263,6 +274,16 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
             >
               <ArrowLeft className="h-4 w-4" />
               <span>Back to Home</span>
+            </Button>
+          </div>
+          <div className="flex items-center gap-2">
+            {displayEmail && (
+              <span className="text-sm text-muted-foreground hidden sm:inline">
+                {displayEmail}
+              </span>
+            )}
+            <Button variant="ghost" size="icon" onClick={handleLogout} title="Logout">
+              <LogOut className="h-4 w-4" />
             </Button>
           </div>
         </header>

@@ -1,45 +1,59 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { getAuthCookieName } from './lib/auth-config';
 
-const disableAuth =
-  process.env.DISABLE_AUTH === 'true' ||
-  process.env.NEXT_PUBLIC_DISABLE_AUTH === 'true';
-
+/**
+ * Middleware to handle authentication and route protection.
+ * 
+ * Protected routes (require authentication):
+ * - / (root/chat)
+ * - /admin/*
+ * - /account
+ * 
+ * Public routes (no auth required):
+ * - /login
+ * - /register
+ * - /api/auth/*
+ * - /api/health
+ * - /api/rag/status (for status checks)
+ * 
+ * Note: This middleware checks for cookie presence only.
+ * Actual token validation happens in page components/layouts.
+ */
 export function middleware(request: NextRequest) {
-  if (disableAuth) {
+  const { pathname } = request.nextUrl;
+  
+  // Public routes that don't require authentication
+  const publicRoutes = [
+    '/login',
+    '/register',
+    '/api/auth/login',
+    '/api/auth/register',
+    '/api/auth/logout',
+    '/api/health',
+    '/api/rag/status',
+  ];
+  
+  // Check if the current path is a public route
+  const isPublicRoute = publicRoutes.some(route => pathname.startsWith(route));
+  
+  // If it's a public route, allow access
+  // (Pages will handle redirecting authenticated users away from /login)
+  if (isPublicRoute) {
     return NextResponse.next();
   }
-
-  // Get the JWT auth cookie
-  const authCookieName = getAuthCookieName();
-  const authCookie = request.cookies.get(authCookieName);
-  const pathname = request.nextUrl.pathname;
-
-  // Redirect /register to /login (registration is disabled)
-  if (pathname === '/register') {
-    return NextResponse.redirect(new URL('/login', request.url));
-  }
-
-  // Allow access to login page
-  if (pathname === '/login') {
-    if (authCookie) {
-      // Redirect to home if already logged in
-      return NextResponse.redirect(new URL('/', request.url));
-    }
-    // Allow access to login page - don't redirect if already on login
-    return NextResponse.next();
-  }
-
-  // Protect all other routes (including root)
-  if (!authCookie) {
-    // Only redirect to login if not already going there (prevent redirect loops)
-    // Clean the URL to avoid query parameters that might cause issues
+  
+  // Protected routes - check for authentication token
+  const token = request.cookies.get('access_token');
+  
+  if (!token) {
+    // No token, redirect to login
     const loginUrl = new URL('/login', request.url);
-    loginUrl.search = ''; // Remove any query parameters
+    // Preserve the original URL as a redirect parameter
+    loginUrl.searchParams.set('redirect', pathname);
     return NextResponse.redirect(loginUrl);
   }
-
+  
+  // Token exists - allow access (pages will validate token validity)
   return NextResponse.next();
 }
 
@@ -47,13 +61,11 @@ export const config = {
   matcher: [
     /*
      * Match all request paths except for the ones starting with:
-     * - api (API routes)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      * - public files (public folder)
      */
-    '/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 };
-
