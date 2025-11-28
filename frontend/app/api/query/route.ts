@@ -158,6 +158,21 @@ export async function POST(request: NextRequest) {
           path: '/query',
           error,
         });
+        
+        // Check if this is a RAG-disabled error
+        if (response.status === 503 && error?.code === 'RAG_NOT_INITIALIZED') {
+          // Return user-friendly message for RAG-disabled case
+          return NextResponse.json(
+            {
+              detail: 'Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.',
+              code: 'RAG_NOT_INITIALIZED',
+              rag_enabled: false,
+            },
+            { status: 503 },
+          );
+        }
+        
+        // For other errors, return as-is
         return NextResponse.json(
           error ?? { detail: 'Backend request failed' },
           { status: response.status },

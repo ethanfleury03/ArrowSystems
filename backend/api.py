@@ -69,6 +69,36 @@ def get_error_detail(error: Exception, generic_message: str) -> str:
         return f"{generic_message}: {str(error)}"
 
 
+def get_rag_disabled_response(path: str = "/query") -> JSONResponse:
+    """
+    Return a structured 503 response for RAG-disabled endpoints.
+    
+    This allows the frontend to distinguish RAG-disabled errors from
+    transient 503 errors (e.g., cold starts) and handle them appropriately.
+    
+    Args:
+        path: The API path that was called (for logging)
+    
+    Returns:
+        JSONResponse with status 503 and structured error body
+    """
+    logger.warning(
+        "rag_query_rejected_rag_disabled",
+        path=path,
+        reason="RAG pipeline not initialized",
+        rag_enabled=False,
+    )
+    
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "RAG pipeline not initialized. Please contact the administrator.",
+            "code": "RAG_NOT_INITIALIZED",
+            "rag_enabled": False,
+        },
+    )
+
+
 # ============================================================================
 # Async Wrapper for Blocking RAG Operations
 # ============================================================================
@@ -879,6 +909,42 @@ async def health_check():
     return response
 
 
+class RAGStatusResponse(BaseModel):
+    """RAG status response model."""
+    rag_enabled: bool
+    details: str
+
+
+@app.get("/rag/status", response_model=RAGStatusResponse)
+# Note: /rag/status endpoint is NOT rate limited for status checks
+async def rag_status():
+    """
+    Get RAG pipeline status.
+    
+    This endpoint allows the frontend to check if RAG is available
+    before attempting queries, avoiding unnecessary retries and providing
+    clear feedback to users.
+    """
+    global rag_pipeline
+    
+    rag_initialized = False
+    try:
+        rag_initialized = bool(rag_pipeline and rag_pipeline.is_initialized())
+    except Exception:
+        rag_initialized = False
+    
+    if rag_initialized:
+        return RAGStatusResponse(
+            rag_enabled=True,
+            details="RAG pipeline initialized and ready."
+        )
+    else:
+        return RAGStatusResponse(
+            rag_enabled=False,
+            details="RAG index not loaded. Non-RAG endpoints are functional."
+        )
+
+
 class DatabaseHealthResponse(BaseModel):
     """Database health check response model."""
     status: str
@@ -1179,10 +1245,7 @@ async def query_knowledge_base(request: Request):
     global rag_pipeline, db_manager, saved_response_manager
     
     if not rag_pipeline or not rag_pipeline.is_initialized():
-        raise HTTPException(
-            status_code=503,
-            detail="RAG pipeline not initialized. Please contact the administrator."
-        )
+        return get_rag_disabled_response("/query")
     
     try:
         start_time = time.time()

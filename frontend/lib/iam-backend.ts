@@ -78,8 +78,21 @@ export async function iamBackendRequest(
     // Check if response indicates an error (google-auth-library doesn't throw on HTTP errors)
     const statusCode = response.status || (response as any).statusCode || 200;
     
-    // If 503 and we have retries left, retry
-    if (statusCode === 503 && attempt < maxRetries) {
+    // Check if this is a RAG-disabled error (should not retry)
+    let isRagDisabled = false;
+    if (statusCode === 503 && response.data) {
+      try {
+        const errorData = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+        if (errorData?.code === 'RAG_NOT_INITIALIZED') {
+          isRagDisabled = true;
+        }
+      } catch (e) {
+        // If parsing fails, treat as transient error
+      }
+    }
+    
+    // If 503 and NOT RAG-disabled and we have retries left, retry
+    if (statusCode === 503 && !isRagDisabled && attempt < maxRetries) {
       const delay = retryDelay * Math.pow(2, attempt);
       console.warn(`IAM Backend Request 503 (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms:`, {
         path,
@@ -87,6 +100,11 @@ export async function iamBackendRequest(
       });
       await new Promise(resolve => setTimeout(resolve, delay));
       continue; // Retry the request
+    }
+    
+    // If RAG-disabled, don't retry - return immediately
+    if (isRagDisabled) {
+      console.warn('IAM Backend Request: RAG disabled, skipping retries', { path, status: statusCode });
     }
 
     // Convert the response to a standard Response object
@@ -120,7 +138,23 @@ export async function iamBackendRequest(
       // Handle network errors and connection failures (common during cold starts)
       // Check if this is a retryable error
       const statusCode = error.response?.status || error.status || (error.code === 'ECONNREFUSED' ? 503 : 500);
-      const isRetryable = statusCode === 503 || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT';
+      
+      // Check if this is a RAG-disabled error (should not retry)
+      let isRagDisabled = false;
+      if (statusCode === 503 && error.response?.data) {
+        try {
+          const errorData = typeof error.response.data === 'string' 
+            ? JSON.parse(error.response.data) 
+            : error.response.data;
+          if (errorData?.code === 'RAG_NOT_INITIALIZED') {
+            isRagDisabled = true;
+          }
+        } catch (e) {
+          // If parsing fails, treat as transient error
+        }
+      }
+      
+      const isRetryable = (statusCode === 503 && !isRagDisabled) || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT';
       const hasRetriesLeft = attempt < maxRetries;
       
       if (isRetryable && hasRetriesLeft) {
@@ -158,8 +192,22 @@ export async function iamBackendRequest(
           errorHeaders['set-cookie'] = error.response.headers['set-cookie'];
         }
         
-        return new Response(JSON.stringify(error.response.data || { detail: 'Backend request failed' }), {
-          status: error.response.status || 500,
+        const errorData = error.response.data || { detail: 'Backend request failed' };
+        const errorStatus = error.response.status || 500;
+        
+        // Check if this is a RAG-disabled error (don't retry)
+        const isRagDisabled = errorStatus === 503 && errorData?.code === 'RAG_NOT_INITIALIZED';
+        if (isRagDisabled) {
+          console.warn('IAM Backend Request: RAG disabled error, not retrying', { path, status: errorStatus });
+          // Return immediately without retrying
+          return new Response(JSON.stringify(errorData), {
+            status: errorStatus,
+            headers: errorHeaders,
+          });
+        }
+        
+        return new Response(JSON.stringify(errorData), {
+          status: errorStatus,
           headers: errorHeaders,
         });
       }

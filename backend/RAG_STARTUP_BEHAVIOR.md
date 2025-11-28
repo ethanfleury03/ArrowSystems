@@ -33,11 +33,18 @@ The backend now tolerates missing or invalid RAG index during startup. The servi
 
 ### 3. RAG Endpoints
 
-All RAG endpoints already had proper checks for `rag_pipeline.is_initialized()`:
-- `/query` - Returns 503 with message "RAG pipeline not initialized. Please contact the administrator."
-- `/admin/documents/search` - Returns 503
-- `/admin/documents/chunks` - Returns 503
-- All other RAG-related endpoints - Return 503 appropriately
+All RAG endpoints check for `rag_pipeline.is_initialized()` and return structured error responses:
+- `/query` - Returns 503 with structured error:
+  ```json
+  {
+    "detail": "RAG pipeline not initialized. Please contact the administrator.",
+    "code": "RAG_NOT_INITIALIZED",
+    "rag_enabled": false
+  }
+  ```
+- Other RAG endpoints use the same pattern via `get_rag_disabled_response()` helper
+- The `code: "RAG_NOT_INITIALIZED"` field allows the frontend to distinguish RAG-disabled errors from transient 503 errors (e.g., cold starts)
+- Structured logging is added for all RAG-disabled 503 responses
 
 ### 4. Health Endpoint
 
@@ -74,8 +81,16 @@ The `/health` endpoint already handles RAG disabled correctly:
 **Endpoints:**
 - `/auth/login` - ✅ Works normally
 - `/health` - ✅ Returns `rag_pipeline_initialized: false`, status: "ok"
-- `/query` - ❌ Returns 503: "RAG pipeline not initialized. Please contact the administrator."
-- Other RAG endpoints - ❌ Return 503
+- `/rag/status` - ✅ Returns `rag_enabled: false` with details
+- `/query` - ❌ Returns 503 with structured error:
+  ```json
+  {
+    "detail": "RAG pipeline not initialized. Please contact the administrator.",
+    "code": "RAG_NOT_INITIALIZED",
+    "rag_enabled": false
+  }
+  ```
+- Other RAG endpoints - ❌ Return 503 with same structured format
 
 ### Scenario 3: RAG Index Invalid or Corrupted
 
@@ -139,4 +154,80 @@ Now:
 - `/auth/login` works normally
 - Only RAG-specific endpoints return 503 when RAG is unavailable
 - Cloud Run marks the service as healthy (database connectivity is the primary health check)
+- Frontend can distinguish RAG-disabled 503s from transient errors and handle them appropriately (no retries, clear messaging)
+
+## Structured Error Responses
+
+### RAG-Disabled Error Format
+
+When RAG endpoints are called but RAG is not initialized, they return:
+
+```json
+{
+  "detail": "RAG pipeline not initialized. Please contact the administrator.",
+  "code": "RAG_NOT_INITIALIZED",
+  "rag_enabled": false
+}
+```
+
+**Key Fields:**
+- `code: "RAG_NOT_INITIALIZED"` - Allows frontend to reliably detect RAG-disabled condition
+- `rag_enabled: false` - Explicit flag indicating RAG is not available
+- `detail` - User-facing error message
+
+### Frontend Handling
+
+The frontend (`frontend/lib/iam-backend.ts` and `frontend/app/api/query/route.ts`) now:
+
+1. **Checks for `code: "RAG_NOT_INITIALIZED"`** in 503 responses
+2. **Skips retries** when RAG is disabled (no exponential backoff)
+3. **Shows clear user message**: "Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator."
+4. **Retries transient 503s** (e.g., cold starts) with exponential backoff
+
+This prevents:
+- Pointless retries when RAG is permanently disabled
+- Confusing "Service temporarily unavailable" messages for permanent RAG issues
+- Wasted backend requests
+
+## New Endpoints
+
+### GET /rag/status
+
+Returns the current RAG pipeline status without requiring authentication.
+
+**Response (RAG enabled):**
+```json
+{
+  "rag_enabled": true,
+  "details": "RAG pipeline initialized and ready."
+}
+```
+
+**Response (RAG disabled):**
+```json
+{
+  "rag_enabled": false,
+  "details": "RAG index not loaded. Non-RAG endpoints are functional."
+}
+```
+
+**Use Cases:**
+- Frontend can check RAG status after login to enable/disable query UI
+- Monitoring and health dashboards
+- Pre-flight checks before attempting queries
+
+## Logging
+
+### RAG-Disabled Query Attempts
+
+When `/query` is called but RAG is disabled, the backend logs:
+
+```
+WARNING: rag_query_rejected_rag_disabled path=/query reason="RAG pipeline not initialized" rag_enabled=False
+```
+
+This structured log allows:
+- Easy filtering in Cloud Logging
+- Monitoring of RAG-disabled query attempts
+- Distinguishing from other 503 errors in logs
 
