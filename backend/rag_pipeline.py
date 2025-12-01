@@ -177,6 +177,7 @@ class RAGPipeline:
         
         Args:
             storage_dir: Directory containing the vector index (can be Path or str)
+                        Should be an absolute path in production (e.g., /app/latest_model)
             index_id: Optional index ID (if using custom index IDs)
         
         Returns:
@@ -184,9 +185,16 @@ class RAGPipeline:
             False if initialization is in progress (another thread is initializing)
                  or if initialization failed (check debug_status() for details)
         """
-        # Convert Path to string if needed
+        # Convert Path to string if needed, and ensure it's absolute
         if isinstance(storage_dir, Path):
-            storage_dir = str(storage_dir)
+            storage_dir = str(storage_dir.resolve())
+        else:
+            # Ensure string paths are absolute (resolve relative paths)
+            storage_path = Path(storage_dir)
+            if not storage_path.is_absolute():
+                storage_dir = str(storage_path.resolve())
+            else:
+                storage_dir = str(storage_path)
         
         # Fast path: already initialized
         if self._initialized:

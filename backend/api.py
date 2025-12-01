@@ -480,12 +480,22 @@ async def lifespan(app: FastAPI):
             storage_path_obj = resolve_storage_path()
             if storage_path_obj is None:
                 storage_path = None
-                logger.warning("rag_storage_path_resolution_failed", 
-                             message="resolve_storage_path() returned None - no valid index directory found. "
-                                    "RAG will be disabled until index is available.")
+                logger.error("rag_storage_path_resolution_failed", 
+                           message="resolve_storage_path() returned None - no valid index directory found. "
+                                  "RAG will be disabled until index is available. "
+                                  "In production, this should never happen - check Cloud Run volume mount configuration.")
             else:
                 storage_path = str(storage_path_obj)
-                logger.info("rag_storage_path_resolved", storage_path=storage_path)
+                # Ensure it's absolute (should always be in prod)
+                storage_path_abs = Path(storage_path).resolve()
+                storage_path = str(storage_path_abs)
+                
+                logger.info("rag_storage_path_resolved", 
+                          storage_path=storage_path,
+                          is_absolute=storage_path_abs.is_absolute(),
+                          exists=storage_path_abs.exists(),
+                          is_dir=storage_path_abs.is_dir() if storage_path_abs.exists() else False,
+                          message=f"RAG storage path resolved: {storage_path} (absolute: {storage_path_abs.is_absolute()})")
         
         # Light validation: check if directory exists and has required files (but don't load index)
         if storage_path:
