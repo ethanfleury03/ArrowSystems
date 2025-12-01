@@ -163,9 +163,10 @@ RUN cat <<'EOF' > /app/run_backend.sh
 #!/bin/bash
 set -e
 
-# Load .env file if it exists
-if [ -f ".env" ]; then
-    echo "📋 Loading environment variables from .env file..."
+# Load .env file ONLY in development (not in production)
+# In production, Cloud Run environment variables must always win
+if [ -f ".env" ] && [ "${ENV:-dev}" != "prod" ] && [ "${ENV:-dev}" != "production" ] && [ "${ENV:-dev}" != "cloud" ]; then
+    echo "📋 Loading environment variables from .env file (dev mode only)..."
     set -a
     while IFS= read -r line || [ -n "$line" ]; do
         cleaned_line=$(echo "$line" | tr -d "\r")
@@ -177,7 +178,11 @@ if [ -f ".env" ]; then
         fi
     done < .env
     set +a
-    echo "✅ Environment variables loaded"
+    echo "✅ Environment variables loaded from .env file"
+else
+    if [ -f ".env" ]; then
+        echo "⚠️  .env file found but skipped (production mode - using Cloud Run env vars only)"
+    fi
 fi
 
 echo "=========================================="

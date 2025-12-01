@@ -386,6 +386,13 @@ async def lifespan(app: FastAPI):
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
     
     # Startup
+    # Log effective ENV value to confirm Cloud Run env vars are being used
+    logger.info("env_runtime_value", 
+               env=settings.ENV,
+               env_var_value=os.getenv("ENV"),
+               is_prod=settings.is_prod,
+               is_dev=settings.is_dev,
+               message=f"Runtime environment: {settings.ENV} (is_prod={settings.is_prod}, is_dev={settings.is_dev})")
     logger.info("server_starting", environment=settings.ENV)
 
     # Ensure logs directory exists for feedback storage
