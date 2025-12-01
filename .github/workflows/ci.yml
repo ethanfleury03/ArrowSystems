@@ -14,6 +14,7 @@ env:
   COMPOSE_DOCKER_CLI_BUILD: 1
   PYTHON_VERSION: "3.11"
   NODE_VERSION: "20"
+  NEXT_PUBLIC_API_URL: "https://arrow-rag-backend-70705019874.us-central1.run.app"
 
 jobs:
   validate-secrets:
@@ -168,12 +169,22 @@ jobs:
         working-directory: ./frontend
         run: npm ci
 
+      - name: Verify backend URL env var
+        run: |
+          if [ -z "$NEXT_PUBLIC_API_URL" ]; then
+            echo "❌ NEXT_PUBLIC_API_URL is not set!"
+            exit 1
+          fi
+          echo "✅ NEXT_PUBLIC_API_URL is set: $NEXT_PUBLIC_API_URL"
+
       - name: Build Next.js application
         working-directory: ./frontend
-        run: npm run build
+        run: |
+          export NEXT_PUBLIC_API_URL="${{ env.NEXT_PUBLIC_API_URL }}"
+          npm run build
         env:
           NODE_ENV: production
-          NEXT_PUBLIC_API_URL: https://arrow-rag-backend-70705019874.us-central1.run.app
+          NEXT_PUBLIC_API_URL: ${{ env.NEXT_PUBLIC_API_URL }}
           SESSION_SECRET: test-session-secret-for-ci-only-not-for-production-use-at-least-32-chars
 
       - name: Verify build artifacts
@@ -627,6 +638,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Verify backend URL before Docker build
+        run: |
+          if [ -z "$NEXT_PUBLIC_API_URL" ]; then
+            echo "❌ NEXT_PUBLIC_API_URL is not set!"
+            exit 1
+          fi
+          echo "✅ NEXT_PUBLIC_API_URL verified: $NEXT_PUBLIC_API_URL"
+
       - name: Build & Push Frontend Image
         uses: docker/build-push-action@v5
         with:
@@ -638,11 +657,19 @@ jobs:
           target: production
           build-args: |
             NODE_ENV=production
-            NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app
+            NEXT_PUBLIC_API_URL=${{ env.NEXT_PUBLIC_API_URL }}
             SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
 
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Verify backend URL before deployment
+        run: |
+          if [ -z "$NEXT_PUBLIC_API_URL" ]; then
+            echo "❌ NEXT_PUBLIC_API_URL is not set!"
+            exit 1
+          fi
+          echo "✅ NEXT_PUBLIC_API_URL verified before deployment: $NEXT_PUBLIC_API_URL"
 
       - name: Deploy Frontend to Cloud Run
         run: |
@@ -656,9 +683,9 @@ jobs:
             --timeout=300 \
             --concurrency=80 \
             --port=3000 \
-            --set-env-vars=NEXT_PUBLIC_API_URL=https://arrow-rag-backend-70705019874.us-central1.run.app \
-            --set-env-vars=NODE_ENV=production \
-            --set-env-vars=SESSION_SECRET="${{ secrets.FRONTEND_SESSION_SECRET }}" \
+            --set-env-vars="NEXT_PUBLIC_API_URL=${{ env.NEXT_PUBLIC_API_URL }}" \
+            --set-env-vars="NODE_ENV=production" \
+            --set-env-vars="SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
             --allow-unauthenticated \
             --quiet
 
