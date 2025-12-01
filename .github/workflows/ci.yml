@@ -173,7 +173,7 @@ jobs:
         run: npm run build
         env:
           NODE_ENV: production
-          NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_PUBLIC_API_URL: https://arrow-rag-backend-70705019874.us-central1.run.app
           SESSION_SECRET: test-session-secret-for-ci-only-not-for-production-use-at-least-32-chars
 
       - name: Verify build artifacts
@@ -212,11 +212,12 @@ jobs:
           echo "=== Checking buildx builder ==="
           docker buildx ls
 
-      - name: Authenticate to Google Cloud via WIF
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
           create_credentials_file: true
         id: auth
 
@@ -285,11 +286,12 @@ jobs:
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
-      - name: Authenticate to Google Cloud via WIF
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
           create_credentials_file: true
 
       - name: Setup gcloud
@@ -358,11 +360,12 @@ jobs:
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
-      - name: Authenticate to Google Cloud via WIF
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
           create_credentials_file: true
         id: auth
 
@@ -476,50 +479,32 @@ jobs:
             exit 0  # Don't fail the build
           }
 
-      - name: Deploy Backend to Cloud Run (v2 deploy)
+      - name: Deploy backend to Cloud Run
         run: |
           gcloud run deploy arrow-rag-backend \
-            --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }} \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
             --region=us-central1 \
-            --platform=managed \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}" \
+            --image="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}" \
+            --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+            --set-env-vars="JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}" \
+            --set-env-vars="FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
+            --set-env-vars="ENV=prod" \
+            --set-env-vars="HF_HOME=/app/.cache/huggingface" \
+            --set-env-vars="TRANSFORMERS_CACHE=/app/.cache/huggingface" \
+            --set-env-vars="SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface" \
+            --set-env-vars="ENABLE_INGESTION_ON_STARTUP=false" \
+            --set-env-vars="PYTHONUNBUFFERED=1" \
+            --set-env-vars="CORS_ALLOWED_ORIGINS=https://arrow-rag-frontend-70705019874.us-central1.run.app" \
+            --set-env-vars="AUTH_COOKIE_SAMESITE=none" \
+            --set-env-vars="AUTH_COOKIE_SECURE=true" \
+            --set-cloudsql-instances="arrow-rag-support-prod:us-central1:rag-postgres" \
             --execution-environment=gen2 \
-            --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
-            --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            --set-env-vars=ENV=prod \
-            --quiet
-
-      - name: Deploy Backend to Cloud Run
-        run: |
-          # Step 1: Set scaling and concurrency
-          echo "Setting scaling and concurrency configuration..."
-          gcloud run services update arrow-rag-backend \
-            --region=us-central1 \
-            --platform=managed \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
             --min-instances=1 \
             --max-instances=10 \
             --concurrency=100 \
-            --quiet
-          
-          # Step 4: Update environment variables and secrets
-          echo "Updating environment variables and secrets..."
-          gcloud run services update arrow-rag-backend \
-            --region=us-central1 \
-            --platform=managed \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --set-cloudsql-instances=arrow-rag-support-prod:us-central1:rag-postgres \
-            --set-env-vars=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
-            --set-env-vars=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            --set-env-vars=HF_HOME=/app/.cache/huggingface \
-            --set-env-vars=TRANSFORMERS_CACHE=/app/.cache/huggingface \
-            --set-env-vars=SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface \
-            --set-env-vars=ENABLE_INGESTION_ON_STARTUP=false \
-            --set-env-vars=PYTHONUNBUFFERED=1 \
-            --set-env-vars=ENV=prod \
-            --set-env-vars=CORS_ALLOWED_ORIGINS="https://arrow-rag-frontend-70705019874.us-central1.run.app" \
-            --set-env-vars=AUTH_COOKIE_SAMESITE=none \
-            --set-env-vars=AUTH_COOKIE_SECURE=true \
+            --allow-unauthenticated=false \
+            --port=8080 \
             --quiet
           
           echo "✅ Deployment complete!"
@@ -536,50 +521,40 @@ jobs:
           echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
 
       - name: Pre-warm Backend Service
+        continue-on-error: true
         run: |
-          echo "🔥 Pre-warming backend service to trigger initialization..."
           BACKEND_URL="https://arrow-rag-backend-70705019874.us-central1.run.app"
           
-          echo "🔐 Fetching ID token for Cloud Run backend..."
-          ID_TOKEN="$(gcloud auth print-identity-token --audiences="$BACKEND_URL")"
-          AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
+          echo "🔥 Pre-warming backend service..."
           
-          # Wait a few seconds for the service to be ready
-          echo "⏳ Waiting 5 seconds for service to be ready..."
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+          AUTH_HEADER="Authorization: Bearer $ACCESS_TOKEN"
+          
+          echo "⏳ Waiting 5 seconds..."
           sleep 5
           
-          # Pre-warm health endpoint (triggers container start and basic initialization)
-          echo "🏥 Calling /health endpoint..."
-          HEALTH_RES=$(curl -sS --max-time 30 -H "$AUTH_HEADER" "$BACKEND_URL/health" || echo "ERROR")
-          echo "Health: $HEALTH_RES"
+          echo "🏥 Checking /health..."
+          HEALTH=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/health" || echo "ERROR")
+          echo "Health: $HEALTH"
           
-          # Wait a bit more for RAG initialization
-          echo "⏳ Waiting 10 seconds for RAG initialization..."
+          echo "⏳ Waiting 10 seconds for RAG..."
           sleep 10
           
-          # Pre-warm RAG status endpoint (triggers RAG pipeline initialization)
-          echo "🧠 Calling /rag/status endpoint..."
-          RAG_STATUS=$(curl -sS --max-time 60 -H "$AUTH_HEADER" "$BACKEND_URL/rag/status" || echo "ERROR")
-          echo "RAG Status: $RAG_STATUS"
+          echo "🧠 Checking RAG status..."
+          STATUS=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/status" || echo "ERROR")
+          echo "RAG Status: $STATUS"
           
-          # Wait a bit more for any final initialization
-          echo "⏳ Waiting 5 seconds for final initialization..."
-          sleep 5
+          echo "🧪 Running self-test..."
+          SELF=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/self-test" || echo "ERROR")
+          echo "Self test: $SELF"
           
-          # Run RAG self-test to verify search actually works
-          echo "🧪 Running RAG self-test..."
-          SELF_TEST=$(curl -sS --max-time 90 -H "$AUTH_HEADER" "$BACKEND_URL/rag/self-test" || echo "ERROR")
-          echo "RAG Self-Test: $SELF_TEST"
-          
-          # Optional: you can fail the pipeline if self-test really fails
-          if echo "$SELF_TEST" | grep -q '"status":"ok"'; then
+          if echo "$SELF" | grep -q '"status":"ok"'; then
             echo "✅ RAG self-test passed! RAG is fully operational."
           else
             echo "⚠️ RAG self-test did not pass. Check backend logs for details."
-            # Optionally: exit 1
           fi
           
-          echo "✅ Pre-warm complete! (requests were authenticated)"
+          echo "✅ Pre-warm complete!"
 
   deploy-frontend:
     name: Deploy Frontend to Cloud Run
@@ -596,11 +571,12 @@ jobs:
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
-      - name: Authenticate to Google Cloud via WIF
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
           create_credentials_file: true
         id: auth
 
