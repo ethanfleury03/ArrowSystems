@@ -1025,6 +1025,8 @@ class RAGSelfTestResponse(BaseModel):
     num_results: Optional[int] = None
     detail: Optional[str] = None
     error_type: Optional[str] = None
+    storage_dir: Optional[str] = None
+    last_error: Optional[str] = None
 
 
 @app.get("/rag/self-test", response_model=RAGSelfTestResponse)
@@ -1063,15 +1065,23 @@ async def rag_self_test():
     # Check if RAG is initialized after lazy init attempt
     if not rag_pipeline.is_initialized():
         debug_status = rag_pipeline.debug_status()
+        # Get storage path from app state if not in debug_status
+        storage_dir = debug_status.get("storage_dir") or getattr(app.state, 'rag_storage_path', None)
+        last_error = debug_status.get("last_error")
+        
         logger.warning("rag_self_test_not_initialized",
                      message="RAG self-test called but pipeline is not initialized",
-                     debug_status=debug_status)
+                     debug_status=debug_status,
+                     storage_dir=storage_dir,
+                     last_error=last_error)
         return JSONResponse(
             status_code=503,
             content={
                 "status": "RAG_NOT_INITIALIZED",
                 "rag_enabled": False,
                 "detail": "RAG pipeline not initialized",
+                "storage_dir": str(storage_dir) if storage_dir else None,
+                "last_error": last_error,
                 **debug_status,
             },
         )
@@ -1101,11 +1111,17 @@ async def rag_self_test():
                   num_results=num_results,
                   message="RAG self-test passed successfully")
         
+        # Get storage path and status for successful response
+        debug_status = rag_pipeline.debug_status()
+        storage_dir = debug_status.get("storage_dir") or getattr(app.state, 'rag_storage_path', None)
+        
         return RAGSelfTestResponse(
             status="ok",
             rag_enabled=True,
             test_query=test_query,
-            num_results=num_results
+            num_results=num_results,
+            storage_dir=str(storage_dir) if storage_dir else None,
+            last_error=None
         )
         
     except Exception as exc:
@@ -1118,13 +1134,78 @@ async def rag_self_test():
                      exc_info=True,
                      message=f"RAG self-test failed: {error_type}: {error_message}")
         
+        # Get storage path and last error for error response
+        debug_status = rag_pipeline.debug_status()
+        storage_dir = debug_status.get("storage_dir") or getattr(app.state, 'rag_storage_path', None)
+        last_error = debug_status.get("last_error") or error_message
+        
         return RAGSelfTestResponse(
             status="ERROR",
             rag_enabled=True,  # Pipeline is initialized, but query failed
             test_query="test",
             detail=f"RAG self-test failed: {error_message}",
-            error_type=error_type
+            error_type=error_type,
+            storage_dir=str(storage_dir) if storage_dir else None,
+            last_error=last_error
         )
+
+
+class RAGDebugFilesResponse(BaseModel):
+    """RAG debug files response model."""
+    storage_path: Optional[str] = None
+    exists: bool
+    files: list[str]
+
+
+@app.get("/rag/debug-files", response_model=RAGDebugFilesResponse)
+# Note: /rag/debug-files endpoint is NOT rate limited for debugging
+async def rag_debug_files():
+    """
+    Debug endpoint to check what files are present in the RAG storage directory.
+    
+    This endpoint helps diagnose RAG initialization issues by showing:
+    - The storage path being used
+    - Whether the directory exists
+    - List of files in that directory
+    
+    Returns:
+        - storage_path: The storage path being checked
+        - exists: Whether the directory exists
+        - files: List of filenames in the directory (if exists)
+    """
+    storage_path = getattr(app.state, "rag_storage_path", None)
+    
+    if storage_path is None:
+        return RAGDebugFilesResponse(
+            storage_path=None,
+            exists=False,
+            files=[],
+        )
+    
+    path = Path(storage_path)
+    exists = path.exists() and path.is_dir()
+    
+    if not exists:
+        return RAGDebugFilesResponse(
+            storage_path=str(path),
+            exists=False,
+            files=[],
+        )
+    
+    try:
+        files = sorted([p.name for p in path.iterdir() if p.is_file()])
+    except Exception as e:
+        logger.error("rag_debug_files_list_failed", 
+                    storage_path=str(path),
+                    error=str(e),
+                    exc_info=True)
+        files = []
+    
+    return RAGDebugFilesResponse(
+        storage_path=str(path),
+        exists=True,
+        files=files,
+    )
 
 
 @app.get("/rag/warmup")
@@ -1572,6 +1653,12 @@ async def query_knowledge_base(request: Request):
             detail={
                 "code": "RAG_NOT_CONFIGURED",
                 "message": "RAG storage path is not configured.",
+                "rag_status": {
+                    "storage_dir": None,
+                    "last_error": "RAG storage path is not configured",
+                    "initialized": False,
+                    "initializing": False,
+                },
             },
         )
     
@@ -1593,18 +1680,26 @@ async def query_knowledge_base(request: Request):
                 else "RAG pipeline is not initialized. Please contact the administrator."
             )
             
+            # Ensure rag_status includes storage_dir and last_error explicitly
+            rag_status_response = {
+                **status,
+                "storage_dir": status.get("storage_dir") or str(storage_path) if storage_path else None,
+                "last_error": status.get("last_error"),
+            }
+            
             logger.warning("rag_query_rejected_not_ready",
                          path="/query",
                          code=code,
                          initializing=status["initializing"],
-                         last_error=status["last_error"])
+                         last_error=status["last_error"],
+                         storage_dir=rag_status_response.get("storage_dir"))
             
             raise HTTPException(
                 status_code=503,
                 detail={
                     "code": code,
                     "message": message,
-                    "rag_status": status,
+                    "rag_status": rag_status_response,
                 },
             )
     
