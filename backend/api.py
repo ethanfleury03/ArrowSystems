@@ -967,41 +967,67 @@ async def rag_status_public():
     try:
         global rag_pipeline
         
-        # Determine initialization state
-        initialized = rag_pipeline.is_initialized() if (rag_pipeline and hasattr(rag_pipeline, "is_initialized")) else False
+        # Get storage path from app state (same as /rag/self-test)
+        storage_path = getattr(app.state, 'rag_storage_path', None)
         
-        # Attempt to gather details
-        try:
-            if rag_pipeline and hasattr(rag_pipeline, "get_status"):
-                details = rag_pipeline.get_status()
-            elif rag_pipeline and hasattr(rag_pipeline, "debug_status"):
-                debug_status = rag_pipeline.debug_status()
-                if initialized:
-                    details = "RAG pipeline initialized and ready."
-                elif debug_status.get("initializing"):
-                    details = "RAG pipeline is currently initializing. Please wait."
-                elif debug_status.get("last_error"):
-                    details = f"RAG pipeline initialization failed: {debug_status.get('last_error')}"
-                else:
-                    details = "RAG index not loaded. Non-RAG endpoints are functional."
-            else:
-                details = "RAG pipeline does not expose get_status()"
-        except Exception as e:
-            details = f"Error retrieving status: {e}"
+        # Ensure pipeline instance exists
+        if rag_pipeline is None:
+            cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+        
+        # Check if index directory exists (even if not initialized)
+        index_dir_exists = False
+        if storage_path:
+            index_dir_exists = os.path.exists(storage_path) and os.path.isdir(storage_path)
+        
+        # Attempt lazy initialization if not already initialized (same as /rag/self-test)
+        if storage_path is not None and not rag_pipeline.is_initialized():
+            logger.info("rag_status_triggering_lazy_init", storage_path=storage_path)
+            rag_pipeline.ensure_initialized(storage_path)
+        
+        # Get current status after initialization attempt
+        initialized = rag_pipeline.is_initialized()
+        debug_status = rag_pipeline.debug_status() if rag_pipeline else {}
+        
+        # Build detailed status message
+        if initialized:
+            details = "RAG pipeline initialized and ready."
+        elif debug_status.get("initializing"):
+            details = "RAG pipeline is currently initializing. Please wait."
+        elif debug_status.get("last_error"):
+            details = f"RAG pipeline initialization failed: {debug_status.get('last_error')}"
+        elif not index_dir_exists:
+            details = "RAG index not loaded. Non-RAG endpoints are functional."
+        else:
+            details = "RAG index directory exists but not loaded yet."
+        
+        # Compute rag_enabled: initialized AND index exists
+        rag_enabled = initialized and index_dir_exists
         
         logger.info("rag_status_public_response",
                     initialized=initialized,
+                    rag_enabled=rag_enabled,
+                    index_dir_exists=index_dir_exists,
+                    initializing=debug_status.get("initializing", False),
+                    storage_dir=str(storage_path) if storage_path else None,
                     details=details)
         
         return {
-            "rag_enabled": initialized,
+            "rag_enabled": rag_enabled,
+            "initialized": initialized,
+            "index_dir_exists": index_dir_exists,
+            "storage_dir": str(storage_path) if storage_path else None,
+            "initializing": debug_status.get("initializing", False),
+            "last_error": debug_status.get("last_error"),
             "details": details,
         }
         
     except Exception as e:
-        logger.error("rag_status_public_failed", error=str(e))
+        logger.error("rag_status_public_failed", error=str(e), exc_info=True)
         return {
             "rag_enabled": False,
+            "initialized": False,
+            "index_dir_exists": False,
             "details": f"status endpoint error: {str(e)}"
         }
 
