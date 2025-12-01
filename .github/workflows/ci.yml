@@ -485,7 +485,7 @@ jobs:
             --project="${{ secrets.GCP_PROJECT_ID }}" \
             --region=us-central1 \
             --service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}" \
-            --image="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}" \
+            --image="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${GITHUB_SHA}" \
             --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
             --set-env-vars="JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}" \
             --set-env-vars="FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
@@ -503,7 +503,7 @@ jobs:
             --min-instances=1 \
             --max-instances=10 \
             --concurrency=100 \
-            --allow-unauthenticated=false \
+            --no-allow-unauthenticated \
             --port=8080 \
             --quiet
           
