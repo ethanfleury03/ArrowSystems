@@ -505,6 +505,8 @@ jobs:
             --concurrency=100 \
             --no-allow-unauthenticated \
             --port=8080 \
+            --add-volume=name=rag-index,type=gcs,bucket=arrow-rag-support-prod-rag,path=latest_model \
+            --add-volume-mount=volume=rag-index,mount-path=/app/latest_model,read-only \
             --quiet
           
           echo "✅ Deployment complete!"
