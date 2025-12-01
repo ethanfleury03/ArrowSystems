@@ -551,9 +551,10 @@ jobs:
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           echo "🏥 Verifying backend health at $BACKEND_URL..."
           
-          # Use IAM authentication to check health (since backend requires auth)
-          ACCESS_TOKEN=$(gcloud auth print-access-token)
-          if ! curl -f -H "Authorization: Bearer $ACCESS_TOKEN" "$BACKEND_URL/health"; then
+          # Use IAM identity token (not access token) for Cloud Run authenticated services
+          # Identity token is required when service has --no-allow-unauthenticated
+          ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
+          if ! curl -f -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/health"; then
             echo "❌ Backend health check failed!"
             exit 1
           fi
@@ -566,9 +567,10 @@ jobs:
           
           echo "🔥 Pre-warming backend service..."
           
-          # Get IAM access token for authenticated requests
-          ACCESS_TOKEN=$(gcloud auth print-access-token)
-          AUTH_HEADER="Authorization: Bearer $ACCESS_TOKEN"
+          # Get IAM identity token (not access token) for Cloud Run authenticated services
+          # Identity token is required when service has --no-allow-unauthenticated
+          ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
+          AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
           
           echo "⏳ Waiting 5 seconds..."
           sleep 5
