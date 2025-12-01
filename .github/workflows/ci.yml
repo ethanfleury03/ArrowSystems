@@ -546,18 +546,37 @@ jobs:
           
           echo "✅ Frontend service account granted permission to invoke backend"
 
+      - name: Generate Cloud Run Identity Token (WIF → ID token)
+        id: mint_token
+        run: |
+          BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
+          echo "🔐 Generating identity token for $BACKEND_URL..."
+          
+          # Get the WIF federated access token
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+          
+          # Exchange it for a Cloud Run identity token using OAuth token exchange
+          ID_TOKEN=$(curl -s \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+            -d "subject_token=$ACCESS_TOKEN" \
+            -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+            -d "audience=$BACKEND_URL" \
+            -d "requested_token_type=urn:ietf:params:oauth:token-type:id_token" \
+            "https://oauth2.googleapis.com/token" | jq -r '.id_token')
+          
+          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+            echo "❌ Failed to generate identity token"
+            exit 1
+          fi
+          
+          echo "ID_TOKEN=$ID_TOKEN" >> $GITHUB_ENV
+          echo "✅ Identity token generated successfully"
+
       - name: Verify backend health
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           echo "🏥 Verifying backend health at $BACKEND_URL..."
-          
-          # Use IAM identity token (not access token) for Cloud Run authenticated services
-          # Identity token is required when service has --no-allow-unauthenticated
-          # Use service account impersonation since WIF authenticates as a user, not service account
-          # The WIF service account needs to have "Service Account Token Creator" role to impersonate itself
-          ID_TOKEN=$(gcloud auth print-identity-token \
-            --audiences="$BACKEND_URL" \
-            --impersonate-service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}")
           
           if ! curl -f -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/health"; then
             echo "❌ Backend health check failed!"
@@ -572,12 +591,21 @@ jobs:
           
           echo "🔥 Pre-warming backend service..."
           
-          # Get IAM identity token (not access token) for Cloud Run authenticated services
-          # Identity token is required when service has --no-allow-unauthenticated
-          # Use service account impersonation since WIF authenticates as a user, not service account
-          ID_TOKEN=$(gcloud auth print-identity-token \
-            --audiences="$BACKEND_URL" \
-            --impersonate-service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}")
+          # Use the identity token from the mint_token step (already in GITHUB_ENV)
+          # If not available, generate a new one using OAuth token exchange
+          if [ -z "$ID_TOKEN" ]; then
+            echo "🔐 Generating identity token for pre-warm..."
+            ACCESS_TOKEN=$(gcloud auth print-access-token)
+            ID_TOKEN=$(curl -s \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+              -d "subject_token=$ACCESS_TOKEN" \
+              -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+              -d "audience=$BACKEND_URL" \
+              -d "requested_token_type=urn:ietf:params:oauth:token-type:id_token" \
+              "https://oauth2.googleapis.com/token" | jq -r '.id_token')
+          fi
+          
           AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
           
           echo "⏳ Waiting 5 seconds..."
