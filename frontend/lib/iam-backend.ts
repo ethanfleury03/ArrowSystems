@@ -12,8 +12,8 @@
 import { GoogleAuth } from 'google-auth-library';
 
 // Get backend URL from environment variable (required in production)
-// Fallback URL should match the actual Cloud Run service URL
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL || 'https://arrow-rag-backend-70705019874.us-central1.run.app';
+// In production, NEXT_PUBLIC_API_URL must be set by Cloud Run deployment
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL || 'http://localhost:8080';
 
 if (!BACKEND_URL) {
   throw new Error('NEXT_PUBLIC_API_URL or BACKEND_URL environment variable must be set');
