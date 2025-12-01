@@ -531,24 +531,29 @@ jobs:
           echo "🌐 Service URL: $SERVICE_URL"
           echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
 
-      - name: Allow unauthenticated access
+      - name: Grant frontend service account access to backend
         run: |
-          echo "🔓 Granting unauthenticated access to backend service..."
+          echo "🔐 Granting frontend service account permission to invoke backend..."
+          
+          # Grant the WIF service account (used by frontend) permission to invoke the backend
           gcloud run services add-iam-policy-binding arrow-rag-backend \
             --platform=managed \
             --region=us-central1 \
             --project=${{ secrets.GCP_PROJECT_ID }} \
-            --member=allUsers \
+            --member="serviceAccount:${{ secrets.WIF_SERVICE_ACCOUNT }}" \
             --role=roles/run.invoker \
             --quiet
-          echo "✅ Unauthenticated access granted"
+          
+          echo "✅ Frontend service account granted permission to invoke backend"
 
       - name: Verify backend health
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           echo "🏥 Verifying backend health at $BACKEND_URL..."
           
-          if ! curl -f "$BACKEND_URL/health"; then
+          # Use IAM authentication to check health (since backend requires auth)
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+          if ! curl -f -H "Authorization: Bearer $ACCESS_TOKEN" "$BACKEND_URL/health"; then
             echo "❌ Backend health check failed!"
             exit 1
           fi
@@ -561,22 +566,26 @@ jobs:
           
           echo "🔥 Pre-warming backend service..."
           
+          # Get IAM access token for authenticated requests
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+          AUTH_HEADER="Authorization: Bearer $ACCESS_TOKEN"
+          
           echo "⏳ Waiting 5 seconds..."
           sleep 5
           
           echo "🏥 Checking /health..."
-          HEALTH=$(curl -sS "$BACKEND_URL/health" || echo "ERROR")
+          HEALTH=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/health" || echo "ERROR")
           echo "Health: $HEALTH"
           
           echo "⏳ Waiting 10 seconds for RAG..."
           sleep 10
           
           echo "🧠 Checking RAG status..."
-          STATUS=$(curl -sS "$BACKEND_URL/rag/status" || echo "ERROR")
+          STATUS=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/status" || echo "ERROR")
           echo "RAG Status: $STATUS"
           
           echo "🧪 Running self-test..."
-          SELF=$(curl -sS "$BACKEND_URL/rag/self-test" || echo "ERROR")
+          SELF=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/self-test" || echo "ERROR")
           echo "Self test: $SELF"
           
           if echo "$SELF" | grep -q '"status":"ok"'; then
@@ -682,6 +691,16 @@ jobs:
 
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Fetch backend URL
+        id: backend_url
+        run: |
+          URL=$(gcloud run services describe arrow-rag-backend \
+            --region=us-central1 \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format="value(status.url)")
+          echo "🌐 Backend URL: $URL"
+          echo "url=$URL" >> $GITHUB_OUTPUT
 
       - name: Deploy Frontend to Cloud Run
         run: |
