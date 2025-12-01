@@ -531,32 +531,52 @@ jobs:
           echo "🌐 Service URL: $SERVICE_URL"
           echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
 
+      - name: Allow unauthenticated access
+        run: |
+          echo "🔓 Granting unauthenticated access to backend service..."
+          gcloud run services add-iam-policy-binding arrow-rag-backend \
+            --platform=managed \
+            --region=us-central1 \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --member=allUsers \
+            --role=roles/run.invoker \
+            --quiet
+          echo "✅ Unauthenticated access granted"
+
+      - name: Verify backend health
+        run: |
+          BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
+          echo "🏥 Verifying backend health at $BACKEND_URL..."
+          
+          if ! curl -f "$BACKEND_URL/health"; then
+            echo "❌ Backend health check failed!"
+            exit 1
+          fi
+          echo "✅ Backend health check passed"
+
       - name: Pre-warm Backend Service
         continue-on-error: true
         run: |
-          BACKEND_URL="https://arrow-rag-backend-70705019874.us-central1.run.app"
+          BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           
           echo "🔥 Pre-warming backend service..."
-          
-          ACCESS_TOKEN="$(gcloud auth print-access-token)"
-          AUTH_HEADER="Authorization: Bearer $ACCESS_TOKEN"
           
           echo "⏳ Waiting 5 seconds..."
           sleep 5
           
           echo "🏥 Checking /health..."
-          HEALTH=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/health" || echo "ERROR")
+          HEALTH=$(curl -sS "$BACKEND_URL/health" || echo "ERROR")
           echo "Health: $HEALTH"
           
           echo "⏳ Waiting 10 seconds for RAG..."
           sleep 10
           
           echo "🧠 Checking RAG status..."
-          STATUS=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/status" || echo "ERROR")
+          STATUS=$(curl -sS "$BACKEND_URL/rag/status" || echo "ERROR")
           echo "RAG Status: $STATUS"
           
           echo "🧪 Running self-test..."
-          SELF=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/self-test" || echo "ERROR")
+          SELF=$(curl -sS "$BACKEND_URL/rag/self-test" || echo "ERROR")
           echo "Self test: $SELF"
           
           if echo "$SELF" | grep -q '"status":"ok"'; then
@@ -663,14 +683,6 @@ jobs:
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-      - name: Verify backend URL before deployment
-        run: |
-          if [ -z "$NEXT_PUBLIC_API_URL" ]; then
-            echo "❌ NEXT_PUBLIC_API_URL is not set!"
-            exit 1
-          fi
-          echo "✅ NEXT_PUBLIC_API_URL verified before deployment: $NEXT_PUBLIC_API_URL"
-
       - name: Deploy Frontend to Cloud Run
         run: |
           gcloud run deploy arrow-rag-frontend \
@@ -683,7 +695,7 @@ jobs:
             --timeout=300 \
             --concurrency=80 \
             --port=3000 \
-            --set-env-vars="NEXT_PUBLIC_API_URL=${{ env.NEXT_PUBLIC_API_URL }}" \
+            --set-env-vars="NEXT_PUBLIC_API_URL=${{ steps.backend_url.outputs.url }}" \
             --set-env-vars="NODE_ENV=production" \
             --set-env-vars="SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
             --allow-unauthenticated \
@@ -699,6 +711,21 @@ jobs:
           echo "✅ Frontend deployed successfully!"
           echo "🌐 Service URL: $SERVICE_URL"
           echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+      - name: Verify frontend → backend connection
+        run: |
+          FRONTEND_URL="${{ steps.get-service-url.outputs.service_url }}"
+          echo "🔍 Verifying frontend → backend connection..."
+          echo "Frontend URL: $FRONTEND_URL"
+          
+          echo "⏳ Waiting 5 seconds for frontend to be ready..."
+          sleep 5
+          
+          if ! curl -f "$FRONTEND_URL/api/rag/status"; then
+            echo "❌ Frontend → backend connection verification failed!"
+            exit 1
+          fi
+          echo "✅ Frontend → backend connection verified"
 
   lint:
     name: Lint (Placeholder)
