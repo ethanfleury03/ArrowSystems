@@ -918,6 +918,7 @@ async def health_check():
 class RAGStatusResponse(BaseModel):
     """RAG status response model."""
     rag_enabled: bool
+    initialized: bool  # Explicit initialized flag (same as rag_enabled, for consistency with debug_status)
     mode: str  # "local_index" | "vector_db" | "disabled"
     details: str
     initializing: Optional[bool] = False
@@ -1007,6 +1008,7 @@ async def rag_status():
     
     return RAGStatusResponse(
         rag_enabled=rag_initialized,
+        initialized=rag_initialized,  # Explicit initialized flag
         mode=mode,
         details=details,
         initializing=rag_initializing,
