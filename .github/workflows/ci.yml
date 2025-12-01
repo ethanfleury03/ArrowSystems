@@ -540,13 +540,18 @@ jobs:
           echo "🔥 Pre-warming backend service to trigger initialization..."
           BACKEND_URL="https://arrow-rag-backend-70705019874.us-central1.run.app"
           
+          echo "🔐 Fetching ID token for Cloud Run backend..."
+          ID_TOKEN="$(gcloud auth print-identity-token --audiences="$BACKEND_URL")"
+          AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
+          
           # Wait a few seconds for the service to be ready
           echo "⏳ Waiting 5 seconds for service to be ready..."
           sleep 5
           
           # Pre-warm health endpoint (triggers container start and basic initialization)
           echo "🏥 Calling /health endpoint..."
-          curl -sS --max-time 30 "$BACKEND_URL/health" || echo "⚠️ Health check failed (may still be starting)"
+          HEALTH_RES=$(curl -sS --max-time 30 -H "$AUTH_HEADER" "$BACKEND_URL/health" || echo "ERROR")
+          echo "Health: $HEALTH_RES"
           
           # Wait a bit more for RAG initialization
           echo "⏳ Waiting 10 seconds for RAG initialization..."
@@ -554,7 +559,7 @@ jobs:
           
           # Pre-warm RAG status endpoint (triggers RAG pipeline initialization)
           echo "🧠 Calling /rag/status endpoint..."
-          RAG_STATUS=$(curl -sS --max-time 60 "$BACKEND_URL/rag/status" || echo "{}")
+          RAG_STATUS=$(curl -sS --max-time 60 -H "$AUTH_HEADER" "$BACKEND_URL/rag/status" || echo "ERROR")
           echo "RAG Status: $RAG_STATUS"
           
           # Wait a bit more for any final initialization
@@ -563,17 +568,18 @@ jobs:
           
           # Run RAG self-test to verify search actually works
           echo "🧪 Running RAG self-test..."
-          SELF_TEST=$(curl -sS --max-time 90 "$BACKEND_URL/rag/self-test" || echo "{}")
+          SELF_TEST=$(curl -sS --max-time 90 -H "$AUTH_HEADER" "$BACKEND_URL/rag/self-test" || echo "ERROR")
           echo "RAG Self-Test: $SELF_TEST"
           
-          # Check if self-test passed (optional - don't fail deploy if it's still initializing)
+          # Optional: you can fail the pipeline if self-test really fails
           if echo "$SELF_TEST" | grep -q '"status":"ok"'; then
             echo "✅ RAG self-test passed! RAG is fully operational."
           else
-            echo "⚠️ RAG self-test did not pass yet (may still be initializing). Check logs for details."
+            echo "⚠️ RAG self-test did not pass. Check backend logs for details."
+            # Optionally: exit 1
           fi
           
-          echo "✅ Pre-warm complete! Service should be ready for queries."
+          echo "✅ Pre-warm complete! (requests were authenticated)"
 
   deploy-frontend:
     name: Deploy Frontend to Cloud Run

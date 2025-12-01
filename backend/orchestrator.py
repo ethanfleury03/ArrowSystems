@@ -3401,11 +3401,27 @@ class RAGOrchestrator:
         logger.info("models_initialized")
     
     def load_index(self, storage_dir="latest_model"):
-        """Load existing index from latest_model/ directory."""
+        """
+        Load existing index from storage directory.
+        
+        Args:
+            storage_dir: Directory containing the index files. Should be an absolute path in production.
+                        Default "latest_model" is for dev/local use only.
+        """
         from backend.utils.test_mode import is_test_mode
         from backend.utils.cloud_run import should_skip_ingestion
+        from pathlib import Path
         
-        logger.info("orchestrator_load_index_starting", storage_dir=storage_dir)
+        # Ensure storage_dir is an absolute path (resolve relative paths)
+        storage_path = Path(storage_dir)
+        if not storage_path.is_absolute():
+            storage_path = storage_path.resolve()
+        storage_dir = str(storage_path)
+        
+        logger.info("orchestrator_load_index_starting", 
+                   storage_dir=storage_dir,
+                   is_absolute=storage_path.is_absolute(),
+                   message=f"Loading index from: {storage_dir}")
         
         # Check if directory exists or if docstore.json exists
         docstore_path = os.path.join(storage_dir, "docstore.json")
@@ -3518,10 +3534,15 @@ class RAGOrchestrator:
                              message=f"Required index files missing before load: {', '.join(missing_files)}")
                 # Don't fail yet - let load_index_from_storage try and give us a better error
             
+            # CRITICAL: Use the absolute path directly - do not add any extra segments
+            # In Cloud Run, if mount is at /app/latest_model, files are at /app/latest_model/docstore.json
+            # Do NOT use persist_dir="latest_model" or any relative path here
             storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
             logger.info("orchestrator_storage_context_created", 
                        storage_dir=storage_dir,
-                       message="Storage context created, attempting to load index")
+                       persist_dir_used=storage_dir,
+                       is_absolute=os.path.isabs(storage_dir),
+                       message=f"Storage context created with persist_dir={storage_dir}, attempting to load index")
             
             # Load index from storage (uses default index_id)
             # If ingestion used a custom index_id, we would need to pass it here:
