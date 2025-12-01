@@ -546,16 +546,6 @@ jobs:
           
           echo "✅ Frontend service account granted permission to invoke backend"
 
-      - name: Activate service account for identity token
-        run: |
-          echo "🔐 Activating service account for identity token generation..."
-          # With WIF, we're already authenticated, but we need to ensure the service account
-          # is set as the active account for identity token generation
-          # Use the service account email from WIF_SERVICE_ACCOUNT secret
-          # Note: With WIF, we can't use --key-file, but we can set the account directly
-          gcloud config set account "${{ secrets.WIF_SERVICE_ACCOUNT }}"
-          echo "✅ Service account set as active account"
-
       - name: Verify backend health
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
@@ -563,10 +553,11 @@ jobs:
           
           # Use IAM identity token (not access token) for Cloud Run authenticated services
           # Identity token is required when service has --no-allow-unauthenticated
-          # Specify the service account explicitly
+          # Use service account impersonation since WIF authenticates as a user, not service account
+          # The WIF service account needs to have "Service Account Token Creator" role to impersonate itself
           ID_TOKEN=$(gcloud auth print-identity-token \
             --audiences="$BACKEND_URL" \
-            --account="${{ secrets.WIF_SERVICE_ACCOUNT }}")
+            --impersonate-service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}")
           
           if ! curl -f -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/health"; then
             echo "❌ Backend health check failed!"
@@ -583,10 +574,10 @@ jobs:
           
           # Get IAM identity token (not access token) for Cloud Run authenticated services
           # Identity token is required when service has --no-allow-unauthenticated
-          # Specify the service account explicitly
+          # Use service account impersonation since WIF authenticates as a user, not service account
           ID_TOKEN=$(gcloud auth print-identity-token \
             --audiences="$BACKEND_URL" \
-            --account="${{ secrets.WIF_SERVICE_ACCOUNT }}")
+            --impersonate-service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}")
           AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
           
           echo "⏳ Waiting 5 seconds..."
