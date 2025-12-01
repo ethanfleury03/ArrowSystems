@@ -522,6 +522,10 @@ async def lifespan(app: FastAPI):
                     logger.info("rag_index_files_present", 
                              storage_path=storage_path,
                              message="All required index files found. RAG will initialize on first use.")
+                    # Enhanced visibility log for startup
+                    logger.info("rag_index_ready",
+                               storage_path=storage_path,
+                               message=f"✅ RAG index found in {Path(storage_path).name}/")
             else:
                 logger.warning("rag_storage_directory_missing", 
                              storage_path=storage_path,
@@ -566,13 +570,21 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, 'rag_enabled'):
         app.state.rag_enabled = False
     
-    # Log final startup status
+    # Log final startup status with enhanced visibility
     logger.info("server_started_lazy_rag", 
                message="Server started with lazy RAG initialization. "
                       "RAG will initialize on first query. Non-RAG endpoints are functional.",
                rag_mode="lazy_init",
                rag_enabled=False,
                storage_path=storage_path)
+    
+    # Enhanced startup visibility log
+    if storage_path and Path(storage_path).exists():
+        logger.info("rag_startup_summary",
+                   message=f"🔧 DuraFlex Technical Assistant\n📥 Models are pre-downloaded...\n✅ RAG index found in {Path(storage_path).name}/",
+                   storage_path=storage_path,
+                   rag_ready=False,
+                   rag_mode="lazy_init")
     
     # Initialize query summarizer
     try:
@@ -945,95 +957,53 @@ class RAGStatusResponse(BaseModel):
     status: Optional[str] = None  # "ready" | "initializing" | "disabled"
 
 
-@app.get("/rag/status", response_model=RAGStatusResponse)
-# Note: /rag/status endpoint is NOT rate limited for status checks
-async def rag_status():
+@app.get("/rag/status", include_in_schema=False)
+async def rag_status_public():
     """
-    Get RAG pipeline status with full state information.
-    
-    This endpoint allows the frontend to check if RAG is available
-    before attempting queries, avoiding unnecessary retries and providing
-    clear feedback to users. Returns detailed state including initialization
-    progress and error information.
-    
-    Returns:
-        - rag_enabled: True if RAG is ready, False otherwise
-        - initializing: True if RAG is currently initializing
-        - storage_dir: Path to RAG index storage directory
-        - index_id: Index ID (if using custom index IDs)
-        - last_error: Last error message (if initialization failed)
-        - status: "ready" | "initializing" | "disabled"
-        - mode: "local_index" (when using local index), "vector_db" (if using external DB), or "disabled"
-        - details: Human-readable status message
+    PUBLIC ENDPOINT — returns RAG initialization + index status.
+    No authentication required.
+    This must remain open because frontend uses Cloud Run IAM identity token.
     """
-    global rag_pipeline
-    
-    # Get storage path from app state
-    storage_dir = getattr(app.state, 'rag_storage_path', None)
-    
-    # Get pipeline status
-    rag_initialized = False
-    rag_initializing = False
-    last_error = None
-    index_id = None
-    
     try:
-        if rag_pipeline:
-            rag_initialized = rag_pipeline.is_initialized()
-            rag_initializing = rag_pipeline.is_initializing()
-            debug_status = rag_pipeline.debug_status()
-            last_error = debug_status.get("last_error")
-            index_id = debug_status.get("index_id")
-            # Use storage_dir from debug_status if available, otherwise from app state
-            if debug_status.get("storage_dir"):
-                storage_dir = debug_status["storage_dir"]
-        else:
-            rag_initialized = False
-            rag_initializing = False
+        global rag_pipeline
+        
+        # Determine initialization state
+        initialized = rag_pipeline.is_initialized() if (rag_pipeline and hasattr(rag_pipeline, "is_initialized")) else False
+        
+        # Attempt to gather details
+        try:
+            if rag_pipeline and hasattr(rag_pipeline, "get_status"):
+                details = rag_pipeline.get_status()
+            elif rag_pipeline and hasattr(rag_pipeline, "debug_status"):
+                debug_status = rag_pipeline.debug_status()
+                if initialized:
+                    details = "RAG pipeline initialized and ready."
+                elif debug_status.get("initializing"):
+                    details = "RAG pipeline is currently initializing. Please wait."
+                elif debug_status.get("last_error"):
+                    details = f"RAG pipeline initialization failed: {debug_status.get('last_error')}"
+                else:
+                    details = "RAG index not loaded. Non-RAG endpoints are functional."
+            else:
+                details = "RAG pipeline does not expose get_status()"
+        except Exception as e:
+            details = f"Error retrieving status: {e}"
+        
+        logger.info("rag_status_public_response",
+                    initialized=initialized,
+                    details=details)
+        
+        return {
+            "rag_enabled": initialized,
+            "details": details,
+        }
+        
     except Exception as e:
-        logger.error("rag_status_check_failed", error=str(e), exc_info=True)
-        rag_initialized = False
-        rag_initializing = False
-    
-    # Determine status and mode
-    if rag_initialized:
-        status = "ready"
-        mode = "local_index"
-        details = "RAG pipeline initialized and ready."
-    elif rag_initializing:
-        status = "initializing"
-        mode = "local_index"
-        details = "RAG pipeline is currently initializing. Please wait."
-    else:
-        status = "disabled"
-        mode = "disabled"
-        if last_error:
-            details = f"RAG pipeline initialization failed: {last_error}"
-        elif storage_dir:
-            details = "RAG index not loaded. Non-RAG endpoints are functional."
-        else:
-            details = "RAG storage path not configured. Non-RAG endpoints are functional."
-    
-    # Return extended status (we'll need to update the response model)
-    # For now, return the basic model but log the full status
-    logger.debug("rag_status_check",
-                rag_enabled=rag_initialized,
-                initializing=rag_initializing,
-                status=status,
-                storage_dir=storage_dir,
-                last_error=last_error)
-    
-    return RAGStatusResponse(
-        rag_enabled=rag_initialized,
-        initialized=rag_initialized,  # Explicit initialized flag
-        mode=mode,
-        details=details,
-        initializing=rag_initializing,
-        storage_dir=str(storage_dir) if storage_dir else None,
-        index_id=index_id,
-        last_error=last_error,
-        status=status
-    )
+        logger.error("rag_status_public_failed", error=str(e))
+        return {
+            "rag_enabled": False,
+            "details": f"status endpoint error: {str(e)}"
+        }
 
 
 class RAGSelfTestResponse(BaseModel):
