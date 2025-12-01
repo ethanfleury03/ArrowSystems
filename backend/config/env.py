@@ -23,10 +23,21 @@ class Settings:
     """
     
     def __init__(self):
-        # Environment detection
+        # Environment detection - ALWAYS prioritize environment variables over .env files
+        # This ensures Cloud Run's ENV=prod always wins, even if .env file exists
         self.ENV = os.getenv("ENV", "dev").lower()
         self.is_dev = self.ENV in {"dev", "development"}
         self.is_prod = self.ENV in {"prod", "production", "cloud"}
+        
+        # Log the effective ENV value for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("env_runtime_value", 
+                   env=self.ENV,
+                   env_var_value=os.getenv("ENV"),
+                   is_prod=self.is_prod,
+                   is_dev=self.is_dev,
+                   message=f"Runtime environment detected: {self.ENV} (is_prod={self.is_prod}, is_dev={self.is_dev})")
         
         # JWT Configuration
         self._load_jwt_secret()
