@@ -529,7 +529,7 @@ jobs:
       - name: Install GCS dependencies
         run: |
           pip install --upgrade pip
-          pip install google-cloud-storage
+          pip install google-cloud-storage google-auth
 
       - name: Check GCS permissions
         run: |
@@ -686,94 +686,86 @@ jobs:
         id: mint_token
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
-          SERVICE_ACCOUNT="${{ secrets.WIF_SERVICE_ACCOUNT }}"
           
           echo "🔐 Generating identity token for $BACKEND_URL..."
-          echo "Service account to impersonate: $SERVICE_ACCOUNT"
-          
-          # Since auth@v2 created a federated credentials file (not direct SA impersonation),
-          # we need to use that file WITH service account impersonation
           
           # Find the credentials file that auth@v2 created
           CREDS_FILE=$(ls gha-creds-*.json 2>/dev/null | head -1)
           
           if [ -z "$CREDS_FILE" ]; then
-            echo "⚠️ No credentials file found - trying direct method..."
-            # Try without impersonation (maybe WIF worked directly)
-            ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL" 2>&1)
-          else
-            echo "Using federated credentials file: $CREDS_FILE"
-            echo "Impersonating service account: $SERVICE_ACCOUNT"
-            
-            # Set the credentials file as the application default
-            export GOOGLE_APPLICATION_CREDENTIALS="$PWD/$CREDS_FILE"
-            
-            # Use the federated credential file with service account impersonation
-            # The --impersonate-service-account flag tells gcloud to use the federated
-            # credential to impersonate the service account
-            echo "Attempting to generate identity token with impersonation..."
-            set +e  # Temporarily disable exit on error to capture the error message
-            ID_TOKEN=$(gcloud auth print-identity-token \
-              --impersonate-service-account="$SERVICE_ACCOUNT" \
-              --audiences="$BACKEND_URL" \
-              --project=${{ secrets.GCP_PROJECT_ID }} 2>&1)
-            EXIT_CODE=$?
-            set -e  # Re-enable exit on error
-            
-            if [ $EXIT_CODE -ne 0 ]; then
-              echo "❌ Failed with impersonation, exit code: $EXIT_CODE"
-              echo "Error output: $ID_TOKEN"
-              echo ""
-              echo "Checking credentials file content..."
-              head -20 "$CREDS_FILE" || echo "Could not read credentials file"
-              echo ""
-              echo "Trying alternative: using gcloud config for impersonation..."
-              
-              # Alternative approach: set impersonation in gcloud config
-              gcloud config set auth/impersonate_service_account "$SERVICE_ACCOUNT" 2>&1 || true
-              
-              # Try again with config-based impersonation
-              set +e
-              ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL" 2>&1)
-              EXIT_CODE=$?
-              set -e
-              
-              if [ $EXIT_CODE -ne 0 ]; then
-                echo "❌ Alternative method also failed, exit code: $EXIT_CODE"
-                echo "Error output: $ID_TOKEN"
-                echo ""
-                echo "Current gcloud auth state:"
-                gcloud auth list
-                echo ""
-                echo "Checking if federated credential can access the service account..."
-                gcloud iam service-accounts describe "$SERVICE_ACCOUNT" --project=${{ secrets.GCP_PROJECT_ID }} 2>&1 || echo "Cannot access service account"
-                exit 1
-              fi
-            fi
-          fi
-          
-          # Validate the token
-          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ] || [[ "$ID_TOKEN" == *"ERROR"* ]]; then
-            echo "❌ Failed to generate identity token"
-            echo "Output: $ID_TOKEN"
-            echo ""
+            echo "❌ No credentials file found from auth@v2"
             echo "Current gcloud auth state:"
             gcloud auth list
             exit 1
           fi
           
-          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+          echo "Using federated credentials file: $CREDS_FILE"
+          echo ""
+          echo "The credentials file contains an external_account with service account impersonation."
+          echo "Using Python's google-auth library to generate identity token..."
+          
+          # Export variables for Python script
+          export CREDS_FILE
+          export BACKEND_URL
+          
+          # Use Python's google-auth library to generate identity token
+          # This properly handles external_account credentials with service account impersonation
+          ID_TOKEN=$(python3 << 'PYTHON_SCRIPT'
+          import json
+          import os
+          import sys
+          from google.auth.transport import requests as auth_requests
+          from google.oauth2 import id_token as google_id_token
+          from google.auth import external_account
+          
+          try:
+              backend_url = os.environ.get('BACKEND_URL')
+              creds_file = os.environ.get('CREDS_FILE')
+              
+              if not backend_url or not creds_file:
+                  print("ERROR: BACKEND_URL or CREDS_FILE not set", file=sys.stderr)
+                  sys.exit(1)
+              
+              # Load external account credentials
+              with open(creds_file, 'r') as f:
+                  creds_info = json.load(f)
+              
+              # Create credentials from the file
+              credentials = external_account.Credentials.from_info(creds_info)
+              
+              # Create a request object
+              request = auth_requests.Request()
+              
+              # Generate identity token using the credentials
+              # The credentials file already has service_account_impersonation_url configured
+              # so it will automatically use impersonation
+              token = google_id_token.fetch_id_token(request, backend_url)
+              
+              print(token)
+          except Exception as e:
+              print(f"ERROR: {str(e)}", file=sys.stderr)
+              import traceback
+              traceback.print_exc(file=sys.stderr)
+              sys.exit(1)
+          PYTHON_SCRIPT
+          )
+          
+          # Validate the token
+          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ] || [[ "$ID_TOKEN" == *"ERROR"* ]]; then
             echo "❌ Failed to generate identity token"
-            echo ""
-            echo "Debug: Current gcloud auth state:"
-            gcloud auth list
-            echo ""
-            echo "Debug: Backend URL: $BACKEND_URL"
+            echo "Output: $ID_TOKEN"
+            exit 1
+          fi
+          
+          # Verify it looks like a JWT token (starts with eyJ)
+          if [[ ! "$ID_TOKEN" =~ ^eyJ ]]; then
+            echo "❌ Generated token doesn't look like a valid JWT"
+            echo "Token preview: ${ID_TOKEN:0:50}..."
             exit 1
           fi
           
           echo "ID_TOKEN=$ID_TOKEN" >> $GITHUB_ENV
-          echo "✅ Identity token generated successfully"
+          echo "✅ Identity token generated successfully (length: ${#ID_TOKEN} chars)"
 
       - name: Verify backend health
         run: |
