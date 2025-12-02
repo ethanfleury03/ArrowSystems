@@ -529,7 +529,7 @@ jobs:
       - name: Install GCS dependencies
         run: |
           pip install --upgrade pip
-          pip install google-cloud-storage google-auth
+          pip install google-cloud-storage google-auth requests
 
       - name: Check GCS permissions
         run: |
@@ -708,33 +708,75 @@ jobs:
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/$CREDS_FILE"
           export BACKEND_URL
           
-          # Use Python's google-auth library with Application Default Credentials
-          # Setting GOOGLE_APPLICATION_CREDENTIALS makes default() use our credentials file
+          # Use Python to call IAM Credentials API directly
+          # This works with external_account credentials that have service account impersonation
           ID_TOKEN=$(python3 << 'PYTHON_SCRIPT'
+          import json
           import os
           import sys
+          import requests
           from google.auth.transport import requests as auth_requests
-          from google.oauth2 import id_token as google_id_token
-          from google.auth import default
+          from google.auth import load_credentials_from_file
           
           try:
               backend_url = os.environ.get('BACKEND_URL')
+              creds_file = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
               
-              if not backend_url:
-                  print("ERROR: BACKEND_URL not set", file=sys.stderr)
+              if not backend_url or not creds_file:
+                  print("ERROR: BACKEND_URL or GOOGLE_APPLICATION_CREDENTIALS not set", file=sys.stderr)
                   sys.exit(1)
               
-              # Use default() which will pick up GOOGLE_APPLICATION_CREDENTIALS
-              # This properly handles external_account credentials with service account impersonation
-              credentials, project = default()
+              # Load credentials from file
+              credentials, project = load_credentials_from_file(creds_file)
               
-              # Create a request object
-              request = auth_requests.Request()
+              # Refresh to get access token
+              request_obj = auth_requests.Request()
+              credentials.refresh(request_obj)
               
-              # fetch_id_token() will use the credentials from default()
-              # If the credentials have service_account_impersonation_url configured,
-              # it will automatically use impersonation
-              token = google_id_token.fetch_id_token(request, backend_url)
+              # Get the service account email from the credentials file
+              with open(creds_file, 'r') as f:
+                  creds_info = json.load(f)
+              
+              impersonation_url = creds_info.get('service_account_impersonation_url', '')
+              if '/serviceAccounts/' in impersonation_url:
+                  # Extract service account email from URL like:
+                  # https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/SA_EMAIL:generateAccessToken
+                  sa_email = impersonation_url.split('/serviceAccounts/')[-1].split(':')[0]
+              else:
+                  print("ERROR: Could not find service account in impersonation URL", file=sys.stderr)
+                  sys.exit(1)
+              
+              # Use IAM Credentials API to generate identity token
+              # https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateIdToken
+              access_token = credentials.token
+              project_number = project or '-'  # Use '-' for project-agnostic endpoint
+              
+              api_url = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}:generateIdToken"
+              
+              headers = {
+                  'Authorization': f'Bearer {access_token}',
+                  'Content-Type': 'application/json'
+              }
+              
+              payload = {
+                  'audience': backend_url,
+                  'includeEmail': True
+              }
+              
+              response = requests.post(api_url, headers=headers, json=payload)
+              
+              if response.status_code != 200:
+                  print(f"ERROR: IAM API returned status {response.status_code}", file=sys.stderr)
+                  print(f"Response: {response.text}", file=sys.stderr)
+                  sys.exit(1)
+              
+              result = response.json()
+              token = result.get('token')
+              
+              if not token:
+                  print("ERROR: No token in API response", file=sys.stderr)
+                  print(f"Response: {result}", file=sys.stderr)
+                  sys.exit(1)
               
               print(token)
           except Exception as e:
