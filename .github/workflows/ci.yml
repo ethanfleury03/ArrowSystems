@@ -209,19 +209,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: FULL reset - wipe credential overrides
+      - name: Clear credential override env vars (safe version)
         run: |
-          echo "🧹 FULL RESET: Wiping $GITHUB_ENV to clear all polluted credential overrides..."
-          echo "" > $GITHUB_ENV
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          echo "After reset:"
-          cat $GITHUB_ENV
-          echo "✅ Credential overrides FULLY cleared"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -312,19 +304,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: FULL reset - wipe credential overrides
+      - name: Clear credential override env vars (safe version)
         run: |
-          echo "🧹 FULL RESET: Wiping $GITHUB_ENV to clear all polluted credential overrides..."
-          echo "" > $GITHUB_ENV
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          echo "After reset:"
-          cat $GITHUB_ENV
-          echo "✅ Credential overrides FULLY cleared"
 
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
@@ -401,19 +385,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: FULL reset - wipe credential overrides
+      - name: Clear credential override env vars (safe version)
         run: |
-          echo "🧹 FULL RESET: Wiping $GITHUB_ENV to clear all polluted credential overrides..."
-          echo "" > $GITHUB_ENV
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          echo "After reset:"
-          cat $GITHUB_ENV
-          echo "✅ Credential overrides FULLY cleared"
 
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
@@ -754,19 +730,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: FULL reset - wipe credential overrides
+      - name: Clear credential override env vars (safe version)
         run: |
-          echo "🧹 FULL RESET: Wiping $GITHUB_ENV to clear all polluted credential overrides..."
-          echo "" > $GITHUB_ENV
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          echo "After reset:"
-          cat $GITHUB_ENV
-          echo "✅ Credential overrides FULLY cleared"
 
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
