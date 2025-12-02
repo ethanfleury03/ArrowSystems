@@ -424,6 +424,11 @@ jobs:
         run: |
           echo "WIF provider: ${{ secrets.WIF_PROVIDER }}"
 
+      - name: Debug service account secret
+        run: |
+          echo "Service account secret value:"
+          echo ">${{ secrets.WIF_SERVICE_ACCOUNT }}<"
+
       - name: Debug WIF configuration
         run: |
           echo "DEBUG: WIF provider = ${{ secrets.WIF_PROVIDER }}"
