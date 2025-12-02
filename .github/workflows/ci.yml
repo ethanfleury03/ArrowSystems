@@ -304,15 +304,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Clear credential override env vars (safe version)
-        run: |
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
-
-      - name: Clear old gcloud auth
-        run: rm -rf ~/.config/gcloud
-
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
