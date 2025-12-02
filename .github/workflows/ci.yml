@@ -386,6 +386,9 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          # CRITICAL: service_account MUST be present to enable service account impersonation
+          # Without this, WIF uses a temporary GitHub credential and impersonation will fail
+          # Expected: cloudrun-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           create_credentials_file: true
@@ -398,6 +401,18 @@ jobs:
           echo ""
           echo "🔍 Checking active account details..."
           gcloud config get-value account || echo "No account set via config"
+          echo ""
+          echo "🔍 Verifying service account impersonation..."
+          EXPECTED_SA="${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          if [ -n "$EXPECTED_SA" ]; then
+            echo "Expected service account: $EXPECTED_SA"
+            # Verify the service account is accessible
+            gcloud iam service-accounts describe "$EXPECTED_SA" --project=${{ secrets.GCP_PROJECT_ID }} 2>/dev/null && \
+              echo "✅ Service account exists and is accessible" || \
+              echo "⚠️  Warning: Could not verify service account existence"
+          else
+            echo "⚠️  WARNING: WIF_SERVICE_ACCOUNT secret is not set!"
+          fi
           echo ""
           echo "✅ Authentication verification complete"
 
