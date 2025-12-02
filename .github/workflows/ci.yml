@@ -937,6 +937,27 @@ jobs:
           STATUS=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/status" || echo "ERROR")
           echo "RAG Status: $STATUS"
           
+          echo ""
+          echo "🔍 Validating index files (diagnostic)..."
+          VALIDATION=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/validate-index" || echo "ERROR")
+          echo "Index Validation: $VALIDATION" | jq '.' || echo "$VALIDATION"
+          
+          # Check if files are corrupted
+          CORRUPTED_FILES=$(echo "$VALIDATION" | jq -r '.corrupted_files[]?' 2>/dev/null || echo "")
+          if [ -n "$CORRUPTED_FILES" ]; then
+            echo ""
+            echo "❌ CORRUPTED INDEX FILES DETECTED:"
+            echo "$CORRUPTED_FILES" | while read -r file; do
+              echo "  - $file"
+            done
+            echo ""
+            echo "⚠️  Files are corrupted or missing. Check the validation output above for details."
+            echo "    To fix: Re-upload a valid index from your local machine using:"
+            echo "    python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag"
+            echo ""
+          fi
+          
+          echo ""
           echo "🧪 Running self-test..."
           SELF=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/self-test" || echo "ERROR")
           echo "Self test: $SELF"
