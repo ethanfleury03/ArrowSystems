@@ -454,6 +454,23 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
         id: auth
 
+      - name: Nuclear cleanup after WIF
+        run: |
+          echo "🧨 Clearing credential overrides after auth@v2..."
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
+          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
+          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
+          
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
+          unset GOOGLE_APPLICATION_CREDENTIALS || true
+          unset GOOGLE_GHA_CREDS_PATH || true
+          
+          gcloud config unset auth/credential_file_override || true
+          
+          echo "After cleanup:"
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE'"
+          echo "GOOGLE_APPLICATION_CREDENTIALS='$GOOGLE_APPLICATION_CREDENTIALS'"
+
       - name: Debug active gcloud account after WIF
         run: |
           echo "=== Active account after WIF ==="
@@ -470,8 +487,13 @@ jobs:
           echo "=== gcloud auth list ==="
           gcloud auth list
           echo ""
-          echo "=== gcloud token info ==="
-          gcloud auth print-access-token | gcloud auth token-info -
+          echo "=== gcloud account info ==="
+          gcloud auth print-access-token | gcloud info --format='value(config.account)'
+          echo ""
+          echo "=== Full token introspection ==="
+          gcloud auth print-access-token > token.txt
+          curl -s -H "Authorization: Bearer $(cat token.txt)" \
+            https://oauth2.googleapis.com/tokeninfo || echo "Token introspection failed"
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -647,6 +669,12 @@ jobs:
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           
           echo "🔐 Generating identity token for $BACKEND_URL..."
+          
+          # Nuclear cleanup right before token minting
+          gcloud config unset auth/credential_file_override || true
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
+          unset GOOGLE_APPLICATION_CREDENTIALS || true
+          unset GOOGLE_GHA_CREDS_PATH || true
           
           # Auth step already impersonates ${{ secrets.WIF_SERVICE_ACCOUNT }}
           # So we just mint an ID token for the active account
