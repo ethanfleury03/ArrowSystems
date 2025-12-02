@@ -559,6 +559,13 @@ jobs:
             exit 0  # Don't fail the build
           }
 
+      - name: Debug service account formatting
+        run: |
+          echo "Raw SA:"
+          printf "<%s>\n" "${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          echo "Length:"
+          printf "%s" "${{ secrets.WIF_SERVICE_ACCOUNT }}" | wc -c
+
       - name: Deploy backend to Cloud Run
         run: |
           gcloud run deploy arrow-rag-backend \
