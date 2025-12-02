@@ -454,6 +454,25 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
         id: auth
 
+      - name: Debug active gcloud account after WIF
+        run: |
+          echo "=== Active account after WIF ==="
+          gcloud auth list
+          echo ""
+          echo "=== WIF Provider ==="
+          echo "${{ secrets.WIF_PROVIDER }}"
+          echo ""
+          echo "=== SA we attempted to impersonate ==="
+          echo "${{ secrets.WIF_SERVICE_ACCOUNT }}"
+
+      - name: Verify WIF really activated
+        run: |
+          echo "=== gcloud auth list ==="
+          gcloud auth list
+          echo ""
+          echo "=== gcloud token info ==="
+          gcloud auth print-access-token | gcloud auth token-info -
+
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
