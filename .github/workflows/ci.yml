@@ -709,14 +709,14 @@ jobs:
           export BACKEND_URL
           
           # Use Python to call IAM Credentials API directly
-          # This works with external_account credentials that have service account impersonation
+          # Get federated token from GitHub OIDC, then use it to call IAM API
           ID_TOKEN=$(python3 << 'PYTHON_SCRIPT'
           import json
           import os
           import sys
           import requests
           from google.auth.transport import requests as auth_requests
-          from google.auth import load_credentials_from_file
+          from google.auth import external_account
           
           try:
               backend_url = os.environ.get('BACKEND_URL')
@@ -726,31 +726,64 @@ jobs:
                   print("ERROR: BACKEND_URL or GOOGLE_APPLICATION_CREDENTIALS not set", file=sys.stderr)
                   sys.exit(1)
               
-              # Load credentials from file
-              credentials, project = load_credentials_from_file(creds_file)
-              
-              # Refresh to get access token
-              request_obj = auth_requests.Request()
-              credentials.refresh(request_obj)
-              
-              # Get the service account email from the credentials file
+              # Load credentials file as JSON
               with open(creds_file, 'r') as f:
                   creds_info = json.load(f)
               
+              # Get service account email from impersonation URL
               impersonation_url = creds_info.get('service_account_impersonation_url', '')
               if '/serviceAccounts/' in impersonation_url:
-                  # Extract service account email from URL like:
-                  # https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/SA_EMAIL:generateAccessToken
                   sa_email = impersonation_url.split('/serviceAccounts/')[-1].split(':')[0]
               else:
                   print("ERROR: Could not find service account in impersonation URL", file=sys.stderr)
                   sys.exit(1)
               
-              # Use IAM Credentials API to generate identity token
-              # https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateIdToken
-              access_token = credentials.token
-              project_number = project or '-'  # Use '-' for project-agnostic endpoint
+              # Get the credential source to fetch OIDC token
+              credential_source = creds_info.get('credential_source', {})
+              oidc_url = credential_source.get('url', '')
+              oidc_headers = credential_source.get('headers', {})
               
+              if not oidc_url:
+                  print("ERROR: Could not find OIDC URL in credential_source", file=sys.stderr)
+                  sys.exit(1)
+              
+              # Fetch OIDC token from GitHub Actions
+              oidc_response = requests.get(oidc_url, headers=oidc_headers)
+              if oidc_response.status_code != 200:
+                  print(f"ERROR: Failed to get OIDC token: {oidc_response.status_code}", file=sys.stderr)
+                  sys.exit(1)
+              
+              oidc_data = oidc_response.json()
+              subject_token = oidc_data.get('value', '')  # GitHub returns {'value': 'token'}
+              
+              if not subject_token:
+                  print("ERROR: No token in OIDC response", file=sys.stderr)
+                  sys.exit(1)
+              
+              # Exchange OIDC token for GCP access token via STS
+              sts_url = creds_info.get('token_url', 'https://sts.googleapis.com/v1/token')
+              sts_payload = {
+                  'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+                  'subject_token': subject_token,
+                  'subject_token_type': creds_info.get('subject_token_type', 'urn:ietf:params:oauth:token-type:jwt'),
+                  'audience': creds_info.get('audience', ''),
+                  'scope': 'https://www.googleapis.com/auth/cloud-platform'
+              }
+              
+              sts_response = requests.post(sts_url, data=sts_payload)
+              if sts_response.status_code != 200:
+                  print(f"ERROR: STS token exchange failed: {sts_response.status_code}", file=sys.stderr)
+                  print(f"Response: {sts_response.text}", file=sys.stderr)
+                  sys.exit(1)
+              
+              sts_data = sts_response.json()
+              access_token = sts_data.get('access_token', '')
+              
+              if not access_token:
+                  print("ERROR: No access token in STS response", file=sys.stderr)
+                  sys.exit(1)
+              
+              # Now use access token to call IAM API for identity token
               api_url = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}:generateIdToken"
               
               headers = {
