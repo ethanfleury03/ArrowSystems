@@ -1223,6 +1223,135 @@ async def rag_debug_files():
     )
 
 
+class RAGIndexValidationResponse(BaseModel):
+    """Response model for index file validation."""
+    storage_path: Optional[str] = None
+    directory_exists: bool
+    files_validated: dict[str, dict[str, Any]]
+    all_valid: bool
+    corrupted_files: list[str]
+
+
+@app.get("/rag/validate-index", response_model=RAGIndexValidationResponse)
+# Note: /rag/validate-index endpoint is NOT rate limited for debugging
+async def rag_validate_index():
+    """
+    Enhanced diagnostic endpoint that validates each index JSON file.
+    
+    This endpoint checks:
+    - Whether each required JSON file exists
+    - File sizes (to detect empty files)
+    - Whether each JSON file can be parsed (to detect corruption)
+    - Which specific file(s) are corrupted (if any)
+    
+    This helps diagnose JSONDecodeError issues during RAG initialization.
+    
+    Returns:
+        - storage_path: The storage path being checked
+        - directory_exists: Whether the directory exists
+        - files_validated: Detailed validation results for each file
+        - all_valid: Whether all files are valid
+        - corrupted_files: List of corrupted file names
+    """
+    import json
+    
+    storage_path = getattr(app.state, "rag_storage_path", None)
+    required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
+    
+    if storage_path is None:
+        return RAGIndexValidationResponse(
+            storage_path=None,
+            directory_exists=False,
+            files_validated={},
+            all_valid=False,
+            corrupted_files=required_files,
+        )
+    
+    path = Path(storage_path)
+    directory_exists = path.exists() and path.is_dir()
+    
+    if not directory_exists:
+        return RAGIndexValidationResponse(
+            storage_path=str(path),
+            directory_exists=False,
+            files_validated={},
+            all_valid=False,
+            corrupted_files=required_files,
+        )
+    
+    files_validated = {}
+    corrupted_files = []
+    
+    # Validate each required file
+    for filename in required_files:
+        file_path = path / filename
+        file_info = {
+            "exists": file_path.exists(),
+            "size_bytes": None,
+            "is_empty": None,
+            "json_valid": None,
+            "json_error": None,
+        }
+        
+        if file_path.exists():
+            try:
+                # Get file size
+                size = file_path.stat().st_size
+                file_info["size_bytes"] = size
+                file_info["is_empty"] = size == 0
+                
+                # Try to parse JSON
+                if size > 0:
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            json.load(f)
+                        file_info["json_valid"] = True
+                    except json.JSONDecodeError as e:
+                        file_info["json_valid"] = False
+                        file_info["json_error"] = f"JSONDecodeError: {str(e)}"
+                        corrupted_files.append(filename)
+                    except Exception as e:
+                        file_info["json_valid"] = False
+                        file_info["json_error"] = f"{type(e).__name__}: {str(e)}"
+                        corrupted_files.append(filename)
+                else:
+                    file_info["json_valid"] = False
+                    file_info["json_error"] = "File is empty (0 bytes)"
+                    corrupted_files.append(filename)
+            except Exception as e:
+                file_info["json_error"] = f"Failed to read file: {type(e).__name__}: {str(e)}"
+                corrupted_files.append(filename)
+        else:
+            file_info["json_valid"] = False
+            file_info["json_error"] = "File does not exist"
+            corrupted_files.append(filename)
+        
+        files_validated[filename] = file_info
+    
+    # Check all valid
+    all_valid = len(corrupted_files) == 0
+    
+    # Log results
+    if not all_valid:
+        logger.error("rag_index_validation_failed",
+                    storage_path=str(path),
+                    corrupted_files=corrupted_files,
+                    files_validated=files_validated,
+                    message=f"Index validation failed. Corrupted files: {', '.join(corrupted_files)}")
+    else:
+        logger.info("rag_index_validation_passed",
+                   storage_path=str(path),
+                   message="All index files validated successfully")
+    
+    return RAGIndexValidationResponse(
+        storage_path=str(path),
+        directory_exists=True,
+        files_validated=files_validated,
+        all_valid=all_valid,
+        corrupted_files=corrupted_files,
+    )
+
+
 @app.get("/rag/warmup")
 # Note: /rag/warmup endpoint is NOT rate limited for Cloud Scheduler warm-up pings
 async def rag_warmup(request: Request):

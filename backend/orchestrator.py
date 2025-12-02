@@ -3581,6 +3581,47 @@ class RAGOrchestrator:
             error_type = type(load_error).__name__
             error_message = str(load_error)
             
+            # Special handling for JSONDecodeError - likely means a corrupted index file
+            if error_type == "JSONDecodeError" or "JSONDecodeError" in error_message:
+                logger.error("orchestrator_index_load_failed_json_error", 
+                            storage_dir=storage_dir,
+                            error=error_message,
+                            error_type=error_type,
+                            exc_info=True,
+                            message=f"JSONDecodeError while loading index from {storage_dir}. "
+                                   f"This usually means one of the index JSON files is empty or corrupted. "
+                                   f"Check /rag/validate-index endpoint to identify which file is corrupted. "
+                                   f"Error: {error_message}")
+                
+                # Try to identify which file might be corrupted by checking file sizes
+                try:
+                    if os.path.exists(storage_dir):
+                        required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
+                        file_sizes = {}
+                        for req_file in required_files:
+                            file_path = os.path.join(storage_dir, req_file)
+                            if os.path.exists(file_path):
+                                size = os.path.getsize(file_path)
+                                file_sizes[req_file] = size
+                                if size == 0:
+                                    logger.error("orchestrator_index_file_empty",
+                                               file=req_file,
+                                               size=0,
+                                               message=f"⚠️ Found empty file: {req_file} (0 bytes) - this is likely the corrupted file")
+                            else:
+                                file_sizes[req_file] = "missing"
+                                logger.error("orchestrator_index_file_missing",
+                                           file=req_file,
+                                           message=f"⚠️ Missing required file: {req_file}")
+                        
+                        logger.error("orchestrator_index_file_sizes",
+                                   file_sizes=file_sizes,
+                                   message="Index file sizes for debugging (0 bytes = empty/corrupted file)")
+                except Exception as size_check_error:
+                    logger.warning("orchestrator_index_file_size_check_failed",
+                                 error=str(size_check_error),
+                                 message="Could not check individual file sizes")
+            
             logger.error("orchestrator_index_load_failed", 
                         storage_dir=storage_dir,
                         error=error_message,
