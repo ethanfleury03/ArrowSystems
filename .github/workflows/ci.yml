@@ -385,104 +385,43 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Clear credential override env vars (safe version)
+      - name: Debug WIF_PROVIDER format
         run: |
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
+          echo "Checking WIF_PROVIDER format (must be on one line, no newlines):"
+          echo ">${{ secrets.WIF_PROVIDER }}<"
 
-      - name: Clear old gcloud auth
-        run: rm -rf ~/.config/gcloud
-
-      - name: Debug WIF provider
+      - name: Debug WIF_SERVICE_ACCOUNT format
         run: |
-          echo "WIF provider: ${{ secrets.WIF_PROVIDER }}"
-
-      - name: Debug service account secret
-        run: |
-          echo "Service account secret value:"
-          echo ">${{ secrets.WIF_SERVICE_ACCOUNT }}<"
-
-      - name: Debug WIF configuration
-        run: |
-          echo "DEBUG: WIF provider = ${{ secrets.WIF_PROVIDER }}"
-          echo "DEBUG: WIF service account = ${{ secrets.WIF_SERVICE_ACCOUNT }}"
-          if [ -z "${{ secrets.WIF_PROVIDER }}" ]; then
-            echo "⚠️  WARNING: WIF_PROVIDER secret is empty!"
-          fi
-          if [ -z "${{ secrets.WIF_SERVICE_ACCOUNT }}" ]; then
-            echo "⚠️  WARNING: WIF_SERVICE_ACCOUNT secret is empty!"
-          fi
+          echo "Checking WIF_SERVICE_ACCOUNT format (must be on one line, no newlines):"
+          printf "<%s>\n" "${{ secrets.WIF_SERVICE_ACCOUNT }}"
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          # CRITICAL: service_account MUST be present to enable service account impersonation
-          # Without this, WIF uses a temporary GitHub credential and impersonation will fail
-          # Expected: cloudrun-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
-          # CRITICAL: DO NOT use create_credentials_file: true - it breaks service account impersonation
-          # When create_credentials_file is true, gcloud is forced to use WIF federated credentials
-          # which cannot mint identity tokens. Removing it enables proper service account impersonation.
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           project_id: ${{ secrets.GCP_PROJECT_ID }}
         id: auth
 
-      - name: Nuclear cleanup after WIF
+      - name: DEBUG — Show OIDC variables
         run: |
-          echo "🧨 Clearing credential overrides after auth@v2..."
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
-          
-          
-          echo "After cleanup:"
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE'"
-          echo "GOOGLE_APPLICATION_CREDENTIALS='$GOOGLE_APPLICATION_CREDENTIALS'"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=${ACTIONS_ID_TOKEN_REQUEST_URL}"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"
+          echo "WIF_PROVIDER=${{ secrets.WIF_PROVIDER }}"
+          echo "WIF_SERVICE_ACCOUNT=${{ secrets.WIF_SERVICE_ACCOUNT }}"
 
-      - name: Debug active gcloud account after WIF
-        run: |
-          echo "=== Active account after WIF ==="
-          gcloud auth list
-          echo ""
-          echo "=== WIF Provider ==="
-          echo "${{ secrets.WIF_PROVIDER }}"
-          echo ""
-          echo "=== SA we attempted to impersonate ==="
-          echo "${{ secrets.WIF_SERVICE_ACCOUNT }}"
-
-      - name: Verify WIF really activated
+      - name: DEBUG — check active identity RIGHT NOW
         run: |
           echo "=== gcloud auth list ==="
           gcloud auth list
           echo ""
-          echo "=== gcloud account info ==="
-          gcloud auth print-access-token | gcloud info --format='value(config.account)'
-          echo ""
-          echo "=== Full token introspection ==="
-          gcloud auth print-access-token > token.txt
-          curl -s -H "Authorization: Bearer $(cat token.txt)" \
-            https://oauth2.googleapis.com/tokeninfo || echo "Token introspection failed"
+          echo "=== token-info (access token) ==="
+          gcloud auth print-access-token | gcloud auth list
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           install_components: "beta"
-
-      - name: Force clear credential overrides after setup-gcloud
-        run: |
-          echo "🧹 Force clearing credential overrides (setup-gcloud may have set them)..."
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
-          echo "✅ Credential overrides force-cleared"
 
       - name: Debug gcloud identity
         run: |
@@ -641,11 +580,6 @@ jobs:
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           
           echo "🔐 Generating identity token for $BACKEND_URL..."
-          
-          # Nuclear cleanup right before token minting
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
           
           # Auth step already impersonates ${{ secrets.WIF_SERVICE_ACCOUNT }}
           # So we just mint an ID token for the active account
