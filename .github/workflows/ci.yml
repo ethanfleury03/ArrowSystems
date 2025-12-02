@@ -371,6 +371,17 @@ jobs:
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
+      - name: Debug WIF configuration
+        run: |
+          echo "DEBUG: WIF provider = ${{ secrets.WIF_PROVIDER }}"
+          echo "DEBUG: WIF service account = ${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          if [ -z "${{ secrets.WIF_PROVIDER }}" ]; then
+            echo "⚠️  WARNING: WIF_PROVIDER secret is empty!"
+          fi
+          if [ -z "${{ secrets.WIF_SERVICE_ACCOUNT }}" ]; then
+            echo "⚠️  WARNING: WIF_SERVICE_ACCOUNT secret is empty!"
+          fi
+
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
@@ -379,6 +390,16 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           create_credentials_file: true
         id: auth
+
+      - name: Verify gcloud authentication
+        run: |
+          echo "🔍 Verifying active gcloud account..."
+          gcloud auth list
+          echo ""
+          echo "🔍 Checking active account details..."
+          gcloud config get-value account || echo "No account set via config"
+          echo ""
+          echo "✅ Authentication verification complete"
 
       - name: Export WIF credentials for Docker + gcloud
         run: |
@@ -550,17 +571,26 @@ jobs:
         id: mint_token
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
-          echo "🔐 Generating identity token for $BACKEND_URL..."
+          SERVICE_ACCOUNT="${{ secrets.WIF_SERVICE_ACCOUNT }}"
           
-          # Use gcloud auth print-identity-token with the Cloud Run service URL as audience
-          # This works with WIF because gcloud uses the active credentials (WIF service account)
-          # to generate the identity token. The audience must be the full Cloud Run HTTPS URL.
-          ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
+          echo "🔐 Generating identity token for $BACKEND_URL..."
+          echo "🔐 Using service account: $SERVICE_ACCOUNT"
+          
+          # Use gcloud auth print-identity-token with explicit service account impersonation
+          # The --impersonate-service-account flag ensures we use the WIF service account
+          # The audience must be the full Cloud Run HTTPS URL
+          ID_TOKEN=$(gcloud auth print-identity-token \
+            --impersonate-service-account="$SERVICE_ACCOUNT" \
+            --audiences="$BACKEND_URL")
           
           if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
             echo "❌ Failed to generate identity token"
-            echo "Debug: Verifying gcloud authentication..."
+            echo ""
+            echo "Debug: Current gcloud auth state:"
             gcloud auth list
+            echo ""
+            echo "Debug: Service account: $SERVICE_ACCOUNT"
+            echo "Debug: Backend URL: $BACKEND_URL"
             exit 1
           fi
           
@@ -587,9 +617,12 @@ jobs:
           
           # Use the identity token from the mint_token step (already in GITHUB_ENV)
           # If not available, generate a new one using gcloud auth print-identity-token
+          SERVICE_ACCOUNT="${{ secrets.WIF_SERVICE_ACCOUNT }}"
           if [ -z "$ID_TOKEN" ]; then
             echo "🔐 Generating identity token for pre-warm..."
-            ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
+            ID_TOKEN=$(gcloud auth print-identity-token \
+              --impersonate-service-account="$SERVICE_ACCOUNT" \
+              --audiences="$BACKEND_URL")
           fi
           
           AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
