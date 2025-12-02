@@ -412,6 +412,25 @@ jobs:
           echo "Checking WIF_SERVICE_ACCOUNT format (must be on one line, no newlines):"
           printf "<%s>\n" "${{ secrets.WIF_SERVICE_ACCOUNT }}"
 
+      - name: Setup gcloud FIRST (required for auth@v2)
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "beta"
+
+      - name: Clear credential overrides after setup-gcloud
+        run: |
+          echo "🧹 Clearing credential overrides after setup-gcloud..."
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
+          unset GOOGLE_APPLICATION_CREDENTIALS || true
+          unset GOOGLE_GHA_CREDS_PATH || true
+          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
+          export GOOGLE_APPLICATION_CREDENTIALS=""
+          export GOOGLE_GHA_CREDS_PATH=""
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
+          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
+          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
+          gcloud config unset auth/credential_file_override 2>/dev/null || true
+
       - name: DEBUG — Show OIDC variables BEFORE auth
         run: |
           echo "=== OIDC variables (must be present for WIF) ==="
@@ -429,32 +448,38 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           project_id: ${{ secrets.GCP_PROJECT_ID }}
-        id: auth
 
-      - name: CRITICAL - Remove credentials file created by auth@v2
+      - name: Verify auth@v2 didn't create credentials file
         run: |
-          echo "🧹 CRITICAL: Removing credentials file that auth@v2 may have created..."
-          # Remove any credentials file that auth@v2 created
-          rm -f gha-creds-*.json 2>/dev/null || true
-          # Clear credential override variables that auth@v2 set
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
-          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
-          export GOOGLE_APPLICATION_CREDENTIALS=""
-          export GOOGLE_GHA_CREDS_PATH=""
-          # Clear from GITHUB_ENV
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          # Clear gcloud config override
-          gcloud config unset auth/credential_file_override 2>/dev/null || true
-          echo "✅ Credentials file removed and overrides cleared"
+          echo "=== Checking for credentials files created by auth@v2 ==="
+          if ls gha-creds-*.json 2>/dev/null; then
+            echo "⚠️ WARNING: auth@v2 created a credentials file (WIF may not have activated)"
+            ls -la gha-creds-*.json
+            echo ""
+            echo "Removing it to force WIF usage..."
+            rm -f gha-creds-*.json
+          else
+            echo "✅ No credentials file found (good - WIF should be active)"
+          fi
+          
           echo ""
-          echo "After cleanup:"
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
-          # Force gcloud to use application default credentials (WIF)
-          gcloud auth application-default login --no-launch-browser --quiet 2>/dev/null || echo "Note: Application default login not needed"
+          echo "=== Checking credential override env vars ==="
+          if [ -n "${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}" ]; then
+            echo "⚠️ WARNING: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE is set: ${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}"
+            echo "Clearing it..."
+            unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE
+            export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
+            echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
+          fi
+          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS}" ]; then
+            echo "⚠️ WARNING: GOOGLE_APPLICATION_CREDENTIALS is set: ${GOOGLE_APPLICATION_CREDENTIALS}"
+            unset GOOGLE_APPLICATION_CREDENTIALS
+            export GOOGLE_APPLICATION_CREDENTIALS=""
+            echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
+          fi
+          echo ""
+          echo "=== Clearing gcloud config override ==="
+          gcloud config unset auth/credential_file_override 2>/dev/null || true
 
       - name: Debug active gcloud account after WIF
         run: |
@@ -487,34 +512,7 @@ jobs:
           echo "WIF_PROVIDER=${{ secrets.WIF_PROVIDER }}"
           echo "WIF_SERVICE_ACCOUNT=${{ secrets.WIF_SERVICE_ACCOUNT }}"
 
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          install_components: "beta"
-
-      - name: Clear credential overrides after setup-gcloud (CRITICAL)
-        run: |
-          echo "🧹 CRITICAL: Clearing credential overrides after setup-gcloud..."
-          echo "Before clearing:"
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
-          echo "GOOGLE_APPLICATION_CREDENTIALS='${GOOGLE_APPLICATION_CREDENTIALS}'"
-          echo "GOOGLE_GHA_CREDS_PATH='${GOOGLE_GHA_CREDS_PATH}'"
-          # Unset and export empty
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
-          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
-          export GOOGLE_APPLICATION_CREDENTIALS=""
-          export GOOGLE_GHA_CREDS_PATH=""
-          # Write to GITHUB_ENV to keep them empty
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
-          echo "After clearing:"
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
-          echo "✅ Credential overrides cleared after setup-gcloud"
-
-      - name: Debug gcloud identity
+      - name: Debug gcloud identity (after auth cleanup)
         run: |
           echo "=== gcloud auth list ==="
           gcloud auth list
