@@ -713,6 +713,7 @@ jobs:
           ID_TOKEN=$(python3 << 'PYTHON_SCRIPT'
           import json
           import os
+          import re
           import sys
           import requests
           
@@ -746,24 +747,45 @@ jobs:
                   sys.exit(1)
               
               print("Step 4: Getting OIDC token from GitHub...", file=sys.stderr)
-              # Get OIDC token from GitHub Actions
+              # Get the audience from credentials file (this is the WIF provider audience)
+              wif_audience = creds_info.get('audience', '')
+              if not wif_audience:
+                  print("ERROR: Could not find audience in credentials file", file=sys.stderr)
+                  sys.exit(1)
+              
+              print(f"WIF audience: {wif_audience[:50]}...", file=sys.stderr)
+              
+              # Get OIDC token from GitHub Actions with the correct audience
               # Use environment variables if available, otherwise extract from credentials file
               if oidc_request_url and oidc_request_token:
+                  # Request OIDC token with the WIF audience as a parameter
                   oidc_headers = {'Authorization': f'Bearer {oidc_request_token}', 'Accept': 'application/json'}
-                  oidc_url = oidc_request_url
-                  print("Using ACTIONS_ID_TOKEN_REQUEST_URL", file=sys.stderr)
+                  # Add audience parameter to the URL
+                  if '?' in oidc_request_url:
+                      oidc_url = f"{oidc_request_url}&audience={wif_audience}"
+                  else:
+                      oidc_url = f"{oidc_request_url}?audience={wif_audience}"
+                  print("Using ACTIONS_ID_TOKEN_REQUEST_URL with WIF audience", file=sys.stderr)
               else:
                   credential_source = creds_info.get('credential_source', {})
-                  oidc_url = credential_source.get('url', '')
+                  # Extract the base URL and update the audience parameter
+                  base_url = credential_source.get('url', '')
+                  if 'audience=' in base_url:
+                      # Replace existing audience parameter
+                      oidc_url = re.sub(r'audience=[^&]*', f'audience={wif_audience}', base_url)
+                  else:
+                      # Add audience parameter
+                      separator = '&' if '?' in base_url else '?'
+                      oidc_url = f"{base_url}{separator}audience={wif_audience}"
                   oidc_headers = credential_source.get('headers', {})
-                  print("Using OIDC URL from credentials file", file=sys.stderr)
+                  print("Using OIDC URL from credentials file with updated audience", file=sys.stderr)
               
               if not oidc_url:
-                  print("ERROR: Could not find OIDC URL", file=sys.stderr)
+                  print("ERROR: Could not construct OIDC URL", file=sys.stderr)
                   sys.exit(1)
               
               # Fetch OIDC token from GitHub Actions
-              print(f"Requesting OIDC token from: {oidc_url[:50]}...", file=sys.stderr)
+              print(f"Requesting OIDC token from: {oidc_url[:80]}...", file=sys.stderr)
               oidc_response = requests.get(oidc_url, headers=oidc_headers, timeout=REQUEST_TIMEOUT)
               if oidc_response.status_code != 200:
                   print(f"ERROR: Failed to get OIDC token: {oidc_response.status_code}", file=sys.stderr)
