@@ -376,6 +376,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Clear credential overrides BEFORE auth (critical)
+        run: |
+          echo "🧹 CRITICAL: Clearing credential override env vars and files before auth@v2..."
+          echo "Before clearing:"
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
+          echo "GOOGLE_APPLICATION_CREDENTIALS='${GOOGLE_APPLICATION_CREDENTIALS}'"
+          echo "GOOGLE_GHA_CREDS_PATH='${GOOGLE_GHA_CREDS_PATH}'"
+          # Remove any credential files that might exist
+          rm -f gha-creds-*.json 2>/dev/null || true
+          rm -f ~/.config/gcloud/application_default_credentials.json 2>/dev/null || true
+          # Unset and export empty to clear them
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
+          unset GOOGLE_APPLICATION_CREDENTIALS || true
+          unset GOOGLE_GHA_CREDS_PATH || true
+          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
+          export GOOGLE_APPLICATION_CREDENTIALS=""
+          export GOOGLE_GHA_CREDS_PATH=""
+          # Write to GITHUB_ENV to ensure they stay empty
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
+          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
+          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
+          echo "After clearing:"
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
+          echo "GOOGLE_APPLICATION_CREDENTIALS='${GOOGLE_APPLICATION_CREDENTIALS}'"
+          echo "✅ Credential overrides and files cleared"
+
       - name: Debug WIF_PROVIDER format
         run: |
           echo "Checking WIF_PROVIDER format (must be on one line, no newlines):"
@@ -385,6 +411,17 @@ jobs:
         run: |
           echo "Checking WIF_SERVICE_ACCOUNT format (must be on one line, no newlines):"
           printf "<%s>\n" "${{ secrets.WIF_SERVICE_ACCOUNT }}"
+
+      - name: DEBUG — Show OIDC variables BEFORE auth
+        run: |
+          echo "=== OIDC variables (must be present for WIF) ==="
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL='${ACTIONS_ID_TOKEN_REQUEST_URL}'"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN='${ACTIONS_ID_TOKEN_REQUEST_TOKEN}'"
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" ]; then
+            echo "⚠️ WARNING: OIDC variables are missing! WIF will fail!"
+          else
+            echo "✅ OIDC variables present"
+          fi
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -581,12 +618,49 @@ jobs:
           
           echo "✅ Frontend service account granted permission to invoke backend"
 
+      - name: Debug gcloud auth state before token generation
+        run: |
+          echo "=== Current environment variables ==="
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
+          echo "GOOGLE_APPLICATION_CREDENTIALS='${GOOGLE_APPLICATION_CREDENTIALS}'"
+          echo "GOOGLE_GHA_CREDS_PATH='${GOOGLE_GHA_CREDS_PATH}'"
+          echo ""
+          echo "=== gcloud auth list ==="
+          gcloud auth list
+          echo ""
+          echo "=== gcloud config credential_file_override ==="
+          gcloud config get-value auth/credential_file_override || echo "(unset)"
+
+      - name: Force clear credential overrides before token generation
+        run: |
+          echo "🧹 Forcefully clearing credential override env vars..."
+          # Unset in current shell and export empty
+          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
+          export GOOGLE_APPLICATION_CREDENTIALS=""
+          export GOOGLE_GHA_CREDS_PATH=""
+          # Write to GITHUB_ENV to override for subsequent steps
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
+          echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
+          echo "GOOGLE_GHA_CREDS_PATH=" >> $GITHUB_ENV
+          # Verify they're actually empty
+          echo "After clearing - verifying:"
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
+          echo "GOOGLE_APPLICATION_CREDENTIALS='${GOOGLE_APPLICATION_CREDENTIALS}'"
+          if [ -n "${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}" ]; then
+            echo "⚠️ WARNING: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE is still set!"
+          fi
+
       - name: Generate Cloud Run Identity Token (WIF → ID token)
         id: mint_token
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           
           echo "🔐 Generating identity token for $BACKEND_URL..."
+          
+          # Ensure credential overrides are not set (double-check)
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
+          unset GOOGLE_APPLICATION_CREDENTIALS || true
+          unset GOOGLE_GHA_CREDS_PATH || true
           
           # Auth step already impersonates ${{ secrets.WIF_SERVICE_ACCOUNT }}
           # So we just mint an ID token for the active account
