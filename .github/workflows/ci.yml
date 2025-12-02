@@ -420,6 +420,10 @@ jobs:
       - name: Clear old gcloud auth
         run: rm -rf ~/.config/gcloud
 
+      - name: Debug WIF provider
+        run: |
+          echo "WIF provider: ${{ secrets.WIF_PROVIDER }}"
+
       - name: Debug WIF configuration
         run: |
           echo "DEBUG: WIF provider = ${{ secrets.WIF_PROVIDER }}"
