@@ -11,9 +11,11 @@ help:
 upload-index:
 	@echo "[UPLOAD] Uploading RAG index to GCS..."
 	@echo "         Using gsutil for reliable large file uploads..."
-	gsutil -m cp -r latest_model/* gs://arrow-rag-support-prod-rag/latest_model/
+	@echo "         Uploading to bucket ROOT: gs://arrow-rag-support-prod-rag/"
+	@echo "         Files will appear at /app/latest_model/ when bucket root mounts to /app/latest_model/"
+	gsutil -m cp -r latest_model/* gs://arrow-rag-support-prod-rag/
 	@echo "[SUCCESS] Index uploaded successfully!"
-	@echo "         Verify with: gsutil ls gs://arrow-rag-support-prod-rag/latest_model/"
+	@echo "         Verify with: gsutil ls gs://arrow-rag-support-prod-rag/"
 
 check-index:
 	@echo "🔍 Checking local RAG index..."

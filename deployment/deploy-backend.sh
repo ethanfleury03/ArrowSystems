@@ -20,6 +20,8 @@ echo ""
 echo "=========================================="
 echo "Step 2: Add RAG index volume mount"
 echo "=========================================="
+echo "Mounting bucket root to /app/latest_model/"
+echo "Files at gs://arrow-rag-support-prod-rag/ (bucket root) will appear at /app/latest_model/"
 gcloud run services update $SERVICE \
   --add-volume=name=rag-index-volume,type=gcs,bucket=arrow-rag-support-prod-rag \
   --add-volume-mount=volume=rag-index-volume,mount-path=/app/latest_model \

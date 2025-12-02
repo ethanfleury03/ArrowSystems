@@ -65,8 +65,8 @@ def resolve_storage_path() -> Optional[Path]:
                         prod_path=str(prod_path),
                         message="Production storage path does not exist! "
                                "Check Cloud Run volume mount configuration. "
-                               "Expected: Volume source=arrow-rag-support-prod-rag/latest_model/, "
-                               "Mount path=/app/latest_model")
+                               "Expected: Bucket=arrow-rag-support-prod-rag mounted to /app/, "
+                               "Files at gs://bucket/latest_model/ should appear at /app/latest_model/")
         elif not is_dir:
             logger.error("rag_storage_path_prod_not_directory",
                         prod_path=str(prod_path),
