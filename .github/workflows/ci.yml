@@ -715,6 +715,7 @@ jobs:
           import os
           import re
           import sys
+          import urllib.parse
           import requests
           
           # Set timeouts for all requests
@@ -749,36 +750,46 @@ jobs:
               print("Step 4: Getting OIDC token from GitHub...", file=sys.stderr)
               # Get the audience from credentials file (this is the WIF provider audience)
               wif_audience = creds_info.get('audience', '')
-              if not wif_audience:
-                  print("ERROR: Could not find audience in credentials file", file=sys.stderr)
-                  sys.exit(1)
+              credential_source = creds_info.get('credential_source', {})
+              credential_source_url = credential_source.get('url', '')
               
-              print(f"WIF audience: {wif_audience[:50]}...", file=sys.stderr)
+              # Check if credential_source URL already has an audience parameter
+              # If so, extract it to see what format it uses
+              if 'audience=' in credential_source_url:
+                  # Extract existing audience from URL
+                  match = re.search(r'audience=([^&]*)', credential_source_url)
+                  if match:
+                      existing_audience = urllib.parse.unquote(match.group(1))
+                      print(f"Found existing audience in credential_source URL: {existing_audience[:50]}...", file=sys.stderr)
+                      # Use the existing audience format from the URL (it's already URL-encoded in the URL)
+                      use_audience = existing_audience
+                  else:
+                      use_audience = wif_audience
+              else:
+                  use_audience = wif_audience
+              
+              print(f"Using audience: {use_audience[:50]}...", file=sys.stderr)
               
               # Get OIDC token from GitHub Actions with the correct audience
-              # Use environment variables if available, otherwise extract from credentials file
-              if oidc_request_url and oidc_request_token:
+              # Prefer using credential_source URL since it has the correct format
+              if credential_source_url and credential_source_url.startswith('http'):
+                  # Use the credential_source URL directly - it already has the correct audience
+                  oidc_url = credential_source_url
+                  oidc_headers = credential_source.get('headers', {})
+                  print("Using credential_source URL directly (has correct audience format)", file=sys.stderr)
+              elif oidc_request_url and oidc_request_token:
                   # Request OIDC token with the WIF audience as a parameter
                   oidc_headers = {'Authorization': f'Bearer {oidc_request_token}', 'Accept': 'application/json'}
-                  # Add audience parameter to the URL
+                  # URL-encode the audience and add it as a parameter
+                  encoded_audience = urllib.parse.quote(use_audience, safe='')
                   if '?' in oidc_request_url:
-                      oidc_url = f"{oidc_request_url}&audience={wif_audience}"
+                      oidc_url = f"{oidc_request_url}&audience={encoded_audience}"
                   else:
-                      oidc_url = f"{oidc_request_url}?audience={wif_audience}"
+                      oidc_url = f"{oidc_request_url}?audience={encoded_audience}"
                   print("Using ACTIONS_ID_TOKEN_REQUEST_URL with WIF audience", file=sys.stderr)
               else:
-                  credential_source = creds_info.get('credential_source', {})
-                  # Extract the base URL and update the audience parameter
-                  base_url = credential_source.get('url', '')
-                  if 'audience=' in base_url:
-                      # Replace existing audience parameter
-                      oidc_url = re.sub(r'audience=[^&]*', f'audience={wif_audience}', base_url)
-                  else:
-                      # Add audience parameter
-                      separator = '&' if '?' in base_url else '?'
-                      oidc_url = f"{base_url}{separator}audience={wif_audience}"
-                  oidc_headers = credential_source.get('headers', {})
-                  print("Using OIDC URL from credentials file with updated audience", file=sys.stderr)
+                  print("ERROR: Could not find OIDC URL", file=sys.stderr)
+                  sys.exit(1)
               
               if not oidc_url:
                   print("ERROR: Could not construct OIDC URL", file=sys.stderr)
