@@ -716,7 +716,11 @@ jobs:
           import sys
           import requests
           
+          # Set timeouts for all requests
+          REQUEST_TIMEOUT = 30
+          
           try:
+              print("Step 1: Loading configuration...", file=sys.stderr)
               backend_url = os.environ.get('BACKEND_URL')
               creds_file = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
               oidc_request_url = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL', '')
@@ -726,34 +730,41 @@ jobs:
                   print("ERROR: BACKEND_URL or GOOGLE_APPLICATION_CREDENTIALS not set", file=sys.stderr)
                   sys.exit(1)
               
+              print(f"Step 2: Loading credentials file: {creds_file}", file=sys.stderr)
               # Load credentials file as JSON
               with open(creds_file, 'r') as f:
                   creds_info = json.load(f)
               
+              print("Step 3: Extracting service account email...", file=sys.stderr)
               # Get service account email from impersonation URL
               impersonation_url = creds_info.get('service_account_impersonation_url', '')
               if '/serviceAccounts/' in impersonation_url:
                   sa_email = impersonation_url.split('/serviceAccounts/')[-1].split(':')[0]
+                  print(f"Service account: {sa_email}", file=sys.stderr)
               else:
                   print("ERROR: Could not find service account in impersonation URL", file=sys.stderr)
                   sys.exit(1)
               
+              print("Step 4: Getting OIDC token from GitHub...", file=sys.stderr)
               # Get OIDC token from GitHub Actions
               # Use environment variables if available, otherwise extract from credentials file
               if oidc_request_url and oidc_request_token:
                   oidc_headers = {'Authorization': f'Bearer {oidc_request_token}', 'Accept': 'application/json'}
                   oidc_url = oidc_request_url
+                  print("Using ACTIONS_ID_TOKEN_REQUEST_URL", file=sys.stderr)
               else:
                   credential_source = creds_info.get('credential_source', {})
                   oidc_url = credential_source.get('url', '')
                   oidc_headers = credential_source.get('headers', {})
+                  print("Using OIDC URL from credentials file", file=sys.stderr)
               
               if not oidc_url:
                   print("ERROR: Could not find OIDC URL", file=sys.stderr)
                   sys.exit(1)
               
               # Fetch OIDC token from GitHub Actions
-              oidc_response = requests.get(oidc_url, headers=oidc_headers)
+              print(f"Requesting OIDC token from: {oidc_url[:50]}...", file=sys.stderr)
+              oidc_response = requests.get(oidc_url, headers=oidc_headers, timeout=REQUEST_TIMEOUT)
               if oidc_response.status_code != 200:
                   print(f"ERROR: Failed to get OIDC token: {oidc_response.status_code}", file=sys.stderr)
                   print(f"Response: {oidc_response.text}", file=sys.stderr)
@@ -766,6 +777,7 @@ jobs:
                   print("ERROR: No token in OIDC response", file=sys.stderr)
                   sys.exit(1)
               
+              print("Step 5: Exchanging OIDC token for GCP access token...", file=sys.stderr)
               # Exchange OIDC token for GCP access token via STS
               sts_url = creds_info.get('token_url', 'https://sts.googleapis.com/v1/token')
               sts_payload = {
@@ -777,7 +789,7 @@ jobs:
                   'scope': 'https://www.googleapis.com/auth/cloud-platform'
               }
               
-              sts_response = requests.post(sts_url, data=sts_payload)
+              sts_response = requests.post(sts_url, data=sts_payload, timeout=REQUEST_TIMEOUT)
               if sts_response.status_code != 200:
                   print(f"ERROR: STS token exchange failed: {sts_response.status_code}", file=sys.stderr)
                   print(f"Response: {sts_response.text}", file=sys.stderr)
@@ -791,6 +803,7 @@ jobs:
                   print(f"Response: {sts_data}", file=sys.stderr)
                   sys.exit(1)
               
+              print("Step 6: Generating identity token via IAM API...", file=sys.stderr)
               # Now use access token to call IAM API for identity token
               api_url = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}:generateIdToken"
               
@@ -804,7 +817,7 @@ jobs:
                   'includeEmail': True
               }
               
-              response = requests.post(api_url, headers=headers, json=payload)
+              response = requests.post(api_url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
               
               if response.status_code != 200:
                   print(f"ERROR: IAM API returned status {response.status_code}", file=sys.stderr)
@@ -819,7 +832,11 @@ jobs:
                   print(f"Response: {result}", file=sys.stderr)
                   sys.exit(1)
               
+              print("Step 7: Success! Identity token generated.", file=sys.stderr)
               print(token)
+          except requests.exceptions.Timeout:
+              print("ERROR: Request timed out", file=sys.stderr)
+              sys.exit(1)
           except Exception as e:
               print(f"ERROR: {str(e)}", file=sys.stderr)
               import traceback
