@@ -552,21 +552,15 @@ jobs:
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           echo "🔐 Generating identity token for $BACKEND_URL..."
           
-          # Get the WIF federated access token
-          ACCESS_TOKEN=$(gcloud auth print-access-token)
-          
-          # Exchange it for a Cloud Run identity token using OAuth token exchange
-          ID_TOKEN=$(curl -s \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
-            -d "subject_token=$ACCESS_TOKEN" \
-            -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
-            -d "audience=$BACKEND_URL" \
-            -d "requested_token_type=urn:ietf:params:oauth:token-type:id_token" \
-            "https://oauth2.googleapis.com/token" | jq -r '.id_token')
+          # Use gcloud auth print-identity-token with the Cloud Run service URL as audience
+          # This works with WIF because gcloud uses the active credentials (WIF service account)
+          # to generate the identity token. The audience must be the full Cloud Run HTTPS URL.
+          ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
           
           if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
             echo "❌ Failed to generate identity token"
+            echo "Debug: Verifying gcloud authentication..."
+            gcloud auth list
             exit 1
           fi
           
@@ -592,18 +586,10 @@ jobs:
           echo "🔥 Pre-warming backend service..."
           
           # Use the identity token from the mint_token step (already in GITHUB_ENV)
-          # If not available, generate a new one using OAuth token exchange
+          # If not available, generate a new one using gcloud auth print-identity-token
           if [ -z "$ID_TOKEN" ]; then
             echo "🔐 Generating identity token for pre-warm..."
-            ACCESS_TOKEN=$(gcloud auth print-access-token)
-            ID_TOKEN=$(curl -s \
-              -H "Content-Type: application/x-www-form-urlencoded" \
-              -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
-              -d "subject_token=$ACCESS_TOKEN" \
-              -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
-              -d "audience=$BACKEND_URL" \
-              -d "requested_token_type=urn:ietf:params:oauth:token-type:id_token" \
-              "https://oauth2.googleapis.com/token" | jq -r '.id_token')
+            ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
           fi
           
           AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
