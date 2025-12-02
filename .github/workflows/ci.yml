@@ -389,51 +389,36 @@ jobs:
           # CRITICAL: service_account MUST be present to enable service account impersonation
           # Without this, WIF uses a temporary GitHub credential and impersonation will fail
           # Expected: cloudrun-deployer@arrow-rag-support-prod.iam.gserviceaccount.com
+          # CRITICAL: DO NOT use create_credentials_file: true - it breaks service account impersonation
+          # When create_credentials_file is true, gcloud is forced to use WIF federated credentials
+          # which cannot mint identity tokens. Removing it enables proper service account impersonation.
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           project_id: ${{ secrets.GCP_PROJECT_ID }}
-          create_credentials_file: true
         id: auth
-
-      - name: Verify gcloud authentication
-        run: |
-          echo "🔍 Verifying active gcloud account..."
-          gcloud auth list
-          echo ""
-          echo "🔍 Checking active account details..."
-          gcloud config get-value account || echo "No account set via config"
-          echo ""
-          echo "🔍 Verifying service account impersonation..."
-          EXPECTED_SA="${{ secrets.WIF_SERVICE_ACCOUNT }}"
-          if [ -n "$EXPECTED_SA" ]; then
-            echo "Expected service account: $EXPECTED_SA"
-            # Verify the service account is accessible
-            gcloud iam service-accounts describe "$EXPECTED_SA" --project=${{ secrets.GCP_PROJECT_ID }} 2>/dev/null && \
-              echo "✅ Service account exists and is accessible" || \
-              echo "⚠️  Warning: Could not verify service account existence"
-          else
-            echo "⚠️  WARNING: WIF_SERVICE_ACCOUNT secret is not set!"
-          fi
-          echo ""
-          echo "✅ Authentication verification complete"
-
-      - name: Export WIF credentials for Docker + gcloud
-        run: |
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
-          echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
-          echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
-
-      - name: Debug env vars
-        run: |
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
-          if [ -n "$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" ]; then
-            ls -la $(dirname $CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE) || echo "Credentials file directory not found"
-          fi
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           install_components: "beta"
+
+      - name: Debug gcloud identity
+        run: |
+          echo "=== gcloud auth list ==="
+          gcloud auth list
+          echo ""
+          echo "=== override file ==="
+          gcloud config get-value auth/credential_file_override || echo "(unset)"
+          echo ""
+          echo "=== Active account verification ==="
+          ACTIVE_ACCOUNT=$(gcloud auth list --filter=status:ACTIVE --format="value(account)")
+          echo "Active account: $ACTIVE_ACCOUNT"
+          EXPECTED_SA="${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          if [ "$ACTIVE_ACCOUNT" = "$EXPECTED_SA" ]; then
+            echo "✅ Active account matches expected service account"
+          else
+            echo "⚠️  Warning: Active account does not match expected service account"
+            echo "Expected: $EXPECTED_SA"
+          fi
 
       - name: Inject project ID
         run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
@@ -441,22 +426,11 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
 
-      - name: Disable gcloud docker credential helper
-        run: |
-          echo "Disabling gcloud's docker credential helper (overriding gcloud auth configure-docker)..."
-          mkdir -p ~/.docker
-          echo '{}' > ~/.docker/config.json
-          cat ~/.docker/config.json
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
-
       - name: Authenticate Docker with Artifact Registry
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
-          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
-          echo "Authenticating Docker with Artifact Registry using WIF credentials..."
-          echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
-          # Use gcloud to get access token with the new WIF account
+          echo "Authenticating Docker with Artifact Registry using service account impersonation..."
+          # gcloud auth print-access-token now uses the impersonated service account
+          # No credential file override needed - service account impersonation is active
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
@@ -717,22 +691,11 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker us-central1-docker.pkg.dev
 
-      - name: Disable gcloud docker credential helper
-        run: |
-          echo "Disabling gcloud's docker credential helper (overriding gcloud auth configure-docker)..."
-          mkdir -p ~/.docker
-          echo '{}' > ~/.docker/config.json
-          cat ~/.docker/config.json
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
-
       - name: Authenticate Docker with Artifact Registry
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
-          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
-          echo "Authenticating Docker with Artifact Registry using WIF credentials..."
-          echo "Using credentials file: ${{ steps.auth.outputs.credentials_file_path }}"
-          # Use gcloud to get access token with the new WIF account
+          echo "Authenticating Docker with Artifact Registry using service account impersonation..."
+          # gcloud auth print-access-token now uses the impersonated service account
+          # No credential file override needed - service account impersonation is active
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
