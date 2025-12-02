@@ -449,37 +449,24 @@ jobs:
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      - name: Verify auth@v2 didn't create credentials file
+      - name: Verify auth@v2 authentication method
         run: |
-          echo "=== Checking for credentials files created by auth@v2 ==="
+          echo "=== Checking authentication method used by auth@v2 ==="
           if ls gha-creds-*.json 2>/dev/null; then
-            echo "⚠️ WARNING: auth@v2 created a credentials file (WIF may not have activated)"
+            echo "⚠️ NOTE: auth@v2 created a credentials file (federated credentials)"
+            echo "This means it's using federated credentials, not direct service account impersonation"
             ls -la gha-creds-*.json
             echo ""
-            echo "Removing it to force WIF usage..."
-            rm -f gha-creds-*.json
+            echo "We'll use this file with service account impersonation for identity tokens"
           else
-            echo "✅ No credentials file found (good - WIF should be active)"
+            echo "✅ No credentials file found - WIF may have activated directly"
           fi
           
           echo ""
-          echo "=== Checking credential override env vars ==="
-          if [ -n "${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}" ]; then
-            echo "⚠️ WARNING: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE is set: ${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}"
-            echo "Clearing it..."
-            unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE
-            export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
-            echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> $GITHUB_ENV
-          fi
-          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS}" ]; then
-            echo "⚠️ WARNING: GOOGLE_APPLICATION_CREDENTIALS is set: ${GOOGLE_APPLICATION_CREDENTIALS}"
-            unset GOOGLE_APPLICATION_CREDENTIALS
-            export GOOGLE_APPLICATION_CREDENTIALS=""
-            echo "GOOGLE_APPLICATION_CREDENTIALS=" >> $GITHUB_ENV
-          fi
-          echo ""
-          echo "=== Clearing gcloud config override ==="
-          gcloud config unset auth/credential_file_override 2>/dev/null || true
+          echo "=== Credential override env vars (for reference) ==="
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE}'"
+          echo "GOOGLE_APPLICATION_CREDENTIALS='${GOOGLE_APPLICATION_CREDENTIALS}'"
+          echo "GOOGLE_GHA_CREDS_PATH='${GOOGLE_GHA_CREDS_PATH}'"
 
       - name: Debug active gcloud account after WIF
         run: |
@@ -699,33 +686,61 @@ jobs:
         id: mint_token
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
+          SERVICE_ACCOUNT="${{ secrets.WIF_SERVICE_ACCOUNT }}"
           
           echo "🔐 Generating identity token for $BACKEND_URL..."
+          echo "Service account to impersonate: $SERVICE_ACCOUNT"
           
-          # CRITICAL: Remove credentials file and clear all overrides
-          rm -f gha-creds-*.json 2>/dev/null || true
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
-          unset GOOGLE_APPLICATION_CREDENTIALS || true
-          unset GOOGLE_GHA_CREDS_PATH || true
-          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=""
-          export GOOGLE_APPLICATION_CREDENTIALS=""
-          export GOOGLE_GHA_CREDS_PATH=""
-          # Clear gcloud config override
-          gcloud config unset auth/credential_file_override 2>/dev/null || true
+          # Since auth@v2 created a federated credentials file (not direct SA impersonation),
+          # we need to use that file WITH service account impersonation
           
-          # Verify we have the service account active
-          echo "Current gcloud auth state:"
-          gcloud auth list
-          echo ""
-          echo "Current account:"
-          gcloud config get-value account || echo "(no account set)"
-          echo ""
-          echo "Credential file override:"
-          gcloud config get-value auth/credential_file_override || echo "(unset)"
+          # Find the credentials file that auth@v2 created
+          CREDS_FILE=$(ls gha-creds-*.json 2>/dev/null | head -1)
           
-          # Auth step already impersonates ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          # So we just mint an ID token for the active account
-          ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
+          if [ -z "$CREDS_FILE" ]; then
+            echo "⚠️ No credentials file found - trying direct method..."
+            # Try without impersonation (maybe WIF worked directly)
+            ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL" 2>&1)
+          else
+            echo "Using federated credentials file: $CREDS_FILE"
+            echo "Impersonating service account: $SERVICE_ACCOUNT"
+            
+            # Use the federated credential file with service account impersonation
+            # The --impersonate-service-account flag tells gcloud to use the federated
+            # credential to impersonate the service account
+            ID_TOKEN=$(gcloud auth print-identity-token \
+              --impersonate-service-account="$SERVICE_ACCOUNT" \
+              --audiences="$BACKEND_URL" \
+              --project=${{ secrets.GCP_PROJECT_ID }} 2>&1)
+            
+            if [ $? -ne 0 ]; then
+              echo "❌ Failed with impersonation, error: $ID_TOKEN"
+              echo ""
+              echo "Trying alternative: activate service account with impersonation..."
+              
+              # Alternative approach: activate the service account using impersonation
+              export GOOGLE_APPLICATION_CREDENTIALS="$PWD/$CREDS_FILE"
+              gcloud config set auth/impersonate_service_account "$SERVICE_ACCOUNT" 2>&1 || true
+              
+              # Try again
+              ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL" 2>&1)
+              
+              if [ $? -ne 0 ]; then
+                echo "❌ Alternative method also failed: $ID_TOKEN"
+                exit 1
+              fi
+            fi
+          fi
+          
+          # Validate the token
+          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ] || [[ "$ID_TOKEN" == *"ERROR"* ]]; then
+            echo "❌ Failed to generate identity token"
+            echo "Output: $ID_TOKEN"
+            echo ""
+            echo "Current gcloud auth state:"
+            gcloud auth list
+            exit 1
+          fi
           
           if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
             echo "❌ Failed to generate identity token"
