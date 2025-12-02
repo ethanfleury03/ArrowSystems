@@ -709,18 +709,18 @@ jobs:
           export BACKEND_URL
           
           # Use Python to call IAM Credentials API directly
-          # Get federated token from GitHub OIDC, then use it to call IAM API
+          # Get OIDC token from GitHub, exchange for access token, then generate identity token
           ID_TOKEN=$(python3 << 'PYTHON_SCRIPT'
           import json
           import os
           import sys
           import requests
-          from google.auth.transport import requests as auth_requests
-          from google.auth import external_account
           
           try:
               backend_url = os.environ.get('BACKEND_URL')
               creds_file = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+              oidc_request_url = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL', '')
+              oidc_request_token = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN', '')
               
               if not backend_url or not creds_file:
                   print("ERROR: BACKEND_URL or GOOGLE_APPLICATION_CREDENTIALS not set", file=sys.stderr)
@@ -738,19 +738,25 @@ jobs:
                   print("ERROR: Could not find service account in impersonation URL", file=sys.stderr)
                   sys.exit(1)
               
-              # Get the credential source to fetch OIDC token
-              credential_source = creds_info.get('credential_source', {})
-              oidc_url = credential_source.get('url', '')
-              oidc_headers = credential_source.get('headers', {})
+              # Get OIDC token from GitHub Actions
+              # Use environment variables if available, otherwise extract from credentials file
+              if oidc_request_url and oidc_request_token:
+                  oidc_headers = {'Authorization': f'Bearer {oidc_request_token}', 'Accept': 'application/json'}
+                  oidc_url = oidc_request_url
+              else:
+                  credential_source = creds_info.get('credential_source', {})
+                  oidc_url = credential_source.get('url', '')
+                  oidc_headers = credential_source.get('headers', {})
               
               if not oidc_url:
-                  print("ERROR: Could not find OIDC URL in credential_source", file=sys.stderr)
+                  print("ERROR: Could not find OIDC URL", file=sys.stderr)
                   sys.exit(1)
               
               # Fetch OIDC token from GitHub Actions
               oidc_response = requests.get(oidc_url, headers=oidc_headers)
               if oidc_response.status_code != 200:
                   print(f"ERROR: Failed to get OIDC token: {oidc_response.status_code}", file=sys.stderr)
+                  print(f"Response: {oidc_response.text}", file=sys.stderr)
                   sys.exit(1)
               
               oidc_data = oidc_response.json()
@@ -767,6 +773,7 @@ jobs:
                   'subject_token': subject_token,
                   'subject_token_type': creds_info.get('subject_token_type', 'urn:ietf:params:oauth:token-type:jwt'),
                   'audience': creds_info.get('audience', ''),
+                  'requested_token_type': 'urn:ietf:params:oauth:token-type:access_token',
                   'scope': 'https://www.googleapis.com/auth/cloud-platform'
               }
               
@@ -781,6 +788,7 @@ jobs:
               
               if not access_token:
                   print("ERROR: No access token in STS response", file=sys.stderr)
+                  print(f"Response: {sts_data}", file=sys.stderr)
                   sys.exit(1)
               
               # Now use access token to call IAM API for identity token
