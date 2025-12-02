@@ -704,11 +704,11 @@ jobs:
           echo "The credentials file contains an external_account with service account impersonation."
           echo "Using Python's google-auth library to generate identity token..."
           
-          # Export variables for Python script
-          export CREDS_FILE
+          # Set credentials file as application default credentials
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/$CREDS_FILE"
           export BACKEND_URL
           
-          # Use Python's google-auth library to generate identity token
+          # Use Python's google-auth library with Application Default Credentials
           # This properly handles external_account credentials with service account impersonation
           ID_TOKEN=$(python3 << 'PYTHON_SCRIPT'
           import json
@@ -716,22 +716,18 @@ jobs:
           import sys
           from google.auth.transport import requests as auth_requests
           from google.oauth2 import id_token as google_id_token
-          from google.auth import external_account
+          from google.auth import default, load_credentials_from_file
           
           try:
               backend_url = os.environ.get('BACKEND_URL')
-              creds_file = os.environ.get('CREDS_FILE')
+              creds_file = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
               
               if not backend_url or not creds_file:
-                  print("ERROR: BACKEND_URL or CREDS_FILE not set", file=sys.stderr)
+                  print("ERROR: BACKEND_URL or GOOGLE_APPLICATION_CREDENTIALS not set", file=sys.stderr)
                   sys.exit(1)
               
-              # Load external account credentials
-              with open(creds_file, 'r') as f:
-                  creds_info = json.load(f)
-              
-              # Create credentials from the file
-              credentials = external_account.Credentials.from_info(creds_info)
+              # Load credentials using the file - this handles all credential types automatically
+              credentials, project = load_credentials_from_file(creds_file)
               
               # Create a request object
               request = auth_requests.Request()
