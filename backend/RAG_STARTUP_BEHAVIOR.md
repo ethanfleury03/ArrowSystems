@@ -317,14 +317,18 @@ RAG will remain disabled until:
    - `index_store.json`
    - `graph_store.json` (optional)
    - `image__vector_store.json` (optional)
-2. **Index is uploaded to GCS**: 
+2. **Index is uploaded to GCS bucket root**: 
    ```bash
-   gsutil -m rsync -r latest_model/ gs://arrow-rag-support-prod-rag/latest_model/
+   gsutil -m rsync -r latest_model/ gs://arrow-rag-support-prod-rag/
+   ```
+   Or use the upload script:
+   ```bash
+   python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag
    ```
 3. **Cloud Run volume is mounted**: Ensure Cloud Run service has volume mount:
    - GCS bucket: `arrow-rag-support-prod-rag`
-   - Object prefix: `latest_model/`
-   - Mount path: `/app/latest_model`
+   - Mount path: `/app/latest_model` (bucket root mounts to this path)
+   - Files at `gs://arrow-rag-support-prod-rag/docstore.json` will appear at `/app/latest_model/docstore.json`
 
 ### Checking RAG Status
 

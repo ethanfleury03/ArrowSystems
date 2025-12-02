@@ -82,7 +82,11 @@ def upload_directory_to_gcs(
             # Get relative path from local_dir
             relative_path = local_file_path.relative_to(local_path)
             # Construct GCS blob path
-            gcs_blob_path = f"{gcs_prefix}/{relative_path}".replace("\\", "/")
+            if gcs_prefix:
+                gcs_blob_path = f"{gcs_prefix}/{relative_path}".replace("\\", "/")
+            else:
+                # Upload to bucket root (no prefix)
+                gcs_blob_path = str(relative_path).replace("\\", "/")
             
             blob = bucket.blob(gcs_blob_path)
             
@@ -108,8 +112,12 @@ def upload_directory_to_gcs(
     if skipped_count > 0:
         print(f"         Skipped: {skipped_count} files (already exist)")
     print()
-    print(f"[INFO] Index is now available at: gs://{bucket_name}/{gcs_prefix}/")
-    print(f"       Cloud Run will mount this at: /app/latest_model")
+    if gcs_prefix:
+        print(f"[INFO] Index is now available at: gs://{bucket_name}/{gcs_prefix}/")
+        print(f"       Cloud Run mounts bucket root to /app/latest_model/, so files will appear at: /app/latest_model/{gcs_prefix}/")
+    else:
+        print(f"[INFO] Index is now available at: gs://{bucket_name}/")
+        print(f"       Cloud Run mounts bucket root to /app/latest_model/, so files will appear at: /app/latest_model/")
     print("=" * 70)
 
 
@@ -133,8 +141,9 @@ def main():
     parser.add_argument(
         "--prefix",
         type=str,
-        default="latest_model",
-        help="GCS prefix/path in bucket (default: latest_model)"
+        default="",  # Default to bucket root - bucket root mounts to /app/latest_model
+        help="GCS prefix/path in bucket (default: empty string for root). "
+             "Files at gs://bucket/ will appear at /app/latest_model/ when bucket root mounts to /app/latest_model/"
     )
     parser.add_argument(
         "--no-overwrite",

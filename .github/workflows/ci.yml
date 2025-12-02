@@ -573,7 +573,7 @@ jobs:
           echo "ℹ️  This step requires storage.objects.create permission on the bucket"
           echo "   If it fails, grant permissions manually or ensure index already exists"
           echo ""
-          python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag || {
+          python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag --prefix "" || {
             echo ""
             echo "⚠️  Upload failed. This is non-critical if:"
             echo "   1. The index already exists in GCS, OR"
