@@ -403,20 +403,36 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
         id: auth
 
+      - name: Debug active gcloud account after WIF
+        run: |
+          echo "=== Active account after WIF ==="
+          gcloud auth list
+          echo ""
+          echo "=== WIF Provider ==="
+          echo "${{ secrets.WIF_PROVIDER }}"
+          echo ""
+          echo "=== SA we attempted to impersonate ==="
+          echo "${{ secrets.WIF_SERVICE_ACCOUNT }}"
+
+      - name: Verify WIF really activated
+        run: |
+          echo "=== gcloud auth list ==="
+          gcloud auth list
+          echo ""
+          echo "=== gcloud account info ==="
+          gcloud auth print-access-token | gcloud info --format='value(config.account)'
+          echo ""
+          echo "=== Full token introspection ==="
+          gcloud auth print-access-token > token.txt
+          curl -s -H "Authorization: Bearer $(cat token.txt)" \
+            https://oauth2.googleapis.com/tokeninfo || echo "Token introspection failed"
+
       - name: DEBUG — Show OIDC variables
         run: |
           echo "ACTIONS_ID_TOKEN_REQUEST_URL=${ACTIONS_ID_TOKEN_REQUEST_URL}"
           echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"
           echo "WIF_PROVIDER=${{ secrets.WIF_PROVIDER }}"
           echo "WIF_SERVICE_ACCOUNT=${{ secrets.WIF_SERVICE_ACCOUNT }}"
-
-      - name: DEBUG — check active identity RIGHT NOW
-        run: |
-          echo "=== gcloud auth list ==="
-          gcloud auth list
-          echo ""
-          echo "=== token-info (access token) ==="
-          gcloud auth print-access-token | gcloud auth list
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
