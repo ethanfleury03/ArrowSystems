@@ -259,7 +259,6 @@ jobs:
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          gcloud config unset auth/credential_file_override || true
           echo "✅ Credential overrides force-cleared"
 
       - name: Inject project ID
@@ -351,7 +350,6 @@ jobs:
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          gcloud config unset auth/credential_file_override || true
           echo "✅ Credential overrides force-cleared"
 
       - name: Inject project ID
@@ -465,7 +463,6 @@ jobs:
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
           
-          gcloud config unset auth/credential_file_override || true
           
           echo "After cleanup:"
           echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE'"
@@ -509,7 +506,6 @@ jobs:
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          gcloud config unset auth/credential_file_override || true
           echo "✅ Credential overrides force-cleared"
 
       - name: Debug gcloud identity
@@ -671,7 +667,6 @@ jobs:
           echo "🔐 Generating identity token for $BACKEND_URL..."
           
           # Nuclear cleanup right before token minting
-          gcloud config unset auth/credential_file_override || true
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
@@ -798,7 +793,6 @@ jobs:
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
           unset GOOGLE_APPLICATION_CREDENTIALS || true
           unset GOOGLE_GHA_CREDS_PATH || true
-          gcloud config unset auth/credential_file_override || true
           echo "✅ Credential overrides force-cleared"
 
       - name: Inject project ID
