@@ -709,32 +709,31 @@ jobs:
           export BACKEND_URL
           
           # Use Python's google-auth library with Application Default Credentials
-          # This properly handles external_account credentials with service account impersonation
+          # Setting GOOGLE_APPLICATION_CREDENTIALS makes default() use our credentials file
           ID_TOKEN=$(python3 << 'PYTHON_SCRIPT'
-          import json
           import os
           import sys
           from google.auth.transport import requests as auth_requests
           from google.oauth2 import id_token as google_id_token
-          from google.auth import default, load_credentials_from_file
+          from google.auth import default
           
           try:
               backend_url = os.environ.get('BACKEND_URL')
-              creds_file = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
               
-              if not backend_url or not creds_file:
-                  print("ERROR: BACKEND_URL or GOOGLE_APPLICATION_CREDENTIALS not set", file=sys.stderr)
+              if not backend_url:
+                  print("ERROR: BACKEND_URL not set", file=sys.stderr)
                   sys.exit(1)
               
-              # Load credentials using the file - this handles all credential types automatically
-              credentials, project = load_credentials_from_file(creds_file)
+              # Use default() which will pick up GOOGLE_APPLICATION_CREDENTIALS
+              # This properly handles external_account credentials with service account impersonation
+              credentials, project = default()
               
               # Create a request object
               request = auth_requests.Request()
               
-              # Generate identity token using the credentials
-              # The credentials file already has service_account_impersonation_url configured
-              # so it will automatically use impersonation
+              # fetch_id_token() will use the credentials from default()
+              # If the credentials have service_account_impersonation_url configured,
+              # it will automatically use impersonation
               token = google_id_token.fetch_id_token(request, backend_url)
               
               print(token)
