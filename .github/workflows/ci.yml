@@ -705,28 +705,48 @@ jobs:
             echo "Using federated credentials file: $CREDS_FILE"
             echo "Impersonating service account: $SERVICE_ACCOUNT"
             
+            # Set the credentials file as the application default
+            export GOOGLE_APPLICATION_CREDENTIALS="$PWD/$CREDS_FILE"
+            
             # Use the federated credential file with service account impersonation
             # The --impersonate-service-account flag tells gcloud to use the federated
             # credential to impersonate the service account
+            echo "Attempting to generate identity token with impersonation..."
+            set +e  # Temporarily disable exit on error to capture the error message
             ID_TOKEN=$(gcloud auth print-identity-token \
               --impersonate-service-account="$SERVICE_ACCOUNT" \
               --audiences="$BACKEND_URL" \
               --project=${{ secrets.GCP_PROJECT_ID }} 2>&1)
+            EXIT_CODE=$?
+            set -e  # Re-enable exit on error
             
-            if [ $? -ne 0 ]; then
-              echo "❌ Failed with impersonation, error: $ID_TOKEN"
+            if [ $EXIT_CODE -ne 0 ]; then
+              echo "❌ Failed with impersonation, exit code: $EXIT_CODE"
+              echo "Error output: $ID_TOKEN"
               echo ""
-              echo "Trying alternative: activate service account with impersonation..."
+              echo "Checking credentials file content..."
+              head -20 "$CREDS_FILE" || echo "Could not read credentials file"
+              echo ""
+              echo "Trying alternative: using gcloud config for impersonation..."
               
-              # Alternative approach: activate the service account using impersonation
-              export GOOGLE_APPLICATION_CREDENTIALS="$PWD/$CREDS_FILE"
+              # Alternative approach: set impersonation in gcloud config
               gcloud config set auth/impersonate_service_account "$SERVICE_ACCOUNT" 2>&1 || true
               
-              # Try again
+              # Try again with config-based impersonation
+              set +e
               ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL" 2>&1)
+              EXIT_CODE=$?
+              set -e
               
-              if [ $? -ne 0 ]; then
-                echo "❌ Alternative method also failed: $ID_TOKEN"
+              if [ $EXIT_CODE -ne 0 ]; then
+                echo "❌ Alternative method also failed, exit code: $EXIT_CODE"
+                echo "Error output: $ID_TOKEN"
+                echo ""
+                echo "Current gcloud auth state:"
+                gcloud auth list
+                echo ""
+                echo "Checking if federated credential can access the service account..."
+                gcloud iam service-accounts describe "$SERVICE_ACCOUNT" --project=${{ secrets.GCP_PROJECT_ID }} 2>&1 || echo "Cannot access service account"
                 exit 1
               fi
             fi
