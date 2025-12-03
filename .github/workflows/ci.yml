@@ -918,7 +918,18 @@ jobs:
             ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL")
           fi
           
+          # Verify ID_TOKEN is set and not empty
+          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+            echo "❌ ERROR: ID_TOKEN is empty or null!"
+            echo "Cannot proceed with pre-warm without authentication token."
+            exit 1
+          fi
+          
+          # Set authorization header - MUST be "Authorization: Bearer <token>"
           AUTH_HEADER="Authorization: Bearer $ID_TOKEN"
+          
+          # Debug: Verify header format (mask token for security)
+          echo "🔐 Authorization header configured (token length: ${#ID_TOKEN} chars)"
           
           echo "⏳ Waiting 5 seconds..."
           sleep 5
