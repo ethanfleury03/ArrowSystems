@@ -567,25 +567,14 @@ jobs:
           echo "     --role=\"roles/storage.objectAdmin\""
           echo "   gsutil iam ch serviceAccount:${SERVICE_ACCOUNT}:roles/storage.objectAdmin gs://${BUCKET_NAME}"
 
-      - name: Upload RAG index to GCS
-        run: |
-          echo "📦 Uploading RAG index to GCS bucket..."
-          echo "ℹ️  This step requires storage.objects.create permission on the bucket"
-          echo "   If it fails, grant permissions manually or ensure index already exists"
-          echo ""
-          python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag --prefix "" || {
-            echo ""
-            echo "⚠️  Upload failed. This is non-critical if:"
-            echo "   1. The index already exists in GCS, OR"
-            echo "   2. You'll upload it manually later"
-            echo ""
-            echo "   To grant permissions manually, run:"
-            echo "   gcloud projects add-iam-policy-binding ${{ secrets.GCP_PROJECT_ID }} \\"
-            echo "     --member=\"serviceAccount:${{ secrets.WIF_SERVICE_ACCOUNT }}\" \\"
-            echo "     --role=\"roles/storage.objectAdmin\""
-            echo "   gsutil iam ch serviceAccount:${{ secrets.WIF_SERVICE_ACCOUNT }}:roles/storage.objectAdmin gs://arrow-rag-support-prod-rag"
-            exit 0  # Don't fail the build
-          }
+      # REMOVED: Automatic index upload
+      # The RAG index is manually uploaded to GCS and downloaded by the backend on startup.
+      # Automatic upload from CI was causing issues by overwriting manually uploaded files
+      # when the repo's latest_model directory was empty or out of sync.
+      # To upload the index manually, run:
+      #   python -m backend.scripts.upload_index_to_gcs --dir latest_model --bucket arrow-rag-support-prod-rag --prefix ""
+      #   OR
+      #   make upload-index
 
       - name: Debug service account formatting
         run: |
