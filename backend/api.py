@@ -624,17 +624,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Initialize rate limiter if enabled
-limiter = None
-if settings.RATE_LIMIT_ENABLED:
-    limiter = Limiter(key_func=get_remote_address)
-    app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# Add logging middleware FIRST (before CORS) to capture all requests
-app.add_middleware(LoggingMiddleware)
-
-# Add CORS middleware (configured via centralized settings)
+# Add CORS middleware IMMEDIATELY after app creation (required for OPTIONS preflight)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ALLOWED_ORIGINS,
@@ -642,6 +632,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize rate limiter if enabled
+limiter = None
+if settings.RATE_LIMIT_ENABLED:
+    limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Add logging middleware to capture all requests
+app.add_middleware(LoggingMiddleware)
 
 # Note: Global rate limit is applied via decorators on individual endpoints
 # Endpoints with specific limits (like /auth/login and /query) will use those limits
@@ -957,6 +957,11 @@ class RAGStatusResponse(BaseModel):
     status: Optional[str] = None  # "ready" | "initializing" | "disabled"
 
 
+@app.options("/rag/status")
+async def rag_status_options():
+    """OPTIONS handler for CORS preflight requests."""
+    return {}
+
 @app.get("/rag/status", include_in_schema=False)
 async def rag_status_public():
     """
@@ -1061,6 +1066,11 @@ class RAGSelfTestResponse(BaseModel):
     storage_dir: Optional[str] = None
     last_error: Optional[str] = None
 
+
+@app.options("/rag/self-test")
+async def rag_self_test_options():
+    """OPTIONS handler for CORS preflight requests."""
+    return {}
 
 @app.get("/rag/self-test", response_model=RAGSelfTestResponse)
 # Note: /rag/self-test endpoint is NOT rate limited for testing/debugging
@@ -1783,6 +1793,11 @@ async def summarize_query_endpoint(request: Dict[str, Any]):
             content={"detail": f"Failed to summarize query: {str(e)}"}
         )
 
+
+@app.options("/query")
+async def query_options():
+    """OPTIONS handler for CORS preflight requests."""
+    return {}
 
 @app.post("/query", response_model=QueryResponse)
 @apply_rate_limit(settings.RATE_LIMIT_QUERY)
