@@ -1,12 +1,26 @@
 #!/bin/bash
 # Deployment script for arrow-rag-backend Cloud Run service
-# This script deploys the service and configures volumes, scaling, and env vars
+# This script deploys the service and configures scaling and env vars
+# NOTE: GCS volumes are NOT used - index is bundled in the Docker image
 
 set -e
 
 PROJECT="arrow-rag-support-prod"
 REGION="us-central1"
 SERVICE="arrow-rag-backend"
+
+# SAFETY CHECK – do not allow accidental GCS mounts
+# Check for volume mount commands in deployment files (excluding this safety check itself)
+if grep -rE "(--add-volume|volumeMounts:|volumes:.*rag-index|gcsfuse)" \
+   --include="*.sh" --include="*.yaml" --include="*.yml" \
+   deployment .github/workflows 2>/dev/null | \
+   grep -v "SAFETY CHECK" | \
+   grep -v "do not allow" | \
+   grep -v "Remove any existing"; then
+  echo "❌ ERROR: GCS volume mount detected — this system no longer uses gcsfuse."
+  echo "   Index must be bundled in the Docker image at /app/latest_model/"
+  exit 1
+fi
 
 echo "=========================================="
 echo "Step 1: Deploy base service from YAML"
@@ -18,24 +32,31 @@ gcloud run services replace deployment/cloud-run-service.yaml \
 
 echo ""
 echo "=========================================="
-echo "Step 2: Add RAG index volume mount"
+echo "Step 2: Remove any existing GCS volume mounts (if present)"
 echo "=========================================="
-echo "Mounting bucket root to /app/latest_model/"
-echo "Files at gs://arrow-rag-support-prod-rag/ (bucket root) will appear at /app/latest_model/"
+# Remove any existing volume mounts to ensure clean state
 gcloud run services update $SERVICE \
-  --add-volume=name=rag-index,type=gcs,bucket=arrow-rag-support-prod-rag \
-  --add-volume-mount=volume=rag-index,mount-path=/app/latest_model \
+  --remove-volume=rag-index \
+  --remove-volume-mount=rag-index \
   --region=$REGION \
   --platform=managed \
-  --project=$PROJECT
+  --project=$PROJECT 2>/dev/null || echo "No rag-index volume to remove (expected)"
+
+gcloud run services update $SERVICE \
+  --remove-volume=data-volume \
+  --remove-volume-mount=data-volume \
+  --region=$REGION \
+  --platform=managed \
+  --project=$PROJECT 2>/dev/null || echo "No data-volume volume to remove (expected)"
 
 echo ""
 echo "=========================================="
-echo "Step 3: Add data volume mount"
+echo "Step 3: Update secrets from Google Secret Manager"
 echo "=========================================="
 gcloud run services update $SERVICE \
-  --add-volume=name=data-volume,type=gcs,bucket=ragapp-data \
-  --add-volume-mount=volume=data-volume,mount-path=/app/data \
+  --update-secrets=DATABASE_URL=DATABASE_URL:latest \
+  --update-secrets=JWT_SECRET_KEY=JWT_SECRET_KEY:latest \
+  --update-secrets=FRONTEND_SESSION_SECRET=FRONTEND_SESSION_SECRET:latest \
   --region=$REGION \
   --platform=managed \
   --project=$PROJECT
