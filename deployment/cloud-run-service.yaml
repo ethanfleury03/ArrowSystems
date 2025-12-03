@@ -21,7 +21,7 @@ spec:
           resources:
             limits:
               cpu: "2"
-              memory: "8Gi"
+              memory: "4Gi"
           startupProbe:
             httpGet:
               path: /health

@@ -11,7 +11,7 @@ project:
 service:
   name: "rag-app"                          # Your Cloud Run service name
   port: 8501                               # Streamlit default port
-  memory: "2Gi"                            # Memory allocation
+  memory: "4Gi"                            # Memory allocation
   cpu: "2"                                 # CPU allocation
   min_instances: 0                          # Minimum running instances
   max_instances: 10                        # Maximum running instances

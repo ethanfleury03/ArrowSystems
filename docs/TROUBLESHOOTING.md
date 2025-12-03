@@ -112,7 +112,7 @@ gcloud sql instances describe rag-postgres --project=arrow-rag-support-prod
 # Increase memory and CPU
 gcloud run services update arrow-rag-backend \
   --region us-central1 \
-  --memory 2Gi \
+  --memory 4Gi \
   --cpu 2 \
   --timeout 300
 ```

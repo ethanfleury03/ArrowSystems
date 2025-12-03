@@ -621,6 +621,7 @@ jobs:
             --set-env-vars="AUTH_COOKIE_SECURE=true" \
             --set-cloudsql-instances="arrow-rag-support-prod:us-central1:rag-postgres" \
             --execution-environment=gen2 \
+            --memory=4Gi \
             --min-instances=1 \
             --cpu-throttling \
             --max-instances=10 \

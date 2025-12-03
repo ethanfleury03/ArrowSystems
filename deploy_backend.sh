@@ -169,7 +169,7 @@ if ! gcloud run deploy "$SERVICE_NAME" \
     --region "$REGION" \
     --platform managed \
     --allow-unauthenticated \
-    --memory 2Gi \
+    --memory 4Gi \
     --cpu 2 \
     --add-cloudsql-instances "${PROJECT_ID}:${REGION}:rag-postgres" \
     --set-env-vars "$ENV_VARS"; then

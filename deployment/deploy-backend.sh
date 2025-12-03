@@ -51,9 +51,10 @@ gcloud run services update $SERVICE \
 
 echo ""
 echo "=========================================="
-echo "Step 3: Set scaling and concurrency"
+echo "Step 3: Set scaling, concurrency, and memory"
 echo "=========================================="
 gcloud run services update $SERVICE \
+  --memory=4Gi \
   --min-instances=1 \
   --cpu-throttling \
   --max-instances=10 \
