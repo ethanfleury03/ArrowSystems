@@ -57,7 +57,7 @@ steps:
       - '--port'
       - '8501'
       - '--memory'
-      - '2Gi'
+      - '4Gi'
       - '--cpu'
       - '2'
       - '--min-instances'
