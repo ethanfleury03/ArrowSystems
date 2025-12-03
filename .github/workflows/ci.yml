@@ -616,6 +616,7 @@ jobs:
             --set-cloudsql-instances="arrow-rag-support-prod:us-central1:rag-postgres" \
             --execution-environment=gen2 \
             --min-instances=1 \
+            --cpu-throttling \
             --max-instances=10 \
             --concurrency=100 \
             --no-allow-unauthenticated \
