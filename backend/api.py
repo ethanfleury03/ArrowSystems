@@ -973,7 +973,7 @@ async def rag_status_public():
         # Ensure pipeline instance exists
         if rag_pipeline is None:
             cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
         
         # Check if index directory exists (even if not initialized)
         index_dir_exists = False
@@ -981,9 +981,27 @@ async def rag_status_public():
             index_dir_exists = os.path.exists(storage_path) and os.path.isdir(storage_path)
         
         # Attempt lazy initialization if not already initialized (same as /rag/self-test)
+        # Also check if index files exist but pipeline isn't initialized (post-startup scenario)
         if storage_path is not None and not rag_pipeline.is_initialized():
-            logger.info("rag_status_triggering_lazy_init", storage_path=storage_path)
-            rag_pipeline.ensure_initialized(storage_path)
+            # Check if index files actually exist before attempting initialization
+            index_files_exist = False
+            if os.path.exists(storage_path) and os.path.isdir(storage_path):
+                required_files = ["docstore.json", "index_store.json", "default__vector_store.json"]
+                index_files_exist = all(
+                    os.path.exists(os.path.join(storage_path, filename))
+                    for filename in required_files
+                )
+            
+            if index_files_exist:
+                logger.info("rag_status_triggering_lazy_init", 
+                           storage_path=storage_path,
+                           message="Index files exist but pipeline not initialized - triggering background load")
+                # Trigger initialization in background (non-blocking)
+                rag_pipeline.ensure_initialized(storage_path)
+            elif not index_dir_exists:
+                logger.debug("rag_status_no_index_files",
+                           storage_path=storage_path,
+                           message="Index directory or files not found - skipping initialization attempt")
         
         # Get current status after initialization attempt
         initialized = rag_pipeline.is_initialized()
@@ -1070,7 +1088,7 @@ async def rag_self_test():
     # Ensure pipeline instance exists
     if rag_pipeline is None:
         cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
     
     # Attempt lazy initialization if not already initialized
     if storage_path is not None and not rag_pipeline.is_initialized():
@@ -1815,7 +1833,7 @@ async def query_knowledge_base(request: Request):
     # Ensure pipeline instance exists
     if rag_pipeline is None:
         cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
     
     # Attempt lazy initialization if not already initialized
     if not rag_pipeline.is_initialized():
