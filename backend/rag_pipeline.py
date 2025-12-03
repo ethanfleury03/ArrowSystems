@@ -376,16 +376,52 @@ class RAGPipeline:
 _pipeline_instance = None
 
 
-def get_rag_pipeline(cache_dir="/root/.cache/huggingface/hub", db_manager=None) -> RAGPipeline:
+def _check_index_files_exist(storage_dir: str) -> bool:
+    """
+    Check if required RAG index files exist in the storage directory.
+    
+    Args:
+        storage_dir: Directory path to check
+        
+    Returns:
+        True if all required files exist, False otherwise
+    """
+    if not storage_dir:
+        return False
+    
+    storage_path = Path(storage_dir)
+    if not storage_path.exists() or not storage_path.is_dir():
+        return False
+    
+    # Required files for RAG index
+    REQUIRED_FILES = [
+        "docstore.json",
+        "index_store.json",
+        "default__vector_store.json",
+    ]
+    
+    for filename in REQUIRED_FILES:
+        if not (storage_path / filename).exists():
+            return False
+    
+    return True
+
+
+def get_rag_pipeline(cache_dir="/root/.cache/huggingface/hub", db_manager=None, storage_dir: Optional[str] = None) -> RAGPipeline:
     """
     Get or create global RAG pipeline instance.
     
     This function provides a singleton pattern for the RAG pipeline,
     ensuring that expensive model loading only happens once.
     
+    Additionally, if the pipeline is not initialized but index files exist,
+    this will attempt to reload the index automatically.
+    
     Args:
         cache_dir: HuggingFace cache directory
         db_manager: Optional database manager
+        storage_dir: Optional storage directory path. If provided and pipeline is not
+                     initialized, will check for index files and attempt reload.
         
     Returns:
         RAGPipeline instance
@@ -395,6 +431,20 @@ def get_rag_pipeline(cache_dir="/root/.cache/huggingface/hub", db_manager=None) 
     if _pipeline_instance is None:
         _pipeline_instance = RAGPipeline(cache_dir=cache_dir, db_manager=db_manager)
         logger.info("🔄 Created new RAG pipeline instance")
+    
+    # Check if pipeline is not initialized but index files exist
+    # This handles the case where backend boots before GCS download finishes
+    if not _pipeline_instance.is_initialized():
+        # Use provided storage_dir, or default to production path
+        check_dir = storage_dir or "/app/latest_model"
+        
+        # Check if index files exist
+        if _check_index_files_exist(check_dir):
+            logger.info("rag_pipeline_auto_reload_attempt",
+                       storage_dir=check_dir,
+                       message="Pipeline not initialized but index files exist - attempting reload")
+            # Use ensure_initialized which is thread-safe and handles concurrent calls
+            _pipeline_instance.ensure_initialized(check_dir)
     
     return _pipeline_instance
 
