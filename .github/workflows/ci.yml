@@ -616,6 +616,10 @@ jobs:
             --max-instances=10 \
             --concurrency=100 \
             --no-allow-unauthenticated \
+            --cors-allow-origin="https://arrow-rag-frontend-70705019874.us-central1.run.app" \
+            --cors-allow-methods="GET,POST,OPTIONS" \
+            --cors-allow-headers="Authorization,Content-Type" \
+            --cors-allow-credentials \
             --port=8080 \
             --quiet
           
