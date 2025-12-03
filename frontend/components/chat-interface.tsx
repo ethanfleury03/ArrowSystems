@@ -16,6 +16,25 @@ import type { Message, MessageSource } from "@/types/message"
 import { QuerySettings } from "@/components/sidebar"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 
+/**
+ * Get authentication token from browser cookies (client-side only)
+ * The backend sets the JWT in a cookie (default: 'access_token', but may be 'auth_token')
+ * Note: If cookie is httpOnly, this will return null and browser will send it automatically via credentials: "include"
+ */
+function getAuthToken(): string | null {
+  if (typeof document === "undefined") return null;
+  
+  // Try both possible cookie names (backend default is 'access_token', but user mentioned 'auth_token')
+  const cookies = document.cookie.split("; ");
+  for (const cookieName of ["access_token", "auth_token"]) {
+    const cookie = cookies.find((x) => x.startsWith(`${cookieName}=`));
+    if (cookie) {
+      return cookie.split("=")[1] ?? null;
+    }
+  }
+  return null;
+}
+
 export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
@@ -66,7 +85,23 @@ export function ChatInterface() {
               return
             }
             
-            const ragResponse = await fetch(`${API_BASE}/rag/status`, { credentials: "include" })
+            // Get JWT token from cookies for Authorization header
+            const token = getAuthToken()
+            // If token is missing, try to call endpoint anyway with credentials
+            // The backend might accept the request if cookies are sent via credentials: "include"
+            
+            // Build headers - include Authorization if token is available
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json"
+            }
+            if (token) {
+              headers["Authorization"] = `Bearer ${token}`
+            }
+            
+            const ragResponse = await fetch(`${API_BASE}/rag/status`, {
+              headers,
+              credentials: "include"
+            })
             if (ragResponse.ok) {
               const ragData = await ragResponse.json()
               // Use initialized field from backend response
@@ -86,15 +121,21 @@ export function ChatInterface() {
                 // Stop polling when ready
                 stopRagPolling()
               }
+            } else if (ragResponse.status === 401 || ragResponse.status === 403) {
+              // Authentication error - log but don't disable RAG (might be a temporary issue)
+              console.warn("RAG status check returned auth error:", ragResponse.status)
+              // Don't disable RAG on auth errors - backend might still be working
+              setCheckingRag(false)
             } else {
+              // Other errors - backend might be down or RAG truly disabled
+              console.error("RAG status check failed:", ragResponse.status)
               setRagEnabled(false)
               setRagStatus('disabled')
               setCheckingRag(false)
             }
           } catch (error) {
             console.error("Failed to fetch RAG status:", error)
-            setRagEnabled(false)
-            setRagStatus('disabled')
+            // On network errors, don't assume RAG is disabled - might be temporary
             setCheckingRag(false)
           }
         }
@@ -156,7 +197,20 @@ export function ChatInterface() {
           return
         }
         
-        const ragResponse = await fetch(`${API_BASE}/rag/status`, { credentials: "include" })
+        // Get JWT token from cookies for Authorization header
+        const token = getAuthToken()
+        // Build headers - include Authorization if token is available
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json"
+        }
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`
+        }
+        
+        const ragResponse = await fetch(`${API_BASE}/rag/status`, {
+          headers,
+          credentials: "include"
+        })
         if (ragResponse.ok) {
           const ragData = await ragResponse.json()
           // Use initialized field from backend response

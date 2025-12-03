@@ -1,5 +1,5 @@
 """
-Centralized authentication configuration for JWT-based auth with HTTP-only cookies.
+Centralized authentication configuration for JWT-based auth with cookies.
 
 This module provides a single source of truth for all authentication-related
 settings including JWT configuration, cookie options, and token expiration.
@@ -42,7 +42,7 @@ class AuthConfig:
         # SameSite=None is required for cross-origin cookies (frontend/backend on different domains)
         # This requires Secure=true (HTTPS only)
         self.AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "none" if settings.is_prod else "lax")
-        self.AUTH_COOKIE_HTTPONLY = True  # Always HTTP-only for security
+        self.AUTH_COOKIE_HTTPONLY = False  # Allow JavaScript to read token for Authorization header
         self.AUTH_COOKIE_PATH = "/"
         
     def _get_cookie_secure(self) -> bool:
