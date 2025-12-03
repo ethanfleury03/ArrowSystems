@@ -54,17 +54,27 @@ export function ChatInterface() {
         const user = await getCurrentUser()
         setUserInfo(user)
         
-        // Check RAG status
+        // Check RAG status - call backend directly
         const checkRagStatus = async () => {
           try {
-            const ragResponse = await fetch('/api/rag/status')
+            const API_BASE = process.env.NEXT_PUBLIC_API_URL
+            if (!API_BASE) {
+              console.error("NEXT_PUBLIC_API_URL is not set")
+              setRagEnabled(false)
+              setRagStatus('disabled')
+              setCheckingRag(false)
+              return
+            }
+            
+            const ragResponse = await fetch(`${API_BASE}/rag/status`, { credentials: "include" })
             if (ragResponse.ok) {
               const ragData = await ragResponse.json()
-              const enabled = ragData.rag_enabled === true
+              // Use initialized field from backend response
+              const initialized = ragData.initialized === true
               const initializing = ragData.initializing === true
-              const status = ragData.status || (enabled ? 'ready' : (initializing ? 'warming' : 'disabled'))
+              const status = ragData.status || (initialized ? 'ready' : (initializing ? 'warming' : 'disabled'))
               
-              setRagEnabled(enabled)
+              setRagEnabled(initialized)
               setRagStatus(status as 'ready' | 'warming' | 'disabled')
               setRagLastError(ragData.last_error || null)
               setCheckingRag(false)
@@ -139,14 +149,22 @@ export function ChatInterface() {
     
     ragPollingIntervalRef.current = setInterval(async () => {
       try {
-        const ragResponse = await fetch('/api/rag/status')
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL
+        if (!API_BASE) {
+          console.error("NEXT_PUBLIC_API_URL is not set")
+          stopRagPolling()
+          return
+        }
+        
+        const ragResponse = await fetch(`${API_BASE}/rag/status`, { credentials: "include" })
         if (ragResponse.ok) {
           const ragData = await ragResponse.json()
-          const enabled = ragData.rag_enabled === true
+          // Use initialized field from backend response
+          const initialized = ragData.initialized === true
           const initializing = ragData.initializing === true
-          const status = ragData.status || (enabled ? 'ready' : (initializing ? 'warming' : 'disabled'))
+          const status = ragData.status || (initialized ? 'ready' : (initializing ? 'warming' : 'disabled'))
           
-          setRagEnabled(enabled)
+          setRagEnabled(initialized)
           setRagStatus(status as 'ready' | 'warming' | 'disabled')
           setRagLastError(ragData.last_error || null)
           
