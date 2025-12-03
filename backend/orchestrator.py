@@ -3410,7 +3410,33 @@ class RAGOrchestrator:
         """
         from backend.utils.test_mode import is_test_mode
         from backend.utils.cloud_run import should_skip_ingestion
+        from backend.config.env import settings
         from pathlib import Path
+        
+        # In production mode, download index from GCS before loading
+        # This replaces the old gcsfuse volume mount approach
+        if settings.is_prod:
+            logger.info("[RAG] Production mode — downloading index from GCS before initialization")
+            try:
+                from backend.rag.startup_downloader import download_index_from_gcs
+                ok = download_index_from_gcs()
+                if not ok:
+                    logger.error("[RAG] Index download failed — RAG will NOT be initialized")
+                    self.index = None
+                    self.retriever = None
+                    self.last_error = "Failed to download RAG index from GCS"
+                    return
+            except Exception as e:
+                logger.error(
+                    "[RAG] Exception during index download — RAG will NOT be initialized",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    exc_info=True
+                )
+                self.index = None
+                self.retriever = None
+                self.last_error = f"Exception during index download: {type(e).__name__}: {str(e)}"
+                return
         
         # Ensure storage_dir is an absolute path (resolve relative paths)
         storage_path = Path(storage_dir)
@@ -3528,11 +3554,16 @@ class RAGOrchestrator:
                     missing_files.append(req_file)
             
             if missing_files:
-                logger.warning("orchestrator_index_files_missing_before_load",
+                error_msg = f"Missing required index files: {', '.join(missing_files)}"
+                logger.error("orchestrator_index_files_missing_before_load",
                              storage_dir=storage_dir,
                              missing_files=missing_files,
-                             message=f"Required index files missing before load: {', '.join(missing_files)}")
-                # Don't fail yet - let load_index_from_storage try and give us a better error
+                             message=error_msg)
+                # Raise clear exception for missing required files
+                raise RuntimeError(
+                    f"Missing required index file(s): {', '.join(missing_files)}. "
+                    f"Expected files in {storage_dir}: {required_files}"
+                )
             
             # CRITICAL: Use the absolute path directly - do not add any extra segments
             # In Cloud Run, if mount is at /app/latest_model, files are at /app/latest_model/docstore.json
