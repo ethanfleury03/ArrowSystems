@@ -39,6 +39,9 @@ class Settings:
                    is_dev=self.is_dev,
                    message=f"Runtime environment detected: {self.ENV} (is_prod={self.is_prod}, is_dev={self.is_dev})")
         
+        # Secret Configuration - REQUIRED in production
+        self._load_secrets()
+        
         # JWT Configuration
         self._load_jwt_secret()
         
@@ -48,18 +51,64 @@ class Settings:
         # Rate Limiting Configuration
         self._load_rate_limit_config()
     
+    def _load_secrets(self) -> None:
+        """Load required secrets - REQUIRED in production, optional in dev."""
+        # DATABASE_URL - required in all environments
+        if self.is_prod:
+            try:
+                self.DATABASE_URL = os.environ["DATABASE_URL"]
+            except KeyError:
+                raise RuntimeError(
+                    "DATABASE_URL environment variable is REQUIRED in production but not set. "
+                    "Ensure Cloud Run is configured to load this from Google Secret Manager."
+                )
+        else:
+            # Development: allow fallback via os.getenv() for local .env file support
+            database_url = os.getenv("DATABASE_URL")
+            if not database_url:
+                raise RuntimeError(
+                    "DATABASE_URL environment variable is required in all environments. "
+                    "Set it in your .env file for local development."
+                )
+            self.DATABASE_URL = database_url
+        
+        # FRONTEND_SESSION_SECRET - required in production
+        if self.is_prod:
+            try:
+                self.FRONTEND_SESSION_SECRET = os.environ["FRONTEND_SESSION_SECRET"]
+            except KeyError:
+                raise RuntimeError(
+                    "FRONTEND_SESSION_SECRET environment variable is REQUIRED in production but not set. "
+                    "Ensure Cloud Run is configured to load this from Google Secret Manager."
+                )
+            
+            # Validate secret is not empty
+            if not self.FRONTEND_SESSION_SECRET or self.FRONTEND_SESSION_SECRET.strip() == "":
+                raise RuntimeError(
+                    "FRONTEND_SESSION_SECRET is set but empty. Provide a valid secret via Google Secret Manager."
+                )
+        else:
+            # Development: allow fallback via os.getenv() for local .env file support
+            self.FRONTEND_SESSION_SECRET = os.getenv("FRONTEND_SESSION_SECRET", "dev-session-secret-not-for-production")
+    
     def _load_jwt_secret(self) -> None:
         """Load and validate JWT secret key - REQUIRED in production."""
-        env_secret = os.getenv("JWT_SECRET_KEY")
-        
         if self.is_prod:
-            # Production: JWT_SECRET_KEY MUST be set explicitly
-            # No fallbacks - fail fast if missing
-            if not env_secret or env_secret.strip() == "":
+            # Production: JWT_SECRET_KEY MUST be set explicitly via Secret Manager
+            # Use os.environ[] to fail fast if missing (no KeyError handling needed)
+            try:
+                env_secret = os.environ["JWT_SECRET_KEY"]
+            except KeyError:
                 raise RuntimeError(
                     "JWT_SECRET_KEY environment variable is REQUIRED in production but not set. "
-                    "Set this in your Cloud Run deployment or GitHub Actions secrets. "
+                    "Ensure Cloud Run is configured to load this from Google Secret Manager. "
                     "Generate a secure secret with: python -c 'import secrets; print(secrets.token_urlsafe(64))'"
+                )
+            
+            # Validate secret is not empty
+            if not env_secret or env_secret.strip() == "":
+                raise RuntimeError(
+                    "JWT_SECRET_KEY is set but empty. Provide a valid secret via Google Secret Manager."
                 )
             
             # Check for unsafe defaults
@@ -77,7 +126,8 @@ class Settings:
                 )
             self.JWT_SECRET_KEY = env_secret
         else:
-            # Development: allow fallback to a dev-specific secret
+            # Development: allow fallback via os.getenv() for local .env file support
+            env_secret = os.getenv("JWT_SECRET_KEY")
             self.JWT_SECRET_KEY = env_secret or "dev-secret-key-not-for-production-use-only"
     
     def _load_cors_origins(self) -> None:

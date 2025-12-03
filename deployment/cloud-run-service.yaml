@@ -18,13 +18,25 @@ spec:
               value: "/app"
             - name: PORT
               value: "8080"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: DATABASE_URL
+                  key: latest
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: JWT_SECRET_KEY
+                  key: latest
+            - name: FRONTEND_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: FRONTEND_SESSION_SECRET
+                  key: latest
           resources:
             limits:
               cpu: "2"
               memory: "8Gi"
-          volumeMounts:
-            - name: rag-index
-              mountPath: /app/latest_model
           startupProbe:
             httpGet:
               path: /health
@@ -41,9 +53,3 @@ spec:
             timeoutSeconds: 5
             periodSeconds: 30
             failureThreshold: 3
-      volumes:
-        - name: rag-index
-          csi:
-            driver: gcsfuse.run.googleapis.com
-            volumeAttributes:
-              bucketName: arrow-rag-support-prod-rag

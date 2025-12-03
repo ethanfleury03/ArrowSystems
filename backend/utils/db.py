@@ -40,13 +40,32 @@ def _get_database_url() -> str:
     
     DATABASE_URL is the single source of truth for database connections.
     Must be a PostgreSQL connection string (e.g., postgresql://user:pass@host:port/dbname).
+    
+    In production, this must be loaded from Google Secret Manager.
+    In development, this can come from .env file via python-dotenv.
     """
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError(
-            "DATABASE_URL environment variable is required. "
-            "Provide a valid PostgreSQL connection string (e.g., postgresql://user:pass@host:port/dbname)."
-        )
+    # Use settings.DATABASE_URL if available (loaded from env config)
+    # Otherwise fall back to direct env var access
+    from ..config.env import settings
+    if hasattr(settings, 'DATABASE_URL'):
+        database_url = settings.DATABASE_URL
+    else:
+        # Fallback for backwards compatibility
+        if settings.is_prod:
+            try:
+                database_url = os.environ["DATABASE_URL"]
+            except KeyError:
+                raise RuntimeError(
+                    "DATABASE_URL environment variable is REQUIRED in production but not set. "
+                    "Ensure Cloud Run is configured to load this from Google Secret Manager."
+                )
+        else:
+            database_url = os.getenv("DATABASE_URL")
+            if not database_url:
+                raise RuntimeError(
+                    "DATABASE_URL environment variable is required. "
+                    "Set it in your .env file for local development."
+                )
     
     # Fail fast if SQLite is detected
     if database_url.startswith("sqlite://") or database_url.startswith("sqlite:///"):

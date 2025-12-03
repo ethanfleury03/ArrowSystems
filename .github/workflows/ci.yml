@@ -596,14 +596,20 @@ jobs:
 
       - name: Deploy backend to Cloud Run
         run: |
+          # SAFETY CHECK – do not allow accidental GCS mounts
+          if echo "${{ secrets.GCP_PROJECT_ID }}" | grep -q "add-volume\|volume.*gcs\|gcsfuse"; then
+            echo "❌ ERROR: Potential GCS volume mount detected in secrets — this system no longer uses gcsfuse."
+            exit 1
+          fi
+          
           gcloud run deploy arrow-rag-backend \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
             --region=us-central1 \
             --service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}" \
             --image="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${GITHUB_SHA}" \
-            --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
-            --set-env-vars="JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}" \
-            --set-env-vars="FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
+            --update-secrets=DATABASE_URL=DATABASE_URL:latest \
+            --update-secrets=JWT_SECRET_KEY=JWT_SECRET_KEY:latest \
+            --update-secrets=FRONTEND_SESSION_SECRET=FRONTEND_SESSION_SECRET:latest \
             --set-env-vars="ENV=prod" \
             --set-env-vars="HF_HOME=/app/.cache/huggingface" \
             --set-env-vars="TRANSFORMERS_CACHE=/app/.cache/huggingface" \
