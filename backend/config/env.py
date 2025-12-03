@@ -95,7 +95,8 @@ class Settings:
         """Load and validate JWT secret key - REQUIRED in production."""
         if self.is_prod:
             # Production: JWT_SECRET_KEY MUST be set explicitly via Secret Manager
-            # Use os.environ[] to fail fast if missing (no KeyError handling needed)
+            # Cloud Run injects Secret Manager values as environment variables
+            # Use os.environ[] to fail fast if missing
             try:
                 env_secret = os.environ["JWT_SECRET_KEY"]
             except KeyError:
