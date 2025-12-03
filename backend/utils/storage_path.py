@@ -47,31 +47,25 @@ def resolve_storage_path() -> Optional[Path]:
                          exists=path.exists())
     
     # In production, /app/latest_model is the REQUIRED and ONLY path
-    # This is where Cloud Run mounts the GCS bucket
-    # ALWAYS return it in prod, even if directory doesn't exist (lazy init will handle errors)
+    # Index files are downloaded from GCS on startup (not mounted via gcsfuse)
+    # ALWAYS return it in prod, even if directory doesn't exist (download will create it)
     if settings.ENV in ("prod", "production", "cloud"):
         prod_path = Path("/app/latest_model").resolve()  # Ensure absolute
         exists = prod_path.exists()
         is_dir = prod_path.is_dir() if exists else False
         
-        logger.info("rag_storage_path_prod_resolution",
+        logger.info("[storage] Using production storage directory: /app/latest_model",
                    prod_path=str(prod_path),
                    exists=exists,
                    is_dir=is_dir,
-                   env=settings.ENV)
+                   env=settings.ENV,
+                   message="Production storage path resolved - index will be downloaded from GCS on startup")
         
-        if not exists:
-            logger.error("rag_storage_path_prod_missing",
-                        prod_path=str(prod_path),
-                        message="Production storage path does not exist! "
-                               "Check Cloud Run volume mount configuration. "
-                               "Expected: Bucket=arrow-rag-support-prod-rag mounted to /app/, "
-                               "Files at gs://bucket/latest_model/ should appear at /app/latest_model/")
-        elif not is_dir:
+        if exists and not is_dir:
             logger.error("rag_storage_path_prod_not_directory",
                         prod_path=str(prod_path),
                         message="Production storage path exists but is not a directory!")
-        else:
+        elif exists:
             # Check if files are present (for logging, but don't fail)
             docstore_path = prod_path / "docstore.json"
             has_files = docstore_path.exists()
@@ -79,10 +73,10 @@ def resolve_storage_path() -> Optional[Path]:
                        prod_path=str(prod_path),
                        has_docstore=has_files,
                        message="Production storage path found" + 
-                               (" with index files" if has_files else " but index files missing"))
+                               (" with index files" if has_files else " (files will be downloaded on startup)"))
         
         # ALWAYS return the prod path, even if it doesn't exist
-        # This allows lazy initialization to attempt loading and provide better error messages
+        # The download logic will create the directory and download files before loading
         return prod_path
     
     # Build candidate paths for dev/local environments

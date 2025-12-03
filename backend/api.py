@@ -1258,6 +1258,12 @@ async def rag_validate_index():
     storage_path = getattr(app.state, "rag_storage_path", None)
     required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
     
+    # In production, always check /app/latest_model (not gcsfuse paths)
+    from backend.config.env import settings
+    if settings.is_prod:
+        storage_path = "/app/latest_model"
+        logger.info("[RAG] Production mode - validating index at /app/latest_model")
+    
     if storage_path is None:
         return RAGIndexValidationResponse(
             storage_path=None,
