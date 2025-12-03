@@ -18,21 +18,6 @@ spec:
               value: "/app"
             - name: PORT
               value: "8080"
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: DATABASE_URL
-                  key: latest
-            - name: JWT_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: JWT_SECRET_KEY
-                  key: latest
-            - name: FRONTEND_SESSION_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: FRONTEND_SESSION_SECRET
-                  key: latest
           resources:
             limits:
               cpu: "2"

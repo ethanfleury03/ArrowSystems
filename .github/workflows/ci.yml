@@ -607,9 +607,9 @@ jobs:
             --region=us-central1 \
             --service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}" \
             --image="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${GITHUB_SHA}" \
-            --update-secrets=DATABASE_URL=DATABASE_URL:latest \
-            --update-secrets=JWT_SECRET_KEY=JWT_SECRET_KEY:latest \
-            --update-secrets=FRONTEND_SESSION_SECRET=FRONTEND_SESSION_SECRET:latest \
+            --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+            --set-env-vars="JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}" \
+            --set-env-vars="FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
             --set-env-vars="ENV=prod" \
             --set-env-vars="HF_HOME=/app/.cache/huggingface" \
             --set-env-vars="TRANSFORMERS_CACHE=/app/.cache/huggingface" \

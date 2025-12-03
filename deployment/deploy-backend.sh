@@ -23,41 +23,6 @@ if grep -rE "(--add-volume|volumeMounts:|volumes:.*rag-index|gcsfuse)" \
 fi
 
 echo "=========================================="
-echo "Pre-Deploy: Verify secrets in Secret Manager"
-echo "=========================================="
-echo "🔐 Checking Secret Manager for JWT_SECRET_KEY..."
-if ! gcloud secrets versions list JWT_SECRET_KEY --project="$PROJECT" --format="value(name)" >/dev/null 2>&1; then
-  echo "❌ ERROR: JWT_SECRET_KEY does not exist in Secret Manager."
-  echo "The backend will crash if deployed without this secret."
-  echo ""
-  echo "To create the secret:"
-  echo "  gcloud secrets create JWT_SECRET_KEY --project=$PROJECT"
-  echo "  echo -n 'your-secret-value' | gcloud secrets versions add JWT_SECRET_KEY --data-file=- --project=$PROJECT"
-  echo ""
-  echo "Generate a secure secret with:"
-  echo "  python -c 'import secrets; print(secrets.token_urlsafe(64))'"
-  exit 1
-fi
-echo "✅ JWT_SECRET_KEY found in Secret Manager"
-
-echo ""
-echo "🔐 Checking Secret Manager for DATABASE_URL..."
-if ! gcloud secrets versions list DATABASE_URL --project="$PROJECT" --format="value(name)" >/dev/null 2>&1; then
-  echo "❌ ERROR: DATABASE_URL does not exist in Secret Manager."
-  exit 1
-fi
-echo "✅ DATABASE_URL found in Secret Manager"
-
-echo ""
-echo "🔐 Checking Secret Manager for FRONTEND_SESSION_SECRET..."
-if ! gcloud secrets versions list FRONTEND_SESSION_SECRET --project="$PROJECT" --format="value(name)" >/dev/null 2>&1; then
-  echo "❌ ERROR: FRONTEND_SESSION_SECRET does not exist in Secret Manager."
-  exit 1
-fi
-echo "✅ FRONTEND_SESSION_SECRET found in Secret Manager"
-
-echo ""
-echo "=========================================="
 echo "Step 1: Deploy base service from YAML"
 echo "=========================================="
 gcloud run services replace deployment/cloud-run-service.yaml \
@@ -86,19 +51,7 @@ gcloud run services update $SERVICE \
 
 echo ""
 echo "=========================================="
-echo "Step 3: Update secrets from Google Secret Manager"
-echo "=========================================="
-gcloud run services update $SERVICE \
-  --update-secrets=DATABASE_URL=DATABASE_URL:latest \
-  --update-secrets=JWT_SECRET_KEY=JWT_SECRET_KEY:latest \
-  --update-secrets=FRONTEND_SESSION_SECRET=FRONTEND_SESSION_SECRET:latest \
-  --region=$REGION \
-  --platform=managed \
-  --project=$PROJECT
-
-echo ""
-echo "=========================================="
-echo "Step 4: Set scaling and concurrency"
+echo "Step 3: Set scaling and concurrency"
 echo "=========================================="
 gcloud run services update $SERVICE \
   --min-instances=1 \
