@@ -1512,7 +1512,7 @@ async def database_health_check():
 @app.post("/auth/login", response_model=LoginResponse)
 @apply_rate_limit(settings.RATE_LIMIT_LOGIN)
 async def auth_login(request: Request, response: Response):
-    """Login endpoint with rate limiting. Sets JWT in HTTP-only cookie."""
+    """Login endpoint with rate limiting. Sets JWT in cookie."""
     if not db_manager:
         logger.error("login_attempted_before_db_init", message="Login attempted before database manager was initialized")
         raise HTTPException(
@@ -1539,7 +1539,7 @@ async def auth_login(request: Request, response: Response):
         
         token = create_access_token({"email": user["email"], "role": user["role"]})
         
-        # Set JWT in HTTP-only cookie (session cookie - expires when browser closes)
+        # Set JWT in cookie (session cookie - expires when browser closes)
         cookie_options = auth_config.get_cookie_options()
         set_cookie_params = {
             "key": cookie_options["key"],
