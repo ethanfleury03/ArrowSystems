@@ -611,6 +611,7 @@ jobs:
             --set-env-vars="CORS_ALLOWED_ORIGINS=https://arrow-rag-frontend-70705019874.us-central1.run.app" \
             --set-env-vars="AUTH_COOKIE_SAMESITE=none" \
             --set-env-vars="AUTH_COOKIE_SECURE=true" \
+            --set-env-vars="ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" \
             --set-cloudsql-instances="arrow-rag-support-prod:us-central1:rag-postgres" \
             --execution-environment=gen2 \
             --cpu=2 \
