@@ -73,33 +73,12 @@ export function ChatInterface() {
         const user = await getCurrentUser()
         setUserInfo(user)
         
-        // Check RAG status - call backend directly
+        // Check RAG status - use Next.js API route to avoid CORS preflight issues
         const checkRagStatus = async () => {
           try {
-            const API_BASE = process.env.NEXT_PUBLIC_API_URL
-            if (!API_BASE) {
-              console.error("NEXT_PUBLIC_API_URL is not set")
-              setRagEnabled(false)
-              setRagStatus('disabled')
-              setCheckingRag(false)
-              return
-            }
-            
-            // Get JWT token from cookies for Authorization header
-            const token = getAuthToken()
-            // If token is missing, try to call endpoint anyway with credentials
-            // The backend might accept the request if cookies are sent via credentials: "include"
-            
-            // Build headers - include Authorization if token is available
-            const headers: Record<string, string> = {
-              "Content-Type": "application/json"
-            }
-            if (token) {
-              headers["Authorization"] = `Bearer ${token}`
-            }
-            
-            const ragResponse = await fetch(`${API_BASE}/rag/status`, {
-              headers,
+            // Call Next.js API route instead of backend directly
+            // This avoids CORS preflight (OPTIONS) requests that fail with Cloud Run IAM auth
+            const ragResponse = await fetch('/api/rag/status', {
               credentials: "include"
             })
             if (ragResponse.ok) {
@@ -190,25 +169,9 @@ export function ChatInterface() {
     
     ragPollingIntervalRef.current = setInterval(async () => {
       try {
-        const API_BASE = process.env.NEXT_PUBLIC_API_URL
-        if (!API_BASE) {
-          console.error("NEXT_PUBLIC_API_URL is not set")
-          stopRagPolling()
-          return
-        }
-        
-        // Get JWT token from cookies for Authorization header
-        const token = getAuthToken()
-        // Build headers - include Authorization if token is available
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json"
-        }
-        if (token) {
-          headers["Authorization"] = `Bearer ${token}`
-        }
-        
-        const ragResponse = await fetch(`${API_BASE}/rag/status`, {
-          headers,
+        // Call Next.js API route instead of backend directly
+        // This avoids CORS preflight (OPTIONS) requests that fail with Cloud Run IAM auth
+        const ragResponse = await fetch('/api/rag/status', {
           credentials: "include"
         })
         if (ragResponse.ok) {
