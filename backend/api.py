@@ -477,17 +477,25 @@ async def lifespan(app: FastAPI):
     try:
         # In production mode, download index from GCS BEFORE checking if files exist
         # This ensures files are available when RAG pipeline initializes
+        print(f"[DEBUG] ENV check: ENV={os.getenv('ENV')}, settings.ENV={settings.ENV}, is_prod={settings.is_prod}", flush=True)
         if settings.is_prod:
+            print("[RAG] ✅ Production mode detected - starting GCS index download...", flush=True)
             logger.info("[RAG] Production mode — downloading index from GCS on startup")
             try:
                 from backend.rag.startup_downloader import download_index_from_gcs
+                print("[RAG] Calling download_index_from_gcs()...", flush=True)
                 download_success = download_index_from_gcs()
                 if not download_success:
+                    print("[RAG] ❌ Index download FAILED - RAG will be disabled", flush=True)
                     logger.error("[RAG] Index download failed during startup — RAG will be disabled")
                     logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
                 else:
+                    print("[RAG] ✅ Index download completed successfully", flush=True)
                     logger.info("[RAG] Index download completed successfully during startup")
             except Exception as e:
+                print(f"[RAG] ❌ Exception during download: {type(e).__name__}: {str(e)}", flush=True)
+                import traceback
+                traceback.print_exc()
                 logger.error(
                     "[RAG] Exception during startup index download — RAG will be disabled",
                     error=str(e),
@@ -495,6 +503,8 @@ async def lifespan(app: FastAPI):
                     exc_info=True
                 )
                 logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
+        else:
+            print(f"[RAG] ⚠️ Not in production mode - skipping download (ENV={os.getenv('ENV')}, is_prod={settings.is_prod})", flush=True)
         
         # Resolve storage path (handles prod vs dev paths)
         logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path (lazy init mode)")

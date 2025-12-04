@@ -48,6 +48,7 @@ def download_index_from_gcs() -> bool:
         )
         return False
     
+    print(f"[RAG] Starting GCS index download from gs://{BUCKET_NAME}/{INDEX_PREFIX} to {LOCAL_DIR}...", flush=True)
     logger.info("[RAG] Starting GCS index download...", 
                 bucket=BUCKET_NAME, 
                 prefix=INDEX_PREFIX,
@@ -69,10 +70,13 @@ def download_index_from_gcs() -> bool:
     
     # Initialize GCS client
     try:
+        print(f"[RAG] Initializing GCS client for bucket: {BUCKET_NAME}...", flush=True)
         client = storage.Client()
         bucket = client.bucket(BUCKET_NAME)
+        print(f"[RAG] ✅ GCS client initialized successfully", flush=True)
         logger.info("[RAG] GCS client initialized", bucket=BUCKET_NAME)
     except Exception as e:
+        print(f"[RAG] ❌ Failed to initialize GCS client: {type(e).__name__}: {str(e)}", flush=True)
         logger.error(
             "[RAG] Failed to initialize GCS client",
             bucket=BUCKET_NAME,
@@ -106,11 +110,13 @@ def download_index_from_gcs() -> bool:
                 continue
             
             # Download file
+            print(f"[RAG] Downloading {filename} from gs://{BUCKET_NAME}/{gcs_path}...", flush=True)
             logger.info("[RAG] Downloading file...", filename=filename, gcs_path=gcs_path)
             blob.download_to_filename(str(local_file_path))
             
             # Verify download
             if not local_file_path.exists():
+                print(f"[RAG] ❌ Download failed: {filename} not found after download", flush=True)
                 logger.error(
                     "[RAG] Download completed but file not found locally",
                     filename=filename,
@@ -120,6 +126,7 @@ def download_index_from_gcs() -> bool:
                 continue
             
             file_size = local_file_path.stat().st_size
+            print(f"[RAG] ✅ Downloaded {filename} ({file_size:,} bytes)", flush=True)
             logger.info(
                 f"[RAG] Downloaded: {filename} ({file_size} bytes)",
                 filename=filename,
@@ -219,6 +226,8 @@ def download_index_from_gcs() -> bool:
         required_files=REQUIRED_FILES,
         message="Ready to load RAG index"
     )
+    
+    print(f"[RAG] ✅ Index download and validation complete - all {len(required_success)} required files downloaded", flush=True)
     
     return True
 
