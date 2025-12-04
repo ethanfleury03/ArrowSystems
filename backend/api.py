@@ -625,7 +625,8 @@ async def startup_event():
                         
                         if not initialized:
                             # Wait while initialization is in progress, with timeout
-                            import time
+                            # Use asyncio.sleep() to avoid blocking the event loop
+                            import asyncio
                             
                             max_wait = 30  # seconds
                             wait_interval = 1
@@ -633,7 +634,7 @@ async def startup_event():
                             
                             while waited < max_wait and rag_pipeline.is_initializing():
                                 print(f"[RAG] ⏳ Pipeline initializing, waiting... ({waited}s)", flush=True)
-                                time.sleep(wait_interval)
+                                await asyncio.sleep(wait_interval)
                                 waited += wait_interval
                                 if rag_pipeline.is_initialized():
                                     initialized = True
@@ -1119,15 +1120,15 @@ async def rag_status_public():
                 initialized_result = rag_pipeline.ensure_initialized(storage_path)
                 
                 # If it returned False, it might be initializing in another thread
-                # Wait a bit and check status
+                # Wait a bit and check status (use asyncio.sleep to avoid blocking event loop)
                 if not initialized_result:
-                    import time
+                    import asyncio
                     max_wait = 5.0  # Wait up to 5 seconds for status check
                     wait_interval = 0.5
                     waited = 0.0
                     
                     while waited < max_wait and rag_pipeline.is_initializing():
-                        time.sleep(wait_interval)
+                        await asyncio.sleep(wait_interval)
                         waited += wait_interval
                         if rag_pipeline.is_initialized():
                             break
