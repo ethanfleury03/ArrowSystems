@@ -9,8 +9,6 @@ Version: 1.0.0
 Author: Arrow Systems Inc
 """
 
-print(">>> importing backend.api (this should appear once per worker)", flush=True)
-
 from __future__ import annotations
 
 import os
@@ -57,6 +55,9 @@ from .config.env import settings
 # Configure structured logging early (using centralized settings)
 configure_logging(environment=settings.ENV)
 logger = get_logger(__name__)
+
+# Debug print to confirm module is being imported (must be after all imports)
+print(">>> importing backend.api (this should appear once per worker)", flush=True)
 
 
 def get_error_detail(error: Exception, generic_message: str) -> str:
