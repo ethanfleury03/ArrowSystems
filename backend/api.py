@@ -600,36 +600,94 @@ async def startup_event():
             # Now attempt to initialize the RAG pipeline from the local path
             if storage_path:
                 print("[RAG] Initializing RAG pipeline from local index...", flush=True)
-                try:
-                    initialized = rag_pipeline.ensure_initialized(storage_path)
-                    if initialized:
-                        print("[RAG] ✅ RAG pipeline initialized successfully", flush=True)
-                        logger.info("rag_pipeline_initialized", 
-                                  storage_path=storage_path,
-                                  message="RAG pipeline initialized successfully during startup")
-                        app.state.rag_enabled = True
-                    else:
-                        print("[RAG] ❌ RAG pipeline init failed - check logs for details", flush=True)
-                        logger.warning("rag_pipeline_init_failed", 
-                                     storage_path=storage_path,
-                                     message="RAG pipeline initialization failed during startup")
-                        app.state.rag_enabled = False
-                except Exception as e:
-                    print(f"[RAG] ❌ RAG pipeline init failed: {type(e).__name__}: {str(e)}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-                    logger.error("rag_pipeline_init_exception", 
-                               storage_path=storage_path,
-                               error=str(e),
-                               error_type=type(e).__name__,
-                               exc_info=True,
-                               message="Exception during RAG pipeline initialization")
+                print(f"[RAG] Storage path: {storage_path}", flush=True)
+                print(f"[RAG] Checking if index files exist...", flush=True)
+                
+                # Verify required index files exist before attempting initialization
+                required_files = ["docstore.json", "index_store.json", "default__vector_store.json"]
+                index_files_exist = all(
+                    os.path.exists(os.path.join(storage_path, filename))
+                    for filename in required_files
+                )
+                
+                if not index_files_exist:
+                    missing = [f for f in required_files if not os.path.exists(os.path.join(storage_path, f))]
+                    print(f"[RAG] ❌ Missing required files: {missing}", flush=True)
+                    logger.error("rag_startup_missing_files", 
+                                storage_path=storage_path,
+                                missing_files=missing,
+                                message="Required index files missing after GCS download")
                     app.state.rag_enabled = False
+                else:
+                    print(f"[RAG] ✅ All required files present, initializing pipeline...", flush=True)
+                    try:
+                        initialized = rag_pipeline.ensure_initialized(storage_path)
+                        
+                        if not initialized:
+                            # Wait while initialization is in progress, with timeout
+                            import time
+                            
+                            max_wait = 30  # seconds
+                            wait_interval = 1
+                            waited = 0
+                            
+                            while waited < max_wait and rag_pipeline.is_initializing():
+                                print(f"[RAG] ⏳ Pipeline initializing, waiting... ({waited}s)", flush=True)
+                                time.sleep(wait_interval)
+                                waited += wait_interval
+                                if rag_pipeline.is_initialized():
+                                    initialized = True
+                                    break
+                            
+                            # Final check
+                            if not initialized:
+                                debug_status = rag_pipeline.debug_status()
+                                error_msg = debug_status.get("last_error", "Unknown error")
+                                print(f"[RAG] ❌ Pipeline initialization failed after wait: {error_msg}", flush=True)
+                                logger.error(
+                                    "rag_pipeline_init_failed_after_wait",
+                                    storage_path=storage_path,
+                                    last_error=error_msg,
+                                    debug_status=debug_status,
+                                    message="RAG pipeline initialization failed after waiting",
+                                )
+                                app.state.rag_enabled = False
+                        
+                        # If we reached here and initialized is True:
+                        if initialized:
+                            print("[RAG] ✅ RAG pipeline initialized successfully", flush=True)
+                            logger.info(
+                                "rag_pipeline_initialized",
+                                storage_path=storage_path,
+                                message="RAG pipeline initialized successfully during startup",
+                            )
+                            app.state.rag_enabled = True
+                        else:
+                            # Should not reach here if we handled it above, but safety check
+                            app.state.rag_enabled = False
+                            
+                    except Exception as e:
+                        print(f"[RAG] ❌ RAG pipeline init exception: {type(e).__name__}: {e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+                        logger.error(
+                            "rag_pipeline_init_exception",
+                            storage_path=storage_path,
+                            error=str(e),
+                            error_type=type(e).__name__,
+                            exc_info=True,
+                            message="Exception during RAG pipeline initialization",
+                        )
+                        app.state.rag_enabled = False
             else:
                 print("[RAG] ⚠️ No storage path available - RAG will be disabled", flush=True)
-                logger.warning("rag_index_not_found", 
-                             message="RAG index not found. Continuing startup without RAG. "
-                                    "Non-RAG endpoints (e.g., /auth/login, /health) will work normally.")
+                logger.warning(
+                    "rag_index_not_found",
+                    message=(
+                        "RAG index not found. Continuing startup without RAG. "
+                        "Non-RAG endpoints (e.g., /auth/login, /health) will work normally."
+                    ),
+                )
                 app.state.rag_enabled = False
                 
         except Exception as e:
@@ -1057,8 +1115,22 @@ async def rag_status_public():
                 logger.info("rag_status_triggering_lazy_init", 
                            storage_path=storage_path,
                            message="Index files exist but pipeline not initialized - triggering background load")
-                # Trigger initialization in background (non-blocking)
-                rag_pipeline.ensure_initialized(storage_path)
+                # Trigger initialization and wait for it to complete (or timeout)
+                initialized_result = rag_pipeline.ensure_initialized(storage_path)
+                
+                # If it returned False, it might be initializing in another thread
+                # Wait a bit and check status
+                if not initialized_result:
+                    import time
+                    max_wait = 5.0  # Wait up to 5 seconds for status check
+                    wait_interval = 0.5
+                    waited = 0.0
+                    
+                    while waited < max_wait and rag_pipeline.is_initializing():
+                        time.sleep(wait_interval)
+                        waited += wait_interval
+                        if rag_pipeline.is_initialized():
+                            break
             elif not index_dir_exists:
                 logger.debug("rag_status_no_index_files",
                            storage_path=storage_path,
@@ -1067,6 +1139,14 @@ async def rag_status_public():
         # Get current status after initialization attempt
         initialized = rag_pipeline.is_initialized()
         debug_status = rag_pipeline.debug_status() if rag_pipeline else {}
+        
+        # Add explicit logging for debugging
+        logger.info("rag_status_check_result",
+                   initialized=initialized,
+                   initializing=debug_status.get("initializing", False),
+                   storage_path=storage_path,
+                   index_dir_exists=index_dir_exists,
+                   last_error=debug_status.get("last_error"))
         
         # Build detailed status message
         if initialized:
