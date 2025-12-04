@@ -3472,14 +3472,17 @@ class RAGOrchestrator:
                                  storage_dir=storage_dir,
                                  error=str(list_error))
             
-            # If ingestion is disabled, don't try to create index or raise error
-            # This allows FastAPI to start without the index
-            if should_skip_ingestion():
+            # IMPORTANT: Re-check file existence before giving up
+            # Files might have just been downloaded by GCS downloader
+            docstore_exists_recheck = os.path.exists(docstore_path)
+            index_exists_recheck = dir_exists and docstore_exists_recheck
+            
+            if not index_exists_recheck and should_skip_ingestion():
                 logger.warning(
                     "index_not_found_ingestion_disabled",
                     storage_dir=storage_dir,
                     directory_exists=dir_exists,
-                    docstore_exists=docstore_exists,
+                    docstore_exists=docstore_exists_recheck,
                     message="Index not found but ingestion is disabled (Cloud Run). RAG pipeline will not be functional. "
                            "To enable RAG, ensure index is uploaded to GCS and Cloud Run volume is mounted correctly."
                 )
@@ -3490,31 +3493,40 @@ class RAGOrchestrator:
                           storage_dir=storage_dir,
                           reason="Index not found and ingestion disabled")
                 return
-            
-            if is_test_mode():
-                # In test mode, create empty index if directory doesn't exist
-                logger.info(f"test_mode_index_not_found_creating_new", storage_dir=storage_dir)
-                from llama_index.core import VectorStoreIndex
-                os.makedirs(storage_dir, exist_ok=True)
-                self.index = VectorStoreIndex(nodes=[], show_progress=False)
-                # Persist the empty index so it can be loaded next time
-                self.index.storage_context.persist(persist_dir=storage_dir)
-                # Initialize retriever with empty index
-                # Note: HybridRetriever is defined in this same module, so we can reference it directly
-                self.retriever = HybridRetriever(
-                    index=self.index,
-                    embed_model=self.embed_model,
-                    reranker=self.reranker,
-                    document_evaluator=self.document_evaluator
-                )
-                logger.info("test_mode_empty_index_created")
-                return
+            elif index_exists_recheck:
+                # Files exist now, continue with loading
+                logger.info("orchestrator_index_files_found_after_recheck",
+                           storage_dir=storage_dir,
+                           docstore_exists=docstore_exists_recheck,
+                           message="Index files found after recheck, proceeding with load")
+                # Fall through to load the index (don't return early)
             else:
-                raise FileNotFoundError(
-                    f"Index not found at {storage_dir}. "
-                    f"Run 'python -m backend.ingest' to build the index first, "
-                    f"or pull from git if using pre-built index."
-                )
+                # Files still don't exist after recheck, and ingestion is enabled
+                # Handle based on test mode or raise error
+                if is_test_mode():
+                    # In test mode, create empty index if directory doesn't exist
+                    logger.info(f"test_mode_index_not_found_creating_new", storage_dir=storage_dir)
+                    from llama_index.core import VectorStoreIndex
+                    os.makedirs(storage_dir, exist_ok=True)
+                    self.index = VectorStoreIndex(nodes=[], show_progress=False)
+                    # Persist the empty index so it can be loaded next time
+                    self.index.storage_context.persist(persist_dir=storage_dir)
+                    # Initialize retriever with empty index
+                    # Note: HybridRetriever is defined in this same module, so we can reference it directly
+                    self.retriever = HybridRetriever(
+                        index=self.index,
+                        embed_model=self.embed_model,
+                        reranker=self.reranker,
+                        document_evaluator=self.document_evaluator
+                    )
+                    logger.info("test_mode_empty_index_created")
+                    return
+                else:
+                    raise FileNotFoundError(
+                        f"Index not found at {storage_dir}. "
+                        f"Run 'python -m backend.ingest' to build the index first, "
+                        f"or pull from git if using pre-built index."
+                    )
         
         logger.info("orchestrator_loading_index", storage_dir=storage_dir, message="🔄 Loading index from storage...")
         
