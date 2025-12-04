@@ -384,232 +384,275 @@ async def startup_event():
     """
     FastAPI startup event handler.
     Handles application initialization including GCS index download and RAG pipeline initialization.
+    Wrapped in try/except to prevent unhandled exceptions from killing the worker.
     """
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
     
     print("[DEBUG] FastAPI startup_event running", flush=True)
     
-    # Log effective ENV value to confirm Cloud Run env vars are being used
-    logger.info("env_runtime_value", 
-               env=settings.ENV,
-               env_var_value=os.getenv("ENV"),
-               is_prod=settings.is_prod,
-               is_dev=settings.is_dev,
-               message=f"Runtime environment: {settings.ENV} (is_prod={settings.is_prod}, is_dev={settings.is_dev})")
-    logger.info("server_starting", environment=settings.ENV)
-
-    # Ensure logs directory exists for feedback storage
-    os.makedirs("logs", exist_ok=True)
     try:
-        feedback_path = os.path.join("logs", "saved_answers.json")
-        feedback_manager = FeedbackManager(feedback_path)
-        logger.info("feedback_manager_initialized", path=feedback_path)
-    except Exception as e:
-        feedback_manager = None
-        logger.warning("feedback_manager_init_failed", error=str(e), exc_info=True)
+        # Log effective ENV value to confirm Cloud Run env vars are being used
+        logger.info("env_runtime_value", 
+                   env=settings.ENV,
+                   env_var_value=os.getenv("ENV"),
+                   is_prod=settings.is_prod,
+                   is_dev=settings.is_dev,
+                   message=f"Runtime environment: {settings.ENV} (is_prod={settings.is_prod}, is_dev={settings.is_dev})")
+        logger.info("server_starting", environment=settings.ENV)
 
-    # Log database connection info and validate connection
-    from .utils.db import _validate_database_connection
-    logger.info(f"Database URL configured: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'database'}")
-    _validate_database_connection(engine, DATABASE_URL)
-    
-    # Run database migrations
-    if settings.is_dev:
-        # Development: auto-run migrations
-        # NOTE: Migrations only run if there are pending changes. Once applied, 
-        # this is just a quick check (milliseconds). The slow part is only when
-        # actual schema changes need to be applied (first time or after new migrations).
-        logger.info("running_migrations", environment="dev")
-        success, message = run_migrations()
-        if not success:
-            logger.error("migration_failed", message=message)
-            raise RuntimeError(f"Database migration failed: {message}")
-        logger.info("migrations_completed", message=message)
-    else:
-        # Production: check for pending migrations and fail fast
-        if check_pending_migrations():
-            status = check_migration_status()
-            logger.error(
-                "pending_migrations_detected",
-                current_revision=status.get("current_revision"),
-                head_revision=status.get("head_revision"),
-            )
-            raise RuntimeError(
-                "Database schema is outdated. Pending migrations detected. "
-                "Run migrations manually before starting the application. "
-                f"Current: {status.get('current_revision') or 'none'}, "
-                f"Expected: {status.get('head_revision') or 'none'}"
-            )
-        logger.info("migration_check_passed", message="Database is up to date")
-    
-    # Initialize database
-    try:
-        db_manager = DatabaseManager()
-        saved_response_manager = SavedResponseManager(db_manager)
-        logger.info("database_manager_created", database="postgres")
-        
-        # Seed default users (non-critical - continue even if this fails)
+        # Ensure logs directory exists for feedback storage
+        os.makedirs("logs", exist_ok=True)
         try:
-            await db_manager.seed_default_users()
-            logger.info("default_users_seeded", database="postgres")
-        except Exception as seed_error:
-            logger.warning("seed_default_users_failed", error=str(seed_error), exc_info=True)
-            # Continue startup even if seeding fails - users can be created manually
-        
-        logger.info("database_initialized", database="postgres")
-    except Exception as db_init_error:
-        logger.error("database_initialization_failed", error=str(db_init_error), exc_info=True)
-        raise RuntimeError(f"Failed to initialize database manager: {db_init_error}") from db_init_error
-    
-    # Run database connection check
-    is_healthy, integrity_message = check_database_integrity()
-    if not is_healthy:
-        logger.error("database_connection_check_failed", message=integrity_message)
-        raise RuntimeError(f"Database connection check failed: {integrity_message}")
-    logger.info("database_connection_check_passed", message=integrity_message)
-    
-    # Resolve RAG storage path and initialize RAG pipeline
-    from backend.utils.storage_path import resolve_storage_path
-    from backend.utils.test_mode import is_test_mode, get_index_dir
-    
-    rag_pipeline = None
-    storage_path = None
-    
-    try:
-        # In production mode, download index from GCS BEFORE checking if files exist
-        # This ensures files are available when RAG pipeline initializes
-        print(f"[DEBUG] ENV check: ENV={os.getenv('ENV')}, settings.ENV={settings.ENV}, is_prod={settings.is_prod}", flush=True)
-        if settings.is_prod:
-            print("[RAG] ✅ Production mode detected - starting GCS index download...", flush=True)
-            logger.info("[RAG] Production mode — downloading index from GCS on startup")
-            try:
-                from backend.rag.startup_downloader import download_index_from_gcs
-                print("[RAG] Calling download_index_from_gcs()...", flush=True)
-                download_success = download_index_from_gcs()
-                if not download_success:
-                    print("[RAG] ❌ Index download FAILED - RAG will be disabled", flush=True)
-                    logger.error("[RAG] Index download failed during startup — RAG will be disabled")
-                    logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
-                else:
-                    print("[RAG] ✅ Index download completed successfully", flush=True)
-                    logger.info("[RAG] Index download completed successfully during startup")
-            except Exception as e:
-                print(f"[RAG] ❌ Exception during download: {type(e).__name__}: {str(e)}", flush=True)
-                import traceback
-                traceback.print_exc()
-                logger.error(
-                    "[RAG] Exception during startup index download — RAG will be disabled",
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    exc_info=True
-                )
-                logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
-        else:
-            print(f"[RAG] ⚠️ Not in production mode - skipping download (ENV={os.getenv('ENV')}, is_prod={settings.is_prod})", flush=True)
-        
-        # Resolve storage path (handles prod vs dev paths)
-        logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path")
-        
-        if is_test_mode():
-            storage_path = get_index_dir()
-            logger.info("test_mode_enabled", storage_path=storage_path)
-            if not os.path.exists(storage_path):
-                os.makedirs(storage_path, exist_ok=True)
-        else:
-            storage_path_obj = resolve_storage_path()
-            if storage_path_obj is None:
-                storage_path = None
-                logger.error("rag_storage_path_resolution_failed", 
-                           message="resolve_storage_path() returned None - no valid index directory found. "
-                                  "RAG will be disabled until index is available. "
-                                  "In production, this should never happen - check Cloud Run volume mount configuration.")
-            else:
-                storage_path = str(storage_path_obj)
-                # Ensure it's absolute (should always be in prod)
-                storage_path_abs = Path(storage_path).resolve()
-                storage_path = str(storage_path_abs)
-                
-                logger.info("rag_storage_path_resolved", 
-                          storage_path=storage_path,
-                          is_absolute=storage_path_abs.is_absolute(),
-                          exists=storage_path_abs.exists(),
-                          is_dir=storage_path_abs.is_dir() if storage_path_abs.exists() else False,
-                          message=f"RAG storage path resolved: {storage_path} (absolute: {storage_path_abs.is_absolute()})")
-        
-        # Create pipeline instance
-        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
-        
-        # Store storage path in app state
-        app.state.rag_storage_path = storage_path
-        
-        # Now attempt to initialize the RAG pipeline from the local path
-        if storage_path:
-            print("[RAG] Initializing RAG pipeline from local index...", flush=True)
-            try:
-                initialized = rag_pipeline.ensure_initialized(storage_path)
-                if initialized:
-                    print("[RAG] ✅ RAG pipeline initialized successfully", flush=True)
-                    logger.info("rag_pipeline_initialized", 
-                              storage_path=storage_path,
-                              message="RAG pipeline initialized successfully during startup")
-                    app.state.rag_enabled = True
-                else:
-                    print("[RAG] ❌ RAG pipeline init failed - check logs for details", flush=True)
-                    logger.warning("rag_pipeline_init_failed", 
-                                 storage_path=storage_path,
-                                 message="RAG pipeline initialization failed during startup")
-                    app.state.rag_enabled = False
-            except Exception as e:
-                print(f"[RAG] ❌ RAG pipeline init failed: {type(e).__name__}: {str(e)}", flush=True)
-                import traceback
-                traceback.print_exc()
-                logger.error("rag_pipeline_init_exception", 
-                           storage_path=storage_path,
-                           error=str(e),
-                           error_type=type(e).__name__,
-                           exc_info=True,
-                           message="Exception during RAG pipeline initialization")
-                app.state.rag_enabled = False
-        else:
-            print("[RAG] ⚠️ No storage path available - RAG will be disabled", flush=True)
-            logger.warning("rag_index_not_found", 
-                         message="RAG index not found. Continuing startup without RAG. "
-                                "Non-RAG endpoints (e.g., /auth/login, /health) will work normally.")
-            app.state.rag_enabled = False
+            feedback_path = os.path.join("logs", "saved_answers.json")
+            feedback_manager = FeedbackManager(feedback_path)
+            logger.info("feedback_manager_initialized", path=feedback_path)
+        except Exception as e:
+            feedback_manager = None
+            logger.warning("feedback_manager_init_failed", error=str(e), exc_info=True)
+
+        # Database initialization - wrapped in try/except to prevent worker crash
+        try:
+            # Log database connection info and validate connection
+            from .utils.db import _validate_database_connection
+            logger.info(f"Database URL configured: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'database'}")
+            _validate_database_connection(engine, DATABASE_URL)
             
+            # Run database migrations
+            if settings.is_dev:
+                # Development: auto-run migrations
+                # NOTE: Migrations only run if there are pending changes. Once applied, 
+                # this is just a quick check (milliseconds). The slow part is only when
+                # actual schema changes need to be applied (first time or after new migrations).
+                logger.info("running_migrations", environment="dev")
+                success, message = run_migrations()
+                if not success:
+                    logger.error("migration_failed", message=message)
+                    # Don't raise - log error but allow app to start
+                    print(f"[STARTUP] ⚠️ Database migration failed: {message}", flush=True)
+                else:
+                    logger.info("migrations_completed", message=message)
+            else:
+                # Production: check for pending migrations and fail fast
+                if check_pending_migrations():
+                    status = check_migration_status()
+                    logger.error(
+                        "pending_migrations_detected",
+                        current_revision=status.get("current_revision"),
+                        head_revision=status.get("head_revision"),
+                    )
+                    # Don't raise - log error but allow app to start
+                    print(f"[STARTUP] ⚠️ Pending migrations detected. Current: {status.get('current_revision') or 'none'}, Expected: {status.get('head_revision') or 'none'}", flush=True)
+                else:
+                    logger.info("migration_check_passed", message="Database is up to date")
+            
+            # Initialize database
+            try:
+                db_manager = DatabaseManager()
+                saved_response_manager = SavedResponseManager(db_manager)
+                logger.info("database_manager_created", database="postgres")
+                
+                # Seed default users (non-critical - continue even if this fails)
+                try:
+                    await db_manager.seed_default_users()
+                    logger.info("default_users_seeded", database="postgres")
+                except Exception as seed_error:
+                    logger.warning("seed_default_users_failed", error=str(seed_error), exc_info=True)
+                    # Continue startup even if seeding fails - users can be created manually
+                
+                logger.info("database_initialized", database="postgres")
+            except Exception as db_init_error:
+                logger.error("database_initialization_failed", error=str(db_init_error), exc_info=True)
+                # Don't raise - log error but allow app to start
+                print(f"[STARTUP] ⚠️ Database initialization failed: {db_init_error}", flush=True)
+                db_manager = None
+                saved_response_manager = None
+            
+            # Run database connection check (non-fatal)
+            if db_manager is not None:
+                try:
+                    is_healthy, integrity_message = check_database_integrity()
+                    if not is_healthy:
+                        logger.error("database_connection_check_failed", message=integrity_message)
+                        print(f"[STARTUP] ⚠️ Database connection check failed: {integrity_message}", flush=True)
+                    else:
+                        logger.info("database_connection_check_passed", message=integrity_message)
+                except Exception as db_check_error:
+                    logger.warning("database_connection_check_exception", error=str(db_check_error), exc_info=True)
+                    print(f"[STARTUP] ⚠️ Database connection check exception: {db_check_error}", flush=True)
+        except Exception as db_error:
+            # Catch any other database-related errors
+            logger.error("database_startup_error", error=str(db_error), error_type=type(db_error).__name__, exc_info=True)
+            print(f"[STARTUP] ⚠️ Database startup error: {type(db_error).__name__}: {db_error}", flush=True)
+            db_manager = None
+            saved_response_manager = None
+    
+        # Resolve RAG storage path and initialize RAG pipeline
+        from backend.utils.storage_path import resolve_storage_path
+        from backend.utils.test_mode import is_test_mode, get_index_dir
+        
+        rag_pipeline = None
+        storage_path = None
+        
+        try:
+            # In production mode, download index from GCS BEFORE checking if files exist
+            # This ensures files are available when RAG pipeline initializes
+            print(f"[DEBUG] ENV check: ENV={os.getenv('ENV')}, settings.ENV={settings.ENV}, is_prod={settings.is_prod}", flush=True)
+            if settings.is_prod:
+                print("[RAG] ✅ Production mode detected - starting GCS index download...", flush=True)
+                logger.info("[RAG] Production mode — downloading index from GCS on startup")
+                try:
+                    from backend.rag.startup_downloader import download_index_from_gcs
+                    print("[RAG] Calling download_index_from_gcs()...", flush=True)
+                    download_success = download_index_from_gcs()
+                    if not download_success:
+                        print("[RAG] ❌ Index download FAILED - RAG will be disabled", flush=True)
+                        logger.error("[RAG] Index download failed during startup — RAG will be disabled")
+                        logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
+                    else:
+                        print("[RAG] ✅ Index download completed successfully", flush=True)
+                        logger.info("[RAG] Index download completed successfully during startup")
+                except Exception as e:
+                    print(f"[RAG] ❌ Exception during download: {type(e).__name__}: {str(e)}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    logger.error(
+                        "[RAG] Exception during startup index download — RAG will be disabled",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        exc_info=True
+                    )
+                    logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
+            else:
+                print(f"[RAG] ⚠️ Not in production mode - skipping download (ENV={os.getenv('ENV')}, is_prod={settings.is_prod})", flush=True)
+            
+            # Resolve storage path (handles prod vs dev paths)
+            logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path")
+            
+            if is_test_mode():
+                storage_path = get_index_dir()
+                logger.info("test_mode_enabled", storage_path=storage_path)
+                if not os.path.exists(storage_path):
+                    os.makedirs(storage_path, exist_ok=True)
+            else:
+                storage_path_obj = resolve_storage_path()
+                if storage_path_obj is None:
+                    storage_path = None
+                    logger.error("rag_storage_path_resolution_failed", 
+                               message="resolve_storage_path() returned None - no valid index directory found. "
+                                      "RAG will be disabled until index is available. "
+                                      "In production, this should never happen - check Cloud Run volume mount configuration.")
+                else:
+                    storage_path = str(storage_path_obj)
+                    # Ensure it's absolute (should always be in prod)
+                    storage_path_abs = Path(storage_path).resolve()
+                    storage_path = str(storage_path_abs)
+                    
+                    logger.info("rag_storage_path_resolved", 
+                              storage_path=storage_path,
+                              is_absolute=storage_path_abs.is_absolute(),
+                              exists=storage_path_abs.exists(),
+                              is_dir=storage_path_abs.is_dir() if storage_path_abs.exists() else False,
+                              message=f"RAG storage path resolved: {storage_path} (absolute: {storage_path_abs.is_absolute()})")
+            
+            # Create pipeline instance
+            cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
+            
+            # Store storage path in app state
+            app.state.rag_storage_path = storage_path
+            
+            # Now attempt to initialize the RAG pipeline from the local path
+            if storage_path:
+                print("[RAG] Initializing RAG pipeline from local index...", flush=True)
+                try:
+                    initialized = rag_pipeline.ensure_initialized(storage_path)
+                    if initialized:
+                        print("[RAG] ✅ RAG pipeline initialized successfully", flush=True)
+                        logger.info("rag_pipeline_initialized", 
+                                  storage_path=storage_path,
+                                  message="RAG pipeline initialized successfully during startup")
+                        app.state.rag_enabled = True
+                    else:
+                        print("[RAG] ❌ RAG pipeline init failed - check logs for details", flush=True)
+                        logger.warning("rag_pipeline_init_failed", 
+                                     storage_path=storage_path,
+                                     message="RAG pipeline initialization failed during startup")
+                        app.state.rag_enabled = False
+                except Exception as e:
+                    print(f"[RAG] ❌ RAG pipeline init failed: {type(e).__name__}: {str(e)}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    logger.error("rag_pipeline_init_exception", 
+                               storage_path=storage_path,
+                               error=str(e),
+                               error_type=type(e).__name__,
+                               exc_info=True,
+                               message="Exception during RAG pipeline initialization")
+                    app.state.rag_enabled = False
+            else:
+                print("[RAG] ⚠️ No storage path available - RAG will be disabled", flush=True)
+                logger.warning("rag_index_not_found", 
+                             message="RAG index not found. Continuing startup without RAG. "
+                                    "Non-RAG endpoints (e.g., /auth/login, /health) will work normally.")
+                app.state.rag_enabled = False
+                
+        except Exception as e:
+            # Log the error but DO NOT raise - allow app to start
+            logger.error("rag_startup_failed", 
+                        error=str(e), 
+                        error_type=type(e).__name__,
+                        exc_info=True,
+                        message=f"Failed during RAG startup: {type(e).__name__}: {str(e)}. "
+                               "Server will start normally, but RAG will be disabled.")
+            print(f"[RAG] ❌ RAG startup failed: {type(e).__name__}: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+            storage_path = None
+            rag_pipeline = None
+            app.state.rag_storage_path = None
+            app.state.rag_enabled = False
+        
+        # Set RAG enabled flag on app state
+        if not hasattr(app.state, 'rag_enabled'):
+            app.state.rag_enabled = False
+        
+        # Initialize query summarizer
+        try:
+            query_summarizer = QuerySummarizer(
+                enabled=True,  # Enable by default
+                min_length=500  # Summarize queries >500 chars
+            )
+            logger.info("query_summarizer_initialized", enabled=True, min_length=500)
+        except Exception as e:
+            logger.warning("query_summarizer_init_failed", error=str(e), exc_info=True)
+            query_summarizer = None
+        
+        # Set startup time for uptime calculation
+        app.state.start_time = time.time()
+        
+        logger.info("server_started", environment=settings.ENV, startup_time=time.time(), rag_enabled=app.state.rag_enabled)
+        
     except Exception as e:
-        # Log the error but DO NOT raise - allow app to start
-        logger.error("rag_startup_failed", 
+        # Outer try/except to catch ANY unhandled exception and prevent worker crash
+        print(f"[STARTUP] ❌ Unhandled startup error: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        logger.error("startup_event_failed", 
                     error=str(e), 
                     error_type=type(e).__name__,
                     exc_info=True,
-                    message=f"Failed during RAG startup: {type(e).__name__}: {str(e)}. "
-                           "Server will start normally, but RAG will be disabled.")
-        storage_path = None
-        rag_pipeline = None
-        app.state.rag_storage_path = None
-        app.state.rag_enabled = False
-    
-    # Set RAG enabled flag on app state
-    if not hasattr(app.state, 'rag_enabled'):
-        app.state.rag_enabled = False
-    
-    # Initialize query summarizer
-    try:
-        query_summarizer = QuerySummarizer(
-            enabled=True,  # Enable by default
-            min_length=500  # Summarize queries >500 chars
-        )
-        logger.info("query_summarizer_initialized", enabled=True, min_length=500)
-    except Exception as e:
-        logger.warning("query_summarizer_init_failed", error=str(e), exc_info=True)
-        query_summarizer = None
-    
-    # Set startup time for uptime calculation
-    app.state.start_time = time.time()
-    
-    logger.info("server_started", environment=settings.ENV, startup_time=time.time(), rag_enabled=app.state.rag_enabled)
+                    message=f"Unhandled exception in startup event: {type(e).__name__}: {str(e)}. "
+                           "Worker will continue but some features may be unavailable.")
+        # DO NOT re-raise - let the app start even if startup fails
+        # Initialize defaults to prevent None errors
+        if db_manager is None:
+            db_manager = None
+        if rag_pipeline is None:
+            rag_pipeline = None
+        if not hasattr(app.state, 'rag_enabled'):
+            app.state.rag_enabled = False
+        if not hasattr(app.state, 'start_time'):
+            app.state.start_time = time.time()
 
 
 @app.on_event("shutdown")
