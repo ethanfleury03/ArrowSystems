@@ -50,6 +50,18 @@ class Settings:
         
         # Rate Limiting Configuration
         self._load_rate_limit_config()
+        
+        # Anthropic API Key (optional - for Claude LLM integration)
+        self._load_anthropic_key()
+    
+    def _load_anthropic_key(self) -> None:
+        """Load Anthropic API key - optional, used for Claude LLM integration."""
+        self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        if self.anthropic_api_key:
+            self.anthropic_api_key = self.anthropic_api_key.strip().rstrip('\r\n')
+            print("[SETTINGS] ANTHROPIC_API_KEY detected in environment.", flush=True)
+        else:
+            print("[SETTINGS] ANTHROPIC_API_KEY not set; Anthropic LLM disabled.", flush=True)
     
     def _load_secrets(self) -> None:
         """Load required secrets - REQUIRED in production, optional in dev."""

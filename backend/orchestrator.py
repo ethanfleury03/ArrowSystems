@@ -29,8 +29,38 @@ import hashlib
 
 from .logging_config import get_logger
 from .logging_context import get_user_id, get_user_role
+from .config.env import settings
 
 logger = get_logger(__name__)
+
+
+# ============================================================================
+# ANTHROPIC CLIENT HELPER
+# ============================================================================
+
+def get_anthropic_client():
+    """
+    Return an Anthropic client if the API key is available, else None.
+    Uses settings.anthropic_api_key or falls back to environment variable.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        print("[LLM] Anthropic package not installed; skipping Anthropic client.", flush=True)
+        return None
+    
+    # Get API key from settings first, then fall back to environment
+    api_key = settings.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
+    
+    if api_key:
+        api_key = api_key.strip().rstrip('\r\n')  # Remove any trailing whitespace/CRLF
+    
+    if not api_key:
+        print("[LLM] ANTHROPIC_API_KEY not set; Anthropic client disabled.", flush=True)
+        return None
+    
+    print("[LLM] Anthropic client initialized with API key from settings/env.", flush=True)
+    return anthropic.Anthropic(api_key=api_key)
 
 
 # ============================================================================
@@ -535,19 +565,11 @@ class ClaudeIntentClassifier:
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
         try:
-            import anthropic
+            self.claude_client = get_anthropic_client()
             
-            # Get API key from environment and strip any Windows line endings
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if api_key:
-                api_key = api_key.strip().rstrip('\r\n')  # Remove any trailing whitespace/CRLF
-            
-            if not api_key:
+            if self.claude_client is None:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Using fallback pattern-matching for intent.")
-                self.claude_client = None
                 return
-            
-            self.claude_client = anthropic.Anthropic(api_key=api_key)
             
             # Test connection with minimal request (with timeout)
             try:
@@ -1862,19 +1884,11 @@ class DocumentEvaluator:
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
         try:
-            import anthropic
+            self.claude_client = get_anthropic_client()
             
-            # Get API key from environment and strip any Windows line endings
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if api_key:
-                api_key = api_key.strip().rstrip('\r\n')  # Remove any trailing whitespace/CRLF
-            
-            if not api_key:
+            if self.claude_client is None:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Document evaluation will be disabled.")
-                self.claude_client = None
                 return
-            
-            self.claude_client = anthropic.Anthropic(api_key=api_key)
             
             # Test connection with a simple request
             self.claude_client.messages.create(
@@ -2148,18 +2162,11 @@ class ClaudeQueryRewriter:
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
         try:
-            import anthropic
+            self.claude_client = get_anthropic_client()
             
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if api_key:
-                api_key = api_key.strip().rstrip('\r\n')
-            
-            if not api_key:
+            if self.claude_client is None:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Query rewriting will use fallback.")
-                self.claude_client = None
                 return
-            
-            self.claude_client = anthropic.Anthropic(api_key=api_key)
             
             # Test connection
             self.claude_client.messages.create(
@@ -2281,18 +2288,11 @@ class ClaudeQueryDecomposer:
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
         try:
-            import anthropic
+            self.claude_client = get_anthropic_client()
             
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if api_key:
-                api_key = api_key.strip().rstrip('\r\n')
-            
-            if not api_key:
+            if self.claude_client is None:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Query decomposition will be disabled.")
-                self.claude_client = None
                 return
-            
-            self.claude_client = anthropic.Anthropic(api_key=api_key)
             
             # Test connection
             self.claude_client.messages.create(
@@ -2419,18 +2419,11 @@ class ClaudeMetadataFilterGenerator:
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
         try:
-            import anthropic
+            self.claude_client = get_anthropic_client()
             
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if api_key:
-                api_key = api_key.strip().rstrip('\r\n')
-            
-            if not api_key:
+            if self.claude_client is None:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Metadata filter generation will be disabled.")
-                self.claude_client = None
                 return
-            
-            self.claude_client = anthropic.Anthropic(api_key=api_key)
             
             # Test connection
             self.claude_client.messages.create(
@@ -2569,18 +2562,11 @@ class ClaudeIterativeRetriever:
     def _initialize_claude(self):
         """Initialize Claude client with error handling."""
         try:
-            import anthropic
+            self.claude_client = get_anthropic_client()
             
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if api_key:
-                api_key = api_key.strip().rstrip('\r\n')
-            
-            if not api_key:
+            if self.claude_client is None:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Iterative retrieval will be disabled.")
-                self.claude_client = None
                 return
-            
-            self.claude_client = anthropic.Anthropic(api_key=api_key)
             
             # Test connection
             self.claude_client.messages.create(
@@ -2741,22 +2727,22 @@ class ClaudeAnswerGenerator:
     def _initialize_claude(self, api_key: str = None):
         """Initialize Claude client with error handling."""
         try:
-            import anthropic
-            
-            # Get API key from environment or parameter
-            if not api_key:
-                api_key = os.getenv('ANTHROPIC_API_KEY')
-            
-            # Strip any Windows line endings from API key
+            # If api_key is provided as parameter, use it; otherwise use helper function
             if api_key:
-                api_key = api_key.strip().rstrip('\r\n')  # Remove any trailing whitespace/CRLF
+                api_key = api_key.strip().rstrip('\r\n')
+                try:
+                    import anthropic
+                    self.claude_client = anthropic.Anthropic(api_key=api_key)
+                except ImportError:
+                    logger.warning("⚠️ Anthropic package not installed. Claude answer generation will be disabled.")
+                    self.claude_client = None
+                    return
+            else:
+                self.claude_client = get_anthropic_client()
             
-            if not api_key:
+            if self.claude_client is None:
                 logger.warning("⚠️ ANTHROPIC_API_KEY not found. Claude answer generation will be disabled.")
-                self.claude_client = None
                 return
-            
-            self.claude_client = anthropic.Anthropic(api_key=api_key)
             
             # Test connection with a simple request
             self.claude_client.messages.create(
