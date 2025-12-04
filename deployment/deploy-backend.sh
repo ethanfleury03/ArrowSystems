@@ -53,8 +53,9 @@ echo ""
 echo "=========================================="
 echo "Step 3: Set scaling, concurrency, and memory"
 echo "=========================================="
+# Increased from 4Gi → 8Gi to prevent OOM kills when loading BGE-large embedding model + 350MB dense vector index
 gcloud run services update $SERVICE \
-  --memory=4Gi \
+  --memory=8Gi \
   --min-instances=1 \
   --cpu-throttling \
   --max-instances=10 \

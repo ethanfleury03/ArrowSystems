@@ -171,11 +171,12 @@ gcloud builds submit --config cloudbuild.yaml .
 ### Scale Service
 ```bash
 # Update service configuration
+# Note: Memory increased to 8Gi to prevent OOM kills when loading BGE-large embedding model + 350MB dense vector index
 gcloud run services update rag-app \
     --region=us-central1 \
     --min-instances=1 \
     --max-instances=20 \
-    --memory=4Gi \
+    --memory=8Gi \
     --cpu=2
 ```
 
