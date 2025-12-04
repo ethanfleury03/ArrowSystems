@@ -607,6 +607,7 @@ jobs:
             --set-env-vars="ENABLE_INGESTION_ON_STARTUP=false" \
             --set-env-vars="PYTHONUNBUFFERED=1" \
             --set-env-vars="GUNICORN_WORKERS=1" \
+            --set-env-vars="GUNICORN_TIMEOUT=600" \
             --set-env-vars="CORS_ALLOWED_ORIGINS=https://arrow-rag-frontend-70705019874.us-central1.run.app" \
             --set-env-vars="AUTH_COOKIE_SAMESITE=none" \
             --set-env-vars="AUTH_COOKIE_SECURE=true" \

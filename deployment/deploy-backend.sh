@@ -55,6 +55,7 @@ echo "Step 3: Set resource limits, scaling, and concurrency"
 echo "=========================================="
 # Backend resource configuration: 2 vCPU + 8 GiB RAM for BGE-large embedding model + 350MB dense vector index
 # Using 1 Gunicorn worker to fit within 8 GiB memory (each worker loads full index ~2GB + model ~500MB)
+# Increased timeout to 600s to allow time for index loading during startup
 gcloud run services update $SERVICE \
   --execution-environment=gen2 \
   --cpu=2 \
@@ -64,6 +65,7 @@ gcloud run services update $SERVICE \
   --cpu-throttling \
   --concurrency=100 \
   --set-env-vars="GUNICORN_WORKERS=1" \
+  --set-env-vars="GUNICORN_TIMEOUT=600" \
   --region=$REGION \
   --platform=managed \
   --project=$PROJECT
