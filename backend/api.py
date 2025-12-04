@@ -380,6 +380,41 @@ def _extract_document_sources(sources: List[Dict[str, Any]]) -> List[DocumentSou
     return document_sources
 
 
+# Create FastAPI app (startup/shutdown handled via @app.on_event)
+app = FastAPI(
+    title="DuraFlex Technical Assistant API",
+    description="Production-ready RAG API for DuraFlex technical documentation",
+    version="1.0.0"
+)
+
+# Add CORS middleware IMMEDIATELY after app creation (required for OPTIONS preflight)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize rate limiter if enabled
+limiter = None
+if settings.RATE_LIMIT_ENABLED:
+    limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Add logging middleware to capture all requests
+app.add_middleware(LoggingMiddleware)
+
+# Note: Global rate limit is applied via decorators on individual endpoints
+# Endpoints with specific limits (like /auth/login and /query) will use those limits
+# Other endpoints should have the global limit decorator applied
+# The /health endpoint is intentionally not rate limited
+
+# Register admin routes
+app.include_router(create_admin_router(get_db_manager_instance))
+
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -671,41 +706,6 @@ async def shutdown_event():
         logger.info("database_connections_closed")
     except Exception as e:
         logger.warning("database_shutdown_error", error=str(e), exc_info=True)
-
-
-# Create FastAPI app (startup/shutdown handled via @app.on_event)
-app = FastAPI(
-    title="DuraFlex Technical Assistant API",
-    description="Production-ready RAG API for DuraFlex technical documentation",
-    version="1.0.0"
-)
-
-# Add CORS middleware IMMEDIATELY after app creation (required for OPTIONS preflight)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Initialize rate limiter if enabled
-limiter = None
-if settings.RATE_LIMIT_ENABLED:
-    limiter = Limiter(key_func=get_remote_address)
-    app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# Add logging middleware to capture all requests
-app.add_middleware(LoggingMiddleware)
-
-# Note: Global rate limit is applied via decorators on individual endpoints
-# Endpoints with specific limits (like /auth/login and /query) will use those limits
-# Other endpoints should have the global limit decorator applied
-# The /health endpoint is intentionally not rate limited
-
-# Register admin routes
-app.include_router(create_admin_router(get_db_manager_instance))
 
 
 # Pydantic models for request/response
