@@ -9,6 +9,8 @@ Version: 1.0.0
 Author: Arrow Systems Inc
 """
 
+print(">>> importing backend.api (this should appear once per worker)", flush=True)
+
 from __future__ import annotations
 
 import os
@@ -377,15 +379,16 @@ def _extract_document_sources(sources: List[Dict[str, Any]]) -> List[DocumentSou
     return document_sources
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+@app.on_event("startup")
+async def startup_event():
     """
-    Application lifespan manager.
-    Handles startup and shutdown events.
+    FastAPI startup event handler.
+    Handles application initialization including GCS index download and RAG pipeline initialization.
     """
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
     
-    # Startup
+    print("[DEBUG] FastAPI startup_event running", flush=True)
+    
     # Log effective ENV value to confirm Cloud Run env vars are being used
     logger.info("env_runtime_value", 
                env=settings.ENV,
@@ -465,9 +468,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"Database connection check failed: {integrity_message}")
     logger.info("database_connection_check_passed", message=integrity_message)
     
-    # Resolve RAG storage path (lightweight - no heavy initialization)
-    # RAG will be initialized lazily on first use via ensure_initialized()
-    # This allows fast startup while still supporting RAG functionality
+    # Resolve RAG storage path and initialize RAG pipeline
     from backend.utils.storage_path import resolve_storage_path
     from backend.utils.test_mode import is_test_mode, get_index_dir
     
@@ -507,7 +508,7 @@ async def lifespan(app: FastAPI):
             print(f"[RAG] ⚠️ Not in production mode - skipping download (ENV={os.getenv('ENV')}, is_prod={settings.is_prod})", flush=True)
         
         # Resolve storage path (handles prod vs dev paths)
-        logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path (lazy init mode)")
+        logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path")
         
         if is_test_mode():
             storage_path = get_index_dir()
@@ -535,99 +536,64 @@ async def lifespan(app: FastAPI):
                           is_dir=storage_path_abs.is_dir() if storage_path_abs.exists() else False,
                           message=f"RAG storage path resolved: {storage_path} (absolute: {storage_path_abs.is_absolute()})")
         
-        # Light validation: check if directory exists and has required files (but don't load index)
-        if storage_path:
-            storage_path_obj_check = Path(storage_path)
-            if storage_path_obj_check.exists() and storage_path_obj_check.is_dir():
-                # Log index directory contents for verification
-                try:
-                    files = os.listdir(storage_path)
-                    logger.info("🔍 Checking index directory: /app/latest_model", 
-                               storage_path=storage_path,
-                               file_count=len(files),
-                               files=files)
-                except Exception as e:
-                    logger.warning("Failed to list index directory", 
-                                 storage_path=storage_path, 
-                                 error=str(e))
-                
-                # Check for required index files (quick check, no loading)
-                required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
-                missing_files = [f for f in required_files if not (storage_path_obj_check / f).exists()]
-                
-                if missing_files:
-                    logger.warning("rag_index_files_missing", 
-                                 storage_path=storage_path,
-                                 missing_files=missing_files,
-                                 message=f"Index directory exists but missing required files: {', '.join(missing_files)}. "
-                                        "RAG will attempt lazy initialization but may fail.")
-                else:
-                    logger.info("rag_index_files_present", 
-                             storage_path=storage_path,
-                             message="All required index files found. RAG will initialize on first use.")
-                    # Enhanced visibility log for startup
-                    logger.info("rag_index_ready",
-                               storage_path=storage_path,
-                               message=f"✅ RAG index found in {Path(storage_path).name}/")
-            else:
-                logger.warning("rag_storage_directory_missing", 
-                             storage_path=storage_path,
-                             message=f"Storage directory does not exist or is not a directory: {storage_path}. "
-                                    "RAG will be disabled.")
-        else:
-            logger.warning("rag_index_not_found", 
-                         message="RAG index not found. Continuing startup without RAG. "
-                                "Non-RAG endpoints (e.g., /auth/login, /health) will work normally. "
-                                "RAG endpoints (e.g., /query) will initialize lazily on first use.")
-        
-        # Create pipeline instance (but don't initialize it yet - lazy init)
+        # Create pipeline instance
         cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
         rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
         
-        # Store storage path in app state for lazy initialization
+        # Store storage path in app state
         app.state.rag_storage_path = storage_path
         
-        # RAG is not initialized yet (will be initialized on first /query or /rag/self-test call)
-        app.state.rag_enabled = False
-        
-        logger.info("rag_pipeline_created_lazy", 
-                   storage_path=storage_path,
-                   cache_dir=cache_dir,
-                   message="RAG pipeline instance created (lazy initialization). "
-                          "Pipeline will initialize on first use. Startup is fast and lightweight.")
+        # Now attempt to initialize the RAG pipeline from the local path
+        if storage_path:
+            print("[RAG] Initializing RAG pipeline from local index...", flush=True)
+            try:
+                initialized = rag_pipeline.ensure_initialized(storage_path)
+                if initialized:
+                    print("[RAG] ✅ RAG pipeline initialized successfully", flush=True)
+                    logger.info("rag_pipeline_initialized", 
+                              storage_path=storage_path,
+                              message="RAG pipeline initialized successfully during startup")
+                    app.state.rag_enabled = True
+                else:
+                    print("[RAG] ❌ RAG pipeline init failed - check logs for details", flush=True)
+                    logger.warning("rag_pipeline_init_failed", 
+                                 storage_path=storage_path,
+                                 message="RAG pipeline initialization failed during startup")
+                    app.state.rag_enabled = False
+            except Exception as e:
+                print(f"[RAG] ❌ RAG pipeline init failed: {type(e).__name__}: {str(e)}", flush=True)
+                import traceback
+                traceback.print_exc()
+                logger.error("rag_pipeline_init_exception", 
+                           storage_path=storage_path,
+                           error=str(e),
+                           error_type=type(e).__name__,
+                           exc_info=True,
+                           message="Exception during RAG pipeline initialization")
+                app.state.rag_enabled = False
+        else:
+            print("[RAG] ⚠️ No storage path available - RAG will be disabled", flush=True)
+            logger.warning("rag_index_not_found", 
+                         message="RAG index not found. Continuing startup without RAG. "
+                                "Non-RAG endpoints (e.g., /auth/login, /health) will work normally.")
+            app.state.rag_enabled = False
             
     except Exception as e:
         # Log the error but DO NOT raise - allow app to start
-        logger.error("rag_storage_path_resolution_failed", 
+        logger.error("rag_startup_failed", 
                     error=str(e), 
                     error_type=type(e).__name__,
                     exc_info=True,
-                    message=f"Failed to resolve RAG storage path: {type(e).__name__}: {str(e)}. "
+                    message=f"Failed during RAG startup: {type(e).__name__}: {str(e)}. "
                            "Server will start normally, but RAG will be disabled.")
         storage_path = None
         rag_pipeline = None
         app.state.rag_storage_path = None
         app.state.rag_enabled = False
     
-    # Set RAG enabled flag on app state (will be updated when lazy init completes)
+    # Set RAG enabled flag on app state
     if not hasattr(app.state, 'rag_enabled'):
         app.state.rag_enabled = False
-    
-    # Log final startup status with enhanced visibility
-    logger.info("server_started_lazy_rag", 
-               message="Server started with lazy RAG initialization. "
-                      "RAG will initialize on first query. Non-RAG endpoints are functional.",
-               rag_mode="lazy_init",
-               rag_enabled=False,
-               storage_path=storage_path)
-    
-    # Enhanced startup visibility log
-    if storage_path and Path(storage_path).exists():
-        logger.info("rag_startup_summary",
-                   message=f"🔧 DuraFlex Technical Assistant\n📥 Models are pre-downloaded...\n✅ RAG index found in {Path(storage_path).name}/",
-                   storage_path=storage_path,
-                   rag_ready=False,
-                   rag_mode="lazy_init")
     
     # Initialize query summarizer
     try:
@@ -643,11 +609,15 @@ async def lifespan(app: FastAPI):
     # Set startup time for uptime calculation
     app.state.start_time = time.time()
     
-    logger.info("server_started", environment=settings.ENV, startup_time=time.time())
-    
-    yield
-    
-    # Shutdown
+    logger.info("server_started", environment=settings.ENV, startup_time=time.time(), rag_enabled=app.state.rag_enabled)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    FastAPI shutdown event handler.
+    Handles application cleanup.
+    """
     logger.info("server_shutting_down")
     
     # Cleanup database connections
@@ -659,12 +629,11 @@ async def lifespan(app: FastAPI):
         logger.warning("database_shutdown_error", error=str(e), exc_info=True)
 
 
-# Create FastAPI app with lifespan
+# Create FastAPI app (startup/shutdown handled via @app.on_event)
 app = FastAPI(
     title="DuraFlex Technical Assistant API",
     description="Production-ready RAG API for DuraFlex technical documentation",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
 )
 
 # Add CORS middleware IMMEDIATELY after app creation (required for OPTIONS preflight)
