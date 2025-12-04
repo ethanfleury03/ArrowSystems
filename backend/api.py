@@ -508,6 +508,18 @@ async def lifespan(app: FastAPI):
         if storage_path:
             storage_path_obj_check = Path(storage_path)
             if storage_path_obj_check.exists() and storage_path_obj_check.is_dir():
+                # Log index directory contents for verification
+                try:
+                    files = os.listdir(storage_path)
+                    logger.info("🔍 Checking index directory: /app/latest_model", 
+                               storage_path=storage_path,
+                               file_count=len(files),
+                               files=files)
+                except Exception as e:
+                    logger.warning("Failed to list index directory", 
+                                 storage_path=storage_path, 
+                                 error=str(e))
+                
                 # Check for required index files (quick check, no loading)
                 required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
                 missing_files = [f for f in required_files if not (storage_path_obj_check / f).exists()]
@@ -960,7 +972,7 @@ class RAGStatusResponse(BaseModel):
 @app.options("/rag/status")
 async def rag_status_options():
     """OPTIONS handler for CORS preflight requests."""
-    return {}
+    return JSONResponse({}, status_code=200)
 
 @app.get("/rag/status", include_in_schema=False)
 async def rag_status_public():
@@ -1070,7 +1082,7 @@ class RAGSelfTestResponse(BaseModel):
 @app.options("/rag/self-test")
 async def rag_self_test_options():
     """OPTIONS handler for CORS preflight requests."""
-    return {}
+    return JSONResponse({}, status_code=200)
 
 @app.get("/rag/self-test", response_model=RAGSelfTestResponse)
 # Note: /rag/self-test endpoint is NOT rate limited for testing/debugging
@@ -1797,7 +1809,7 @@ async def summarize_query_endpoint(request: Dict[str, Any]):
 @app.options("/query")
 async def query_options():
     """OPTIONS handler for CORS preflight requests."""
-    return {}
+    return JSONResponse({}, status_code=200)
 
 @app.post("/query", response_model=QueryResponse)
 @apply_rate_limit(settings.RATE_LIMIT_QUERY)
