@@ -1083,6 +1083,9 @@ async def rag_status_public():
     PUBLIC ENDPOINT — returns RAG initialization + index status.
     No authentication required.
     This must remain open because frontend uses Cloud Run IAM identity token.
+    
+    IMPORTANT: This endpoint uses the global rag_pipeline instance created at startup.
+    It does NOT create a new pipeline instance to avoid state mismatches.
     """
     try:
         global rag_pipeline
@@ -1090,64 +1093,38 @@ async def rag_status_public():
         # Get storage path from app state (same as /rag/self-test)
         storage_path = getattr(app.state, 'rag_storage_path', None)
         
-        # Ensure pipeline instance exists
-        if rag_pipeline is None:
-            cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
-        
         # Check if index directory exists (even if not initialized)
         index_dir_exists = False
         if storage_path:
             index_dir_exists = os.path.exists(storage_path) and os.path.isdir(storage_path)
         
-        # Attempt lazy initialization if not already initialized (same as /rag/self-test)
-        # Also check if index files exist but pipeline isn't initialized (post-startup scenario)
-        if storage_path is not None and not rag_pipeline.is_initialized():
-            # Check if index files actually exist before attempting initialization
-            index_files_exist = False
-            if os.path.exists(storage_path) and os.path.isdir(storage_path):
-                required_files = ["docstore.json", "index_store.json", "default__vector_store.json"]
-                index_files_exist = all(
-                    os.path.exists(os.path.join(storage_path, filename))
-                    for filename in required_files
-                )
+        # If rag_pipeline is None here, that means startup init has not completed or failed.
+        # Do NOT create a new instance - use the global one from startup.
+        if rag_pipeline is None:
+            initialized = False
+            debug_status = {"initializing": False, "last_error": "RAG pipeline not initialized"}
+            rag_enabled = False
+            details = "RAG pipeline is not initialized yet."
             
-            if index_files_exist:
-                logger.info("rag_status_triggering_lazy_init", 
-                           storage_path=storage_path,
-                           message="Index files exist but pipeline not initialized - triggering background load")
-                # Trigger initialization and wait for it to complete (or timeout)
-                initialized_result = rag_pipeline.ensure_initialized(storage_path)
-                
-                # If it returned False, it might be initializing in another thread
-                # Wait a bit and check status (use asyncio.sleep to avoid blocking event loop)
-                if not initialized_result:
-                    import asyncio
-                    max_wait = 5.0  # Wait up to 5 seconds for status check
-                    wait_interval = 0.5
-                    waited = 0.0
-                    
-                    while waited < max_wait and rag_pipeline.is_initializing():
-                        await asyncio.sleep(wait_interval)
-                        waited += wait_interval
-                        if rag_pipeline.is_initialized():
-                            break
-            elif not index_dir_exists:
-                logger.debug("rag_status_no_index_files",
-                           storage_path=storage_path,
-                           message="Index directory or files not found - skipping initialization attempt")
+            logger.info("rag_status_pipeline_not_initialized",
+                       storage_path=storage_path,
+                       index_dir_exists=index_dir_exists,
+                       message="Global rag_pipeline instance is None - startup may not have completed")
+            
+            return {
+                "rag_enabled": rag_enabled,
+                "initialized": initialized,
+                "rag_pipeline_initialized": initialized,
+                "index_dir_exists": index_dir_exists,
+                "storage_dir": str(storage_path) if storage_path else None,
+                "initializing": debug_status.get("initializing", False),
+                "last_error": debug_status.get("last_error"),
+                "details": details,
+            }
         
-        # Get current status after initialization attempt
-        initialized = rag_pipeline.is_initialized()
+        # Use the global rag_pipeline instance - check its actual state
+        initialized = bool(rag_pipeline.is_initialized())
         debug_status = rag_pipeline.debug_status() if rag_pipeline else {}
-        
-        # Add explicit logging for debugging
-        logger.info("rag_status_check_result",
-                   initialized=initialized,
-                   initializing=debug_status.get("initializing", False),
-                   storage_path=storage_path,
-                   index_dir_exists=index_dir_exists,
-                   last_error=debug_status.get("last_error"))
         
         # Build detailed status message
         if initialized:
@@ -1164,6 +1141,14 @@ async def rag_status_public():
         # Compute rag_enabled: initialized AND index exists
         rag_enabled = initialized and index_dir_exists
         
+        # Add explicit logging for debugging
+        logger.info("rag_status_check_result",
+                   initialized=initialized,
+                   initializing=debug_status.get("initializing", False),
+                   storage_path=storage_path,
+                   index_dir_exists=index_dir_exists,
+                   last_error=debug_status.get("last_error"))
+        
         logger.info("rag_status_public_response",
                     initialized=initialized,
                     rag_enabled=rag_enabled,
@@ -1175,6 +1160,7 @@ async def rag_status_public():
         return {
             "rag_enabled": rag_enabled,
             "initialized": initialized,
+            "rag_pipeline_initialized": initialized,  # explicit alias for clarity
             "index_dir_exists": index_dir_exists,
             "storage_dir": str(storage_path) if storage_path else None,
             "initializing": debug_status.get("initializing", False),
@@ -1187,6 +1173,7 @@ async def rag_status_public():
         return {
             "rag_enabled": False,
             "initialized": False,
+            "rag_pipeline_initialized": False,
             "index_dir_exists": False,
             "details": f"status endpoint error: {str(e)}"
         }

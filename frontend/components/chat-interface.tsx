@@ -83,8 +83,10 @@ export function ChatInterface() {
             })
             if (ragResponse.ok) {
               const ragData = await ragResponse.json()
-              // Use initialized field from backend response
-              const initialized = ragData.initialized === true
+              // Prefer rag_pipeline_initialized if present, fallback to initialized
+              const initialized =
+                ragData.rag_pipeline_initialized === true ||
+                ragData.initialized === true
               const initializing = ragData.initializing === true
               const status = ragData.status || (initialized ? 'ready' : (initializing ? 'warming' : 'disabled'))
               
@@ -176,8 +178,10 @@ export function ChatInterface() {
         })
         if (ragResponse.ok) {
           const ragData = await ragResponse.json()
-          // Use initialized field from backend response
-          const initialized = ragData.initialized === true
+          // Prefer rag_pipeline_initialized if present, fallback to initialized
+          const initialized =
+            ragData.rag_pipeline_initialized === true ||
+            ragData.initialized === true
           const initializing = ragData.initializing === true
           const status = ragData.status || (initialized ? 'ready' : (initializing ? 'warming' : 'disabled'))
           
