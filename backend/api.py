@@ -475,6 +475,27 @@ async def lifespan(app: FastAPI):
     storage_path = None
     
     try:
+        # In production mode, download index from GCS BEFORE checking if files exist
+        # This ensures files are available when RAG pipeline initializes
+        if settings.is_prod:
+            logger.info("[RAG] Production mode — downloading index from GCS on startup")
+            try:
+                from backend.rag.startup_downloader import download_index_from_gcs
+                download_success = download_index_from_gcs()
+                if not download_success:
+                    logger.error("[RAG] Index download failed during startup — RAG will be disabled")
+                    logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
+                else:
+                    logger.info("[RAG] Index download completed successfully during startup")
+            except Exception as e:
+                logger.error(
+                    "[RAG] Exception during startup index download — RAG will be disabled",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    exc_info=True
+                )
+                logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
+        
         # Resolve storage path (handles prod vs dev paths)
         logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path (lazy init mode)")
         
