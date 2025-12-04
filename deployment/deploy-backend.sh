@@ -51,7 +51,7 @@ gcloud run services update $SERVICE \
 
 echo ""
 echo "=========================================="
-echo "Step 3: Set scaling, concurrency, memory, and CORS"
+echo "Step 3: Set scaling, concurrency, and memory"
 echo "=========================================="
 gcloud run services update $SERVICE \
   --memory=4Gi \
@@ -59,10 +59,6 @@ gcloud run services update $SERVICE \
   --cpu-throttling \
   --max-instances=10 \
   --concurrency=100 \
-  --cors-allow-origin="https://arrow-rag-frontend-70705019874.us-central1.run.app" \
-  --cors-allow-methods="GET,POST,OPTIONS" \
-  --cors-allow-headers="Authorization,Content-Type" \
-  --cors-allow-credentials \
   --region=$REGION \
   --platform=managed \
   --project=$PROJECT
