@@ -412,6 +412,57 @@ def require_machine_model(filename: str, session: Optional[Session] = None) -> b
             session.close()
 
 
+def load_metadata(session: Optional[Session] = None) -> Dict[str, Dict[str, Any]]:
+    """
+    Load all document metadata and return in the legacy format expected by orchestrator.
+    
+    This function provides backward compatibility for code that expects the old
+    JSON-based metadata structure (dict mapping filename -> metadata dict).
+    
+    Returns:
+        Dictionary mapping filename -> metadata dict with keys:
+        - is_active: bool
+        - machine_model: str | list[str] | None
+        - category: str | None
+        - product_family: str | None
+        - last_ingestion_date: str | None (ISO format)
+        - requires_admin_review: bool
+    """
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    
+    try:
+        documents = get_all_documents(session=session, active_only=False)
+        metadata_dict = {}
+        
+        for doc in documents:
+            # Parse machine_model if it's a JSON string
+            machine_model = doc.machine_model
+            if machine_model and isinstance(machine_model, str):
+                try:
+                    # Try to parse as JSON array
+                    machine_model = json.loads(machine_model)
+                except (json.JSONDecodeError, TypeError):
+                    # If not JSON, treat as single string
+                    machine_model = machine_model if machine_model else None
+            
+            metadata_dict[doc.file_name] = {
+                "is_active": doc.is_active,
+                "machine_model": machine_model,
+                "category": doc.category,
+                "product_family": doc.product_family,
+                "last_ingestion_date": doc.last_ingestion_date.isoformat() if doc.last_ingestion_date else None,
+                "requires_admin_review": doc.requires_admin_review
+            }
+        
+        return metadata_dict
+    finally:
+        if close_session:
+            session.close()
+
+
 def ensure_metadata_entry(
     filename: str,
     machine_model: Optional[list[str] | str] = None,
