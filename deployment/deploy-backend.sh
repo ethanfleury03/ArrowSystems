@@ -51,14 +51,16 @@ gcloud run services update $SERVICE \
 
 echo ""
 echo "=========================================="
-echo "Step 3: Set scaling, concurrency, and memory"
+echo "Step 3: Set resource limits, scaling, and concurrency"
 echo "=========================================="
-# Increased from 4Gi → 8Gi to prevent OOM kills when loading BGE-large embedding model + 350MB dense vector index
+# Backend resource configuration: 2 vCPU + 8 GiB RAM for BGE-large embedding model + 350MB dense vector index
 gcloud run services update $SERVICE \
+  --execution-environment=gen2 \
+  --cpu=2 \
   --memory=8Gi \
   --min-instances=1 \
-  --cpu-throttling \
   --max-instances=10 \
+  --cpu-throttling \
   --concurrency=100 \
   --region=$REGION \
   --platform=managed \

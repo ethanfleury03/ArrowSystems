@@ -591,7 +591,7 @@ jobs:
             exit 1
           fi
           
-          # Increased from 4Gi → 8Gi to prevent OOM kills when loading BGE-large embedding model + 350MB dense vector index
+          # Backend resource configuration: 2 vCPU + 8 GiB RAM for BGE-large embedding model + 350MB dense vector index
           gcloud run deploy arrow-rag-backend \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
             --region=us-central1 \
@@ -611,10 +611,11 @@ jobs:
             --set-env-vars="AUTH_COOKIE_SECURE=true" \
             --set-cloudsql-instances="arrow-rag-support-prod:us-central1:rag-postgres" \
             --execution-environment=gen2 \
+            --cpu=2 \
             --memory=8Gi \
             --min-instances=1 \
-            --cpu-throttling \
             --max-instances=10 \
+            --cpu-throttling \
             --concurrency=100 \
             --no-allow-unauthenticated \
             --port=8080 \
