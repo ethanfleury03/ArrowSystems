@@ -3395,31 +3395,6 @@ class RAGOrchestrator:
         from backend.config.env import settings
         from pathlib import Path
         
-        # In production mode, download index from GCS before loading
-        # This replaces the old gcsfuse volume mount approach
-        if settings.is_prod:
-            logger.info("[RAG] Production mode — downloading index from GCS before initialization")
-            try:
-                from backend.rag.startup_downloader import download_index_from_gcs
-                ok = download_index_from_gcs()
-                if not ok:
-                    logger.error("[RAG] Index download failed — RAG will NOT be initialized")
-                    self.index = None
-                    self.retriever = None
-                    self.last_error = "Failed to download RAG index from GCS"
-                    return
-            except Exception as e:
-                logger.error(
-                    "[RAG] Exception during index download — RAG will NOT be initialized",
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    exc_info=True
-                )
-                self.index = None
-                self.retriever = None
-                self.last_error = f"Exception during index download: {type(e).__name__}: {str(e)}"
-                return
-        
         # Ensure storage_dir is an absolute path (resolve relative paths)
         storage_path = Path(storage_dir)
         if not storage_path.is_absolute():
@@ -3436,6 +3411,34 @@ class RAGOrchestrator:
         dir_exists = os.path.exists(storage_dir)
         docstore_exists = os.path.exists(docstore_path)
         index_exists = dir_exists and docstore_exists
+        
+        # In production mode, download index from GCS if files don't exist
+        # (Startup download should have already run, but this is a safety check)
+        if settings.is_prod and not index_exists:
+            logger.info("[RAG] Production mode — index files not found, attempting download from GCS")
+            try:
+                from backend.rag.startup_downloader import download_index_from_gcs
+                ok = download_index_from_gcs()
+                if not ok:
+                    logger.error("[RAG] Index download failed — RAG will NOT be initialized")
+                    self.index = None
+                    self.retriever = None
+                    self.last_error = "Failed to download RAG index from GCS"
+                    return
+                # Re-check if files exist after download
+                docstore_exists = os.path.exists(docstore_path)
+                index_exists = dir_exists and docstore_exists
+            except Exception as e:
+                logger.error(
+                    "[RAG] Exception during index download — RAG will NOT be initialized",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    exc_info=True
+                )
+                self.index = None
+                self.retriever = None
+                self.last_error = f"Exception during index download: {type(e).__name__}: {str(e)}"
+                return
         
         logger.info("orchestrator_index_check", 
                    storage_dir=storage_dir,
