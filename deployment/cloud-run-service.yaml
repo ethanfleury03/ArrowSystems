@@ -21,7 +21,8 @@ spec:
           resources:
             limits:
               cpu: "2"
-              memory: "4Gi"
+              # Increased from 4Gi → 8Gi to prevent OOM kills when loading BGE-large embedding model + 350MB dense vector index
+              memory: "8Gi"
           startupProbe:
             httpGet:
               path: /health
