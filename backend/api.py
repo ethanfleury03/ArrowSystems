@@ -1084,79 +1084,76 @@ async def rag_status_public():
 
     In production (Cloud Run), we assume the RAG index is prebuilt and loaded.
     If the container is running, we report RAG as ready so the frontend can use document search.
+
     If RAG actually fails, that will surface via /rag/self-test or /rag/query errors,
     not via this status flag.
     """
-    try:
-        from typing import Optional
-        
-        # Determine if we're in prod
-        is_prod_env = getattr(settings, "is_prod", False) or os.getenv("ENV") == "prod"
-        
-        # Storage path we expect the index to be in (keep consistent with your current config)
-        storage_path = getattr(app.state, "rag_storage_path", None) or "/app/latest_model"
-        
-        if is_prod_env:
-            # In Cloud Run prod, force RAG as ready when the backend is up.
-            # This unblocks the frontend banner, since /rag/self-test already
-            # confirms the pipeline actually works.
-            return {
-                "rag_enabled": True,
-                "initialized": True,
-                "rag_pipeline_initialized": True,  # explicit alias
-                "index_dir_exists": True,
-                "storage_dir": str(storage_path),
-                "initializing": False,
-                "last_error": None,
-                "details": "RAG forced ready in Cloud Run (prod).",
-            }
-        
-        # --- Non-prod behavior (dev/local) ---
-        
-        # For development/non-prod, keep a more detailed, "real" status based on rag_pipeline.
-        global rag_pipeline
-        
-        # Compute storage path for non-prod if needed
-        storage_dir: Optional[str] = str(storage_path) if storage_path else None
-        index_dir_exists = bool(storage_path and os.path.exists(storage_path))
-        
-        if rag_pipeline is None:
-            initialized = False
-            debug_status = {"initializing": False, "last_error": "RAG pipeline not initialized"}
-            rag_enabled = False
-            details = "RAG pipeline is not initialized yet (non-prod)."
+    import os
+    
+    global rag_pipeline, app
+    
+    # Determine if we're in prod
+    is_prod_env = getattr(settings, "is_prod", False) or os.getenv("ENV") == "prod"
+    
+    # Storage path we expect the index to be in (keep consistent with your current config)
+    storage_path = getattr(app.state, "rag_storage_path", None) or "/app/latest_model"
+    
+    if is_prod_env:
+        # Log for debugging
+        print(
+            "[RAG STATUS] Returning forced-ready status from backend /rag/status (prod)",
+            flush=True,
+        )
+        return {
+            "rag_enabled": True,
+            "initialized": True,
+            "rag_pipeline_initialized": True,
+            "index_dir_exists": True,
+            "storage_dir": str(storage_path),
+            "initializing": False,
+            "last_error": None,
+            "details": "RAG forced ready in Cloud Run (prod).",
+        }
+    
+    # --- Non-prod behavior (dev/local) ---
+    
+    index_dir_exists = bool(storage_path and os.path.exists(storage_path))
+    if rag_pipeline is None:
+        initialized = False
+        debug_status = {"initializing": False, "last_error": "RAG pipeline not initialized"}
+        rag_enabled = False
+        details = "RAG pipeline is not initialized yet (non-prod)."
+    else:
+        initialized = bool(rag_pipeline.is_initialized())
+        debug_status = rag_pipeline.debug_status()
+        rag_enabled = initialized and index_dir_exists
+        if initialized:
+            details = "RAG pipeline initialized and ready (non-prod)."
         else:
-            initialized = bool(rag_pipeline.is_initialized())
-            debug_status = rag_pipeline.debug_status()
-            rag_enabled = initialized and index_dir_exists
-            if initialized:
-                details = "RAG pipeline initialized and ready (non-prod)."
+            if debug_status.get("initializing"):
+                details = "RAG pipeline is still initializing (non-prod)."
             else:
-                if debug_status.get("initializing"):
-                    details = "RAG pipeline is still initializing (non-prod)."
-                else:
-                    details = "RAG pipeline is not initialized (non-prod)."
-        
-        return {
-            "rag_enabled": rag_enabled,
-            "initialized": initialized,
-            "rag_pipeline_initialized": initialized,
-            "index_dir_exists": index_dir_exists,
-            "storage_dir": storage_dir,
-            "initializing": debug_status.get("initializing", False),
-            "last_error": debug_status.get("last_error"),
-            "details": details,
-        }
-        
-    except Exception as e:
-        logger.error("rag_status_public_failed", error=str(e), exc_info=True)
-        return {
-            "rag_enabled": False,
-            "initialized": False,
-            "rag_pipeline_initialized": False,
-            "index_dir_exists": False,
-            "details": f"status endpoint error: {str(e)}"
-        }
+                details = "RAG pipeline is not initialized (non-prod)."
+    
+    print(
+        "[RAG STATUS] Non-prod /rag/status",
+        "initialized=", initialized,
+        "index_dir_exists=", index_dir_exists,
+        "rag_enabled=", rag_enabled,
+        "details=", details,
+        flush=True,
+    )
+    
+    return {
+        "rag_enabled": rag_enabled,
+        "initialized": initialized,
+        "rag_pipeline_initialized": initialized,
+        "index_dir_exists": index_dir_exists,
+        "storage_dir": str(storage_path) if storage_path else None,
+        "initializing": debug_status.get("initializing", False),
+        "last_error": debug_status.get("last_error"),
+        "details": details,
+    }
 
 
 class RAGSelfTestResponse(BaseModel):
