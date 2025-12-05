@@ -1324,6 +1324,8 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         """
         def _fetch():
             with SessionLocal() as session:
+                logger.info(f"[QueryInsights] Fetching queries for customer_id={customer_id} (type: {type(customer_id)})")
+                
                 # Get customer
                 customer = session.query(User).filter(
                     User.id == int(customer_id),
@@ -1331,15 +1333,21 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 ).first()
                 
                 if not customer:
+                    logger.warning(f"[QueryInsights] Customer not found: id={customer_id}, role=CUSTOMER")
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail="Customer not found"
                     )
                 
+                logger.info(f"[QueryInsights] Found customer: id={customer.id}, email={customer.email}, name={customer.name}")
+                
                 customer_name = customer.contact_name or customer.name or customer.email or "Unknown"
                 
                 # Get all queries for this customer
                 # Use load_only to exclude updated_at column which may not exist in DB
+                customer_id_int = int(customer_id)
+                logger.info(f"[QueryInsights] Querying QueryHistory with user_id={customer_id_int}")
+                
                 base_query = session.query(QueryHistory).options(
                     load_only(
                         QueryHistory.id,
@@ -1357,7 +1365,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                         QueryHistory.sources_json
                     )
                 ).filter(
-                    QueryHistory.user_id == int(customer_id)
+                    QueryHistory.user_id == customer_id_int
                 )
                 
                 # Apply search filter if provided
@@ -1368,6 +1376,18 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                     )
                 
                 all_queries = base_query.order_by(desc(QueryHistory.created_at)).all()
+                logger.info(f"[QueryInsights] Found {len(all_queries)} query_history rows for user_id={customer_id_int}")
+                
+                # Debug: log sample user_ids from query_history to verify data
+                if len(all_queries) == 0:
+                    # Check if there are ANY queries in the table
+                    total_queries = session.query(QueryHistory).count()
+                    logger.info(f"[QueryInsights] Total queries in query_history table: {total_queries}")
+                    
+                    # Get sample user_ids to see what values exist
+                    sample_queries = session.query(QueryHistory.user_id).distinct().limit(10).all()
+                    sample_user_ids = [q[0] for q in sample_queries]
+                    logger.info(f"[QueryInsights] Sample user_ids in query_history: {sample_user_ids}")
                 
                 if not all_queries:
                     return {
@@ -1424,6 +1444,8 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                         "message_count": message_count,
                     })
                 
+                logger.info(f"[QueryInsights] Grouped into {len(conversations)} conversations, {len(query_summaries)} summaries")
+                
                 # Sort by created_at DESC
                 query_summaries.sort(key=lambda x: x["created_at"], reverse=True)
                 
@@ -1431,11 +1453,17 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 total_queries = len(query_summaries)
                 last_query_at = max(q["created_at"] for q in query_summaries) if query_summaries else None
                 
+                logger.info(f"[QueryInsights] Returning response: total_queries={total_queries}, last_query_at={last_query_at}, queries_count={len(query_summaries)}")
+                
+                # Debug: log first few query summaries to verify structure
+                if query_summaries:
+                    logger.info(f"[QueryInsights] Sample query summary: {query_summaries[0]}")
+                
                 return {
                     "customer_id": customer_id,
                     "customer_name": customer_name,
                     "total_queries": total_queries,
-                    "last_query_at": last_query_at,
+                    "last_query_at": last_query_at,  # Pydantic will serialize datetime to ISO string
                     "queries": query_summaries,
                 }
         
