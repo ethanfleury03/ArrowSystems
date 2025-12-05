@@ -1,6 +1,8 @@
 import { fetchQueryInsightsCustomers } from "@/lib/api/queryInsights";
 import { CustomerGalaxy } from "./_components/customer-galaxy";
 
+export const dynamic = 'force-dynamic';
+
 export default async function QueryInsightsPage() {
   const customers = await fetchQueryInsightsCustomers();
 

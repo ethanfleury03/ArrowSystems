@@ -2,6 +2,8 @@ import { fetchConversationDetails } from "@/lib/api/queryInsights";
 import { notFound } from "next/navigation";
 import { ConversationView } from "./_components/conversation-view";
 
+export const dynamic = 'force-dynamic';
+
 interface Props {
   params: {
     customerId: string;
