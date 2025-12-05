@@ -744,6 +744,7 @@ class HybridRetriever:
         self.document_evaluator = document_evaluator
         self.bm25 = None
         self.corpus_nodes = []
+        self._allowed_filenames_cache = {}  # Cache for allowed filenames per (role, machines) tuple
         self._initialize_bm25()
     
     def _initialize_bm25(self):
@@ -843,7 +844,21 @@ class HybridRetriever:
         # Boost scores for documents with matching filenames
         # This is critical for queries like "system requirements" matching "System Requirements.pdf"
         filename_boost_multiplier = 3.0  # Strong boost for filename matches
+        
+        # PERFORMANCE: Limit filename boosting scan in production to avoid iterating over thousands of nodes
+        max_boost_nodes = 200 if settings.is_prod else None
+        if max_boost_nodes and len(self.corpus_nodes) > max_boost_nodes:
+            logger.info(
+                "bm25_boost_loop_truncated",
+                total_corpus_nodes=len(self.corpus_nodes),
+                max_boost_nodes=max_boost_nodes,
+                message=f"Truncating BM25 filename boost loop to first {max_boost_nodes} nodes in production"
+            )
+        
         for idx, node_wrapper in enumerate(self.corpus_nodes):
+            # PERFORMANCE: Stop early in production if we've scanned enough nodes
+            if max_boost_nodes is not None and idx >= max_boost_nodes:
+                break
             # Get the actual node (handle both NodeWithScore and plain nodes)
             node = node_wrapper.node if isinstance(node_wrapper, NodeWithScore) and hasattr(node_wrapper, 'node') else node_wrapper
             
@@ -962,6 +977,15 @@ class HybridRetriever:
         Direct filename-based search that queries the index for documents with matching filenames.
         This is critical for queries like "system requirements" matching "System Requirements.pdf".
         """
+        # PERFORMANCE: Skip heavy filename search in production (11x500 retrievals is too expensive on CPU-only)
+        if settings.is_prod:
+            logger.info(
+                "filename_search_skipped_in_prod",
+                query=query[:200],
+                message="Skipping _search_by_filename in production for performance reasons (would make 11 queries with 500 results each)"
+            )
+            return []
+        
         query_terms = [t.lower() for t in query.split() if len(t) > 2]  # Filter short words
         if len(query_terms) < 2:
             return []
@@ -1068,6 +1092,28 @@ class HybridRetriever:
             
             effective_machines = get_effective_machines_for_user(role or "CUSTOMER", user_machine_models or [])
             
+            # PERFORMANCE: Cache results in production to avoid loading all metadata on every query
+            cache_key = (role, tuple(sorted(effective_machines)) if effective_machines else None)
+            if settings.is_prod and cache_key in self._allowed_filenames_cache:
+                entry = self._allowed_filenames_cache[cache_key]
+                cache_age = time.monotonic() - entry["timestamp"]
+                if cache_age < 300:  # 5 minute TTL
+                    logger.info(
+                        "allowed_filenames_cache_hit",
+                        role=role,
+                        effective_machines_count=len(effective_machines),
+                        cache_age_seconds=round(cache_age, 2),
+                        cached_filenames_count=len(entry["filenames"])
+                    )
+                    return entry["filenames"]
+                else:
+                    logger.info(
+                        "allowed_filenames_cache_expired",
+                        role=role,
+                        cache_age_seconds=round(cache_age, 2),
+                        message="Cache entry expired, reloading metadata"
+                    )
+            
             # For customers with no valid machines, they still get GENERAL (auto-included)
             # The check below is just for logging purposes
             if role_upper == "CUSTOMER" and len(effective_machines) == 1 and GENERAL_MACHINE in effective_machines:
@@ -1147,7 +1193,22 @@ class HybridRetriever:
                 f"{len(all_metadata) - len(allowed_filenames)} excluded"
             )
             
-            return allowed_filenames if allowed_filenames else set()  # Return empty set if no matches
+            result = allowed_filenames if allowed_filenames else set()  # Return empty set if no matches
+            
+            # Store in cache for production
+            if settings.is_prod:
+                self._allowed_filenames_cache[cache_key] = {
+                    "filenames": result,
+                    "timestamp": time.monotonic(),
+                }
+                logger.info(
+                    "allowed_filenames_cache_stored",
+                    role=role,
+                    effective_machines_count=len(effective_machines),
+                    cached_filenames_count=len(result)
+                )
+            
+            return result
             
         except Exception as e:
             logger.warning(f"Failed to build allowed filenames for machine filtering: {e}", exc_info=True)
@@ -1569,6 +1630,16 @@ class HybridRetriever:
         )
         
         # Apply LLM evaluation if enabled and evaluator is available
+        # PERFORMANCE: Skip LLM evaluation in production (15 sequential LLM calls with delays is too slow)
+        if settings.is_prod:
+            logger.info(
+                "rag_llm_eval_skipped_in_prod",
+                query=query[:200],
+                hybrid_results_count=len(hybrid_results),
+                message="Skipping evaluate_retrieved_documents in production for performance reasons (would make up to 15 sequential LLM calls)"
+            )
+            return hybrid_results[:top_k]
+        
         # PERFORMANCE: Skip LLM evaluation on CPU or for simple queries (saves 30-60s)
         if (enable_llm_evaluation and 
             self.document_evaluator and 
@@ -3938,7 +4009,8 @@ class RAGOrchestrator:
         
         # 🚀 CRITICAL FIX: Filename-based fallback if retrieval returns few/no results
         # This ensures documents with matching filenames are found even if text doesn't match
-        if len(unique_nodes) < 3:  # If we got very few results, try filename matching
+        # PERFORMANCE: Skip corpus-wide filename scan in production (too expensive)
+        if not settings.is_prod and len(unique_nodes) < 3:  # If we got very few results, try filename matching
             logger.info(f"⚠️ Low retrieval results ({len(unique_nodes)}), attempting filename-based fallback...")
             try:
                 # Extract key terms from query for filename matching
@@ -4021,7 +4093,8 @@ class RAGOrchestrator:
                 logger.warning(f"⚠️ Fallback 1 error: {e}")
             
             # Fallback 2: Try simplified query (remove "DuraFlex" prefix, just search for core terms)
-            if not unique_nodes:
+            # PERFORMANCE: Skip additional fallbacks in production (keep only first fallback)
+            if not settings.is_prod and not unique_nodes:
                 logger.info("🔄 Fallback 2: Trying simplified query...")
                 simplified_query = query.lower()
                 # Remove common prefixes
@@ -4047,7 +4120,8 @@ class RAGOrchestrator:
                         logger.warning(f"⚠️ Fallback 2 error: {e}")
             
             # Fallback 3: Try keyword-only search (extract key terms)
-            if not unique_nodes:
+            # PERFORMANCE: Skip additional fallbacks in production
+            if not settings.is_prod and not unique_nodes:
                 logger.info("🔄 Fallback 3: Trying keyword-only search...")
                 # Extract key terms (words longer than 3 chars, excluding common words)
                 common_words = {'the', 'are', 'for', 'and', 'with', 'from', 'that', 'this', 'what', 'how', 'when', 'where', 'which'}
@@ -4070,7 +4144,8 @@ class RAGOrchestrator:
                         logger.warning(f"⚠️ Fallback 3 error: {e}")
             
             # Fallback 4: Last resort - try very generic terms from the query
-            if not unique_nodes:
+            # PERFORMANCE: Skip additional fallbacks in production
+            if not settings.is_prod and not unique_nodes:
                 logger.info("🔄 Fallback 4: Trying generic term search...")
                 # Extract any technical terms (capitalized words or common technical words)
                 technical_terms = ['network', 'requirements', 'configuration', 'setup', 'installation', 'system']
@@ -4091,6 +4166,13 @@ class RAGOrchestrator:
                             unique_nodes = fallback_nodes[:top_k]
                     except Exception as e:
                         logger.warning(f"⚠️ Fallback 4 error: {e}")
+            
+            # Log that additional fallbacks were skipped in production
+            if settings.is_prod and not unique_nodes:
+                logger.info(
+                    "additional_fallbacks_skipped_in_prod",
+                    message="Skipped fallbacks 2-4 in production for performance reasons (only first fallback attempted)"
+                )
         
         # Step 3: Build retrieval context
         context = self._build_retrieval_context(unique_nodes)
