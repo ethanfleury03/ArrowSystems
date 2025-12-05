@@ -10,7 +10,7 @@ import jwt
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select, func, desc, and_, or_, case, text, inspect
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ..security import decode_access_token
 from ..utils.database_manager import DatabaseManager
@@ -1339,7 +1339,24 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 customer_name = customer.contact_name or customer.name or customer.email or "Unknown"
                 
                 # Get all queries for this customer
-                base_query = session.query(QueryHistory).filter(
+                # Use load_only to exclude updated_at column which may not exist in DB
+                base_query = session.query(QueryHistory).options(
+                    load_only(
+                        QueryHistory.id,
+                        QueryHistory.user_id,
+                        QueryHistory.query_text,
+                        QueryHistory.answer_text,
+                        QueryHistory.response_time_ms,
+                        QueryHistory.metadata_json,
+                        QueryHistory.created_at,
+                        QueryHistory.machine_name,
+                        QueryHistory.token_input,
+                        QueryHistory.token_output,
+                        QueryHistory.token_total,
+                        QueryHistory.cost_usd,
+                        QueryHistory.sources_json
+                    )
+                ).filter(
                     QueryHistory.user_id == int(customer_id)
                 )
                 
@@ -1459,8 +1476,25 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         def _fetch():
             with SessionLocal() as session:
                 # Get all queries for this conversation (by sessionId)
+                # Use load_only to exclude updated_at column which may not exist in DB
                 # PostgreSQL JSONB query: metadata_json->>'sessionId'
-                queries = session.query(QueryHistory).filter(
+                queries = session.query(QueryHistory).options(
+                    load_only(
+                        QueryHistory.id,
+                        QueryHistory.user_id,
+                        QueryHistory.query_text,
+                        QueryHistory.answer_text,
+                        QueryHistory.response_time_ms,
+                        QueryHistory.metadata_json,
+                        QueryHistory.created_at,
+                        QueryHistory.machine_name,
+                        QueryHistory.token_input,
+                        QueryHistory.token_output,
+                        QueryHistory.token_total,
+                        QueryHistory.cost_usd,
+                        QueryHistory.sources_json
+                    )
+                ).filter(
                     QueryHistory.metadata_json.op('->>')('sessionId') == conversation_id
                 ).order_by(QueryHistory.created_at).all()
                 
@@ -1468,7 +1502,23 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 if not queries:
                     try:
                         query_id = int(conversation_id.replace("query_", ""))
-                        queries = session.query(QueryHistory).filter(
+                        queries = session.query(QueryHistory).options(
+                            load_only(
+                                QueryHistory.id,
+                                QueryHistory.user_id,
+                                QueryHistory.query_text,
+                                QueryHistory.answer_text,
+                                QueryHistory.response_time_ms,
+                                QueryHistory.metadata_json,
+                                QueryHistory.created_at,
+                                QueryHistory.machine_name,
+                                QueryHistory.token_input,
+                                QueryHistory.token_output,
+                                QueryHistory.token_total,
+                                QueryHistory.cost_usd,
+                                QueryHistory.sources_json
+                            )
+                        ).filter(
                             QueryHistory.id == query_id
                         ).order_by(QueryHistory.created_at).all()
                     except (ValueError, AttributeError):

@@ -51,22 +51,22 @@ export function CustomerGalaxy({ customers }: CustomerGalaxyProps) {
     <div className="relative overflow-hidden bg-gradient-to-b from-background to-muted min-h-[400px]">
       <div className="absolute inset-0">
         {positioned.map((cust) => {
-          const initials = getInitials(cust.name);
           return (
             <button
               key={cust.id}
               type="button"
-              className="absolute flex items-center justify-center rounded-full border bg-background shadow-md text-sm font-medium transition-transform hover:scale-110"
+              className="absolute flex items-center justify-center rounded-full border bg-background shadow-md text-xs font-medium px-2 text-center leading-tight transition-transform hover:scale-110"
               style={{
                 left: `${cust.x}%`,
                 top: `${cust.y}%`,
-                width: "64px",
-                height: "64px",
+                width: "96px",
+                height: "96px",
                 transform: "translate(-50%, -50%)",
+                padding: "8px",
               }}
               onClick={() => router.push(`/admin/query-insights/${cust.id}`)}
             >
-              {initials}
+              <span className="truncate w-full">{cust.name}</span>
             </button>
           );
         })}
@@ -75,11 +75,4 @@ export function CustomerGalaxy({ customers }: CustomerGalaxyProps) {
   );
 }
 
-function getInitials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) {
-    return parts[0].slice(0, 2).toUpperCase();
-  }
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
 
