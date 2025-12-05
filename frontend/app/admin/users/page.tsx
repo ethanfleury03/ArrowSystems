@@ -459,7 +459,7 @@ export default function AdminUsersPage() {
       }
       
       // Cookie-based JWT is automatically sent with fetch requests
-      const response = await fetch(`${apiBaseUrl}/admin/create_user`, {
+      const response = await fetch(`${apiBaseUrl}/admin/users`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -518,7 +518,7 @@ export default function AdminUsersPage() {
         payload.contact_phone = null;
       }
       // Cookie-based JWT is automatically sent with fetch requests
-      const response = await fetch(`${apiBaseUrl}/admin/edit_user/${selectedUser.id}`, {
+      const response = await fetch(`${apiBaseUrl}/admin/users/${selectedUser.id}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
