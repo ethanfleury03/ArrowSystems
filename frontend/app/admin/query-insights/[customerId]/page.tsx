@@ -2,6 +2,8 @@ import { fetchCustomerQueries } from "@/lib/api/queryInsights";
 import { notFound } from "next/navigation";
 import { CustomerQueryList } from "./_components/customer-query-list";
 
+export const dynamic = 'force-dynamic';
+
 interface Props {
   params: { customerId: string };
   searchParams: { search?: string };
