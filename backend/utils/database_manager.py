@@ -355,7 +355,26 @@ class DatabaseManager:
     async def get_query_history(self, user: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
         def _fetch() -> List[Dict[str, Any]]:
             with SessionLocal() as session:
-                query = select(QueryHistory).order_by(desc(QueryHistory.created_at)).limit(limit)
+                # Explicitly select only columns that exist to avoid updated_at issues
+                # Use load_only to avoid loading updated_at if it doesn't exist in DB
+                from sqlalchemy.orm import load_only
+                query = select(QueryHistory).options(
+                    load_only(
+                        QueryHistory.id,
+                        QueryHistory.user_id,
+                        QueryHistory.query_text,
+                        QueryHistory.answer_text,
+                        QueryHistory.response_time_ms,
+                        QueryHistory.metadata_json,
+                        QueryHistory.created_at,
+                        QueryHistory.machine_name,
+                        QueryHistory.token_input,
+                        QueryHistory.token_output,
+                        QueryHistory.token_total,
+                        QueryHistory.cost_usd,
+                        QueryHistory.sources_json,
+                    )
+                ).order_by(desc(QueryHistory.created_at)).limit(limit)
                 if user:
                     query = query.join(QueryHistory.user).where(func.lower(User.email) == user.strip().lower())
 

@@ -123,7 +123,8 @@ export async function getCurrentUser(): Promise<UserInfo> {
 export async function getHealth(): Promise<boolean> {
   try {
     const response = await apiClient.get('/health');
-    return response.data.status === 'healthy';
+    // Health endpoint returns { status: 'ok' } or { status: 'error' }
+    return response.data.status === 'ok';
   } catch {
     return false;
   }

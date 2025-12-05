@@ -154,7 +154,9 @@ class QueryHistory(Base):
     response_time_ms = Column(Integer)
     metadata_json = Column("metadata", JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Note: updated_at column may not exist in all database instances
+    # Made nullable to handle cases where the column doesn't exist
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
     
     # Analytics columns
     machine_name = Column(String(255), nullable=True)
