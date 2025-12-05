@@ -1,6 +1,11 @@
 # Google Cloud Build Configuration for RAG Application
 # This file defines how to build and deploy your app to Google Cloud Run
 # 
+# NOTE: This configuration is LEGACY and targets the old service 'rag-app' in project 'ragapp-476414'.
+# The current production service is 'arrow-rag-backend' in project 'arrow-rag-support-prod',
+# which is deployed via GitHub Actions (.github/workflows/ci.yml).
+# This file is kept for reference but is not actively used.
+# 
 # BEFORE USING: Update these variables to match your setup:
 # - Replace YOUR_PROJECT_ID with your actual project ID
 # - Replace YOUR_REGION with your preferred region (e.g., us-central1)

@@ -171,6 +171,7 @@ if ! gcloud run deploy "$SERVICE_NAME" \
     --allow-unauthenticated \
     --memory 4Gi \
     --cpu 2 \
+    --min-instances=1 \
     --add-cloudsql-instances "${PROJECT_ID}:${REGION}:rag-postgres" \
     --set-env-vars "$ENV_VARS"; then
     echo -e "${RED}❌ Cloud Run deployment failed${NC}"
