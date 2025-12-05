@@ -5,6 +5,7 @@ metadata:
   annotations:
     run.googleapis.com/ingress: all
     run.googleapis.com/execution-environment: gen2
+    autoscaling.knative.dev/minScale: "1"
 spec:
   template:
     spec:
