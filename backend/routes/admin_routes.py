@@ -17,6 +17,13 @@ from ..utils.database_manager import DatabaseManager
 from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, MachineModel, DocumentIngestionMetadata, run_sync
 from ..utils.audit_log import audit_log
 from ..logging_config import get_logger
+from ..schemas.query_insights import (
+    QueryInsightsCustomer,
+    CustomerQueriesResponse,
+    CustomerQuerySummary,
+    ConversationDetails,
+    ConversationMessage,
+)
 
 logger = get_logger(__name__)
 
@@ -1232,6 +1239,293 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         except Exception as e:
             logger.error(f"Error deleting machine model: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to delete machine model: {str(e)}")
+
+    # ============================================================================
+    # Query Insights Endpoints
+    # ============================================================================
+    
+    @router.get("/query-insights/customers", response_model=List[QueryInsightsCustomer])
+    async def get_query_insights_customers(
+        _: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+    ):
+        """
+        Return a list of customers (role='CUSTOMER'), each with:
+        - id
+        - name
+        - total_queries: count of query records for that customer
+        - last_query_at: max(created_at) over their queries
+        """
+        def _fetch():
+            with SessionLocal() as session:
+                # Get all customers with their query stats using LEFT JOIN
+                query = (
+                    select(
+                        User.id,
+                        User.contact_name,
+                        User.name,
+                        User.email,
+                        func.count(QueryHistory.id).label('total_queries'),
+                        func.max(QueryHistory.created_at).label('last_query_at')
+                    )
+                    .outerjoin(QueryHistory, User.id == QueryHistory.user_id)
+                    .where(User.role == "CUSTOMER")
+                    .group_by(User.id, User.contact_name, User.name, User.email)
+                )
+                
+                results = session.execute(query).all()
+                
+                result = []
+                for row in results:
+                    # Use contact_name or name for display
+                    customer_name = row.contact_name or row.name or row.email or "Unknown"
+                    
+                    result.append({
+                        "id": str(row.id),
+                        "name": customer_name,
+                        "total_queries": row.total_queries or 0,
+                        "last_query_at": row.last_query_at,
+                    })
+                
+                return result
+        
+        customers = await run_sync(_fetch)
+        return customers
+    
+    @router.get(
+        "/query-insights/customers/{customer_id}/queries",
+        response_model=CustomerQueriesResponse,
+    )
+    async def get_customer_queries(
+        customer_id: str,
+        search: Optional[str] = Query(None),
+        _: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+    ):
+        """
+        For a given customer, return:
+        - customer_id
+        - customer_name
+        - total_queries: number of conversations for this customer
+        - last_query_at: max(created_at) over conversations
+        - queries: list of CustomerQuerySummary sorted by created_at DESC
+        """
+        def _fetch():
+            with SessionLocal() as session:
+                # Get customer
+                customer = session.query(User).filter(
+                    User.id == int(customer_id),
+                    User.role == "CUSTOMER"
+                ).first()
+                
+                if not customer:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Customer not found"
+                    )
+                
+                customer_name = customer.contact_name or customer.name or customer.email or "Unknown"
+                
+                # Get all queries for this customer
+                base_query = session.query(QueryHistory).filter(
+                    QueryHistory.user_id == int(customer_id)
+                )
+                
+                # Apply search filter if provided
+                if search:
+                    search_term = f"%{search}%"
+                    base_query = base_query.filter(
+                        QueryHistory.query_text.ilike(search_term)
+                    )
+                
+                all_queries = base_query.order_by(desc(QueryHistory.created_at)).all()
+                
+                if not all_queries:
+                    return {
+                        "customer_id": customer_id,
+                        "customer_name": customer_name,
+                        "total_queries": 0,
+                        "last_query_at": None,
+                        "queries": [],
+                    }
+                
+                # Group queries by sessionId (conversation)
+                # Extract sessionId from metadata_json (JSONB field)
+                conversations = {}
+                for query in all_queries:
+                    session_id = None
+                    if query.metadata_json:
+                        if isinstance(query.metadata_json, dict):
+                            session_id = query.metadata_json.get("sessionId")
+                        elif isinstance(query.metadata_json, str):
+                            try:
+                                metadata = json.loads(query.metadata_json)
+                                session_id = metadata.get("sessionId") if isinstance(metadata, dict) else None
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                    
+                    # If no session_id, treat each query as its own conversation
+                    if not session_id:
+                        session_id = f"query_{query.id}"
+                    
+                    if session_id not in conversations:
+                        conversations[session_id] = {
+                            "conversation_id": session_id,
+                            "created_at": query.created_at,
+                            "query_text": query.query_text or "",
+                            "query_ids": [],
+                        }
+                    
+                    conversations[session_id]["query_ids"].append(query.id)
+                    # Update created_at to earliest query in conversation
+                    if query.created_at < conversations[session_id]["created_at"]:
+                        conversations[session_id]["created_at"] = query.created_at
+                
+                # Convert to list and sort by created_at DESC
+                query_summaries = []
+                for conv_id, conv_data in conversations.items():
+                    # Count messages: each query has 2 messages (user query + assistant answer)
+                    message_count = len(conv_data["query_ids"]) * 2
+                    
+                    query_summaries.append({
+                        "id": str(conv_data["query_ids"][0]),  # Use first query ID
+                        "conversation_id": conv_data["conversation_id"],
+                        "created_at": conv_data["created_at"],
+                        "query_text": conv_data["query_text"],
+                        "message_count": message_count,
+                    })
+                
+                # Sort by created_at DESC
+                query_summaries.sort(key=lambda x: x["created_at"], reverse=True)
+                
+                # Calculate totals
+                total_queries = len(query_summaries)
+                last_query_at = max(q["created_at"] for q in query_summaries) if query_summaries else None
+                
+                return {
+                    "customer_id": customer_id,
+                    "customer_name": customer_name,
+                    "total_queries": total_queries,
+                    "last_query_at": last_query_at,
+                    "queries": query_summaries,
+                }
+        
+        try:
+            result = await run_sync(_fetch)
+            return result
+        except HTTPException:
+            raise
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid customer_id"
+            )
+        except Exception as e:
+            logger.error(f"Error fetching customer queries: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch customer queries: {str(e)}"
+            )
+    
+    @router.get(
+        "/query-insights/conversations/{conversation_id}",
+        response_model=ConversationDetails,
+    )
+    async def get_conversation_details(
+        conversation_id: str,
+        _: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+    ):
+        """
+        Return full conversation details:
+        - conversation_id
+        - customer_id
+        - customer_name
+        - created_at: timestamp of first message
+        - messages: list of messages with role, content, created_at
+        """
+        def _fetch():
+            with SessionLocal() as session:
+                # Get all queries for this conversation (by sessionId)
+                # PostgreSQL JSONB query: metadata_json->>'sessionId'
+                queries = session.query(QueryHistory).filter(
+                    QueryHistory.metadata_json.op('->>')('sessionId') == conversation_id
+                ).order_by(QueryHistory.created_at).all()
+                
+                # If no results with sessionId, try treating conversation_id as a query ID
+                if not queries:
+                    try:
+                        query_id = int(conversation_id.replace("query_", ""))
+                        queries = session.query(QueryHistory).filter(
+                            QueryHistory.id == query_id
+                        ).order_by(QueryHistory.created_at).all()
+                    except (ValueError, AttributeError):
+                        pass
+                
+                if not queries:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Conversation not found"
+                    )
+                
+                # Get customer info from first query
+                first_query = queries[0]
+                customer = session.query(User).filter(User.id == first_query.user_id).first()
+                
+                if not customer:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Customer not found"
+                    )
+                
+                customer_name = customer.contact_name or customer.name or customer.email or "Unknown"
+                
+                # Build messages: each query has user message (query_text) and assistant message (answer_text)
+                messages = []
+                for query in queries:
+                    # User message
+                    if query.query_text:
+                        messages.append({
+                            "id": f"user_{query.id}",
+                            "role": "user",
+                            "content": query.query_text,
+                            "created_at": query.created_at,
+                        })
+                    
+                    # Assistant message
+                    if query.answer_text:
+                        messages.append({
+                            "id": f"assistant_{query.id}",
+                            "role": "assistant",
+                            "content": query.answer_text,
+                            "created_at": query.created_at,
+                        })
+                
+                if not messages:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="No messages found in conversation"
+                    )
+                
+                return {
+                    "conversation_id": conversation_id,
+                    "customer_id": str(customer.id),
+                    "customer_name": customer_name,
+                    "created_at": messages[0]["created_at"],
+                    "messages": messages,
+                }
+        
+        try:
+            result = await run_sync(_fetch)
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching conversation details: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch conversation: {str(e)}"
+            )
 
     return router
 
