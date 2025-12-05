@@ -6,7 +6,7 @@ import {
   ConversationDetails,
 } from "@/types/queryInsights";
 
-async function getServerFetchOptions() {
+async function getServerFetchOptions(): Promise<{ baseUrl: string; headers: Record<string, string> }> {
   if (typeof window !== "undefined") {
     // Client-side: return empty options, browser handles cookies
     return { baseUrl: "", headers: {} };
@@ -28,9 +28,14 @@ async function getServerFetchOptions() {
     const allCookies = cookieStore.getAll();
     const cookieHeader = allCookies.map(c => `${c.name}=${c.value}`).join("; ");
     
+    const headers: Record<string, string> = {};
+    if (cookieHeader) {
+      headers.Cookie = cookieHeader;
+    }
+    
     return {
       baseUrl,
-      headers: cookieHeader ? { Cookie: cookieHeader } : {},
+      headers,
     };
   } catch {
     // Fallback if headers/cookies fail (e.g., during build validation)
