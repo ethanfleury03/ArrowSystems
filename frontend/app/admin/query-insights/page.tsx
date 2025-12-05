@@ -1,10 +1,11 @@
 import { fetchQueryInsightsCustomers } from "@/lib/api/queryInsights";
 import { CustomerGalaxy } from "./_components/customer-galaxy";
+import type { QueryInsightsCustomer } from "@/types/queryInsights";
 
 export const dynamic = 'force-dynamic';
 
 export default async function QueryInsightsPage() {
-  let customers = [];
+  let customers: QueryInsightsCustomer[] = [];
   let error: string | null = null;
 
   try {
