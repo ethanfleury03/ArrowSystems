@@ -1,5 +1,5 @@
-import { headers } from "next/headers";
-import { cookies } from "next/headers";
+import { headers as getHeaders } from "next/headers";
+import { cookies as getCookies } from "next/headers";
 import {
   QueryInsightsCustomer,
   CustomerQueriesResponse,
@@ -14,8 +14,8 @@ async function getServerFetchOptions(): Promise<{ baseUrl: string; headers: Reco
   
   // Server-side: get base URL and cookies
   try {
-    const headersList = headers();
-    const cookieStore = cookies();
+    const headersList = getHeaders();
+    const cookieStore = getCookies();
     const host = headersList.get("host");
     const protocol = headersList.get("x-forwarded-proto") || 
                      (process.env.NODE_ENV === "production" ? "https" : "http");
@@ -28,14 +28,14 @@ async function getServerFetchOptions(): Promise<{ baseUrl: string; headers: Reco
     const allCookies = cookieStore.getAll();
     const cookieHeader = allCookies.map(c => `${c.name}=${c.value}`).join("; ");
     
-    const headers: Record<string, string> = {};
+    const fetchHeaders: Record<string, string> = {};
     if (cookieHeader) {
-      headers.Cookie = cookieHeader;
+      fetchHeaders.Cookie = cookieHeader;
     }
     
     return {
       baseUrl,
-      headers,
+      headers: fetchHeaders,
     };
   } catch {
     // Fallback if headers/cookies fail (e.g., during build validation)
