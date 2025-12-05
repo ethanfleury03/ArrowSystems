@@ -63,7 +63,7 @@ export function ChatInterface() {
   
   // Default query settings - used for customers (hardcoded) and as fallback for admins
   const DEFAULT_QUERY_SETTINGS: QuerySettings = {
-    topK: 10,
+    topK: 18,  // Increased from 10 to 18 for better search coverage
     alpha: 0.5,
     dynamicWindowing: true,
   }
