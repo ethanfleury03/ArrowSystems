@@ -144,6 +144,7 @@ export interface ChatHistoryResponse {
   status: string;
   count: number;
   history: ChatHistoryItem[];
+  message?: string; // Optional error message from backend
 }
 
 export async function getChatHistory(user: string = 'api_user', limit: number = 50): Promise<ChatHistoryResponse> {
