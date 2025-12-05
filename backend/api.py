@@ -2080,7 +2080,7 @@ async def query_knowledge_base(request: Request):
         # Customers cannot customize top_k, alpha, or dynamic_windowing
         if user_role and user_role.upper() == "CUSTOMER":
             # Override any client-provided tuning fields with safe defaults
-            query_request.top_k = 10
+            query_request.top_k = 18  # Increased from 10 to 18 for better search coverage
             query_request.alpha = 0.5
             query_request.dynamic_windowing = True
             logger.debug(
