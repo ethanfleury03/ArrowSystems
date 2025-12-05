@@ -240,6 +240,19 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         
         return created
 
+    @router.post("/users", response_model=AdminUserResponse, status_code=status.HTTP_201_CREATED)
+    async def create_user_rest(
+        payload: AdminUserCreateRequest = Body(...),
+        admin: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
+    ):
+        """
+        Create a new user (REST-style endpoint at /admin/users).
+        This delegates to the existing create_user function.
+        """
+        return await create_user(payload, admin, manager, http_request)
+
     @router.put("/edit_user/{user_id}", response_model=AdminUserResponse)
     async def edit_user(
         user_id: int,
@@ -365,6 +378,20 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
         return updated
+
+    @router.put("/users/{user_id}", response_model=AdminUserResponse)
+    async def edit_user_rest(
+        user_id: int,
+        payload: AdminUserUpdateRequest = Body(...),
+        admin: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
+    ):
+        """
+        Update user (REST-style endpoint at /admin/users/{user_id}).
+        This delegates to the existing edit_user function.
+        """
+        return await edit_user(user_id, payload, admin, manager, http_request)
 
     @router.delete("/delete_user/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_user(
