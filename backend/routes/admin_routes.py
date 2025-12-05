@@ -1257,40 +1257,52 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         - last_query_at: max(created_at) over their queries
         """
         def _fetch():
-            with SessionLocal() as session:
-                # Get all customers with their query stats using LEFT JOIN
-                query = (
-                    select(
-                        User.id,
-                        User.contact_name,
-                        User.name,
-                        User.email,
-                        func.count(QueryHistory.id).label('total_queries'),
-                        func.max(QueryHistory.created_at).label('last_query_at')
+            try:
+                with SessionLocal() as session:
+                    # Get all customers with their query stats using LEFT JOIN
+                    query = (
+                        select(
+                            User.id,
+                            User.contact_name,
+                            User.name,
+                            User.email,
+                            func.count(QueryHistory.id).label('total_queries'),
+                            func.max(QueryHistory.created_at).label('last_query_at')
+                        )
+                        .outerjoin(QueryHistory, User.id == QueryHistory.user_id)
+                        .where(User.role == "CUSTOMER")
+                        .group_by(User.id, User.contact_name, User.name, User.email)
                     )
-                    .outerjoin(QueryHistory, User.id == QueryHistory.user_id)
-                    .where(User.role == "CUSTOMER")
-                    .group_by(User.id, User.contact_name, User.name, User.email)
-                )
-                
-                results = session.execute(query).all()
-                
-                result = []
-                for row in results:
-                    # Use contact_name or name for display
-                    customer_name = row.contact_name or row.name or row.email or "Unknown"
                     
-                    result.append({
-                        "id": str(row.id),
-                        "name": customer_name,
-                        "total_queries": row.total_queries or 0,
-                        "last_query_at": row.last_query_at,
-                    })
-                
-                return result
+                    results = session.execute(query).all()
+                    
+                    result = []
+                    for row in results:
+                        # Use contact_name or name for display
+                        customer_name = row.contact_name or row.name or row.email or "Unknown"
+                        
+                        result.append({
+                            "id": str(row.id),
+                            "name": customer_name,
+                            "total_queries": row.total_queries or 0,
+                            "last_query_at": row.last_query_at,
+                        })
+                    
+                    logger.info(f"Query insights: found {len(result)} customers")
+                    return result
+            except Exception as e:
+                logger.error(f"Error fetching query insights customers: {e}", exc_info=True)
+                raise
         
-        customers = await run_sync(_fetch)
-        return customers
+        try:
+            customers = await run_sync(_fetch)
+            return customers
+        except Exception as e:
+            logger.error(f"Error in get_query_insights_customers: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch customers: {str(e)}"
+            )
     
     @router.get(
         "/query-insights/customers/{customer_id}/queries",

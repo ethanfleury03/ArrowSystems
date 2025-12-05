@@ -38,14 +38,17 @@ export function CustomerGalaxy({ customers }: CustomerGalaxyProps) {
 
   if (positioned.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-muted-foreground">
-        No customers with queries yet.
+      <div className="flex items-center justify-center min-h-[400px] text-muted-foreground">
+        <div className="text-center space-y-2">
+          <p className="text-sm font-medium">No customers with queries yet.</p>
+          <p className="text-xs">Customer query activity will appear here once they start using the system.</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex-1 relative overflow-hidden bg-gradient-to-b from-background to-muted">
+    <div className="relative overflow-hidden bg-gradient-to-b from-background to-muted min-h-[400px]">
       <div className="absolute inset-0">
         {positioned.map((cust) => {
           const initials = getInitials(cust.name);
