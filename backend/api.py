@@ -2076,6 +2076,21 @@ async def query_knowledge_base(request: Request):
         if not user_role:
             user_role = "ADMIN"
         
+        # Enforce hardcoded query settings for customers (safety net)
+        # Customers cannot customize top_k, alpha, or dynamic_windowing
+        if user_role and user_role.upper() == "CUSTOMER":
+            # Override any client-provided tuning fields with safe defaults
+            query_request.top_k = 10
+            query_request.alpha = 0.5
+            query_request.dynamic_windowing = True
+            logger.debug(
+                "customer_query_settings_enforced",
+                user_id=user_id,
+                top_k=query_request.top_k,
+                alpha=query_request.alpha,
+                dynamic_windowing=query_request.dynamic_windowing
+            )
+        
         # Check machine confirmation for customers
         # Customers must confirm their machine list before querying
         if user_role and user_role.upper() == "CUSTOMER":
@@ -2508,16 +2523,17 @@ async def get_saved_responses(limit: int = 50, min_helpful_count: int = 1, user:
 
 
 @app.get("/history")
-async def get_chat_history(user: str = "api_user", limit: int = 50):
+async def get_chat_history(request: Request, user: Optional[str] = None, limit: int = 50):
     """
-    Get chat history for a user.
+    Get chat history for the authenticated user.
     
     Args:
-        user: User identifier (default: "api_user")
+        request: FastAPI Request object (for extracting JWT token)
+        user: Optional user identifier (deprecated - will use authenticated user from JWT)
         limit: Maximum number of entries to return (default: 50)
     
     Returns:
-        List of chat history entries
+        List of chat history entries for the authenticated user
     """
     global db_manager
     
@@ -2528,8 +2544,31 @@ async def get_chat_history(user: str = "api_user", limit: int = 50):
             "history": []
         }
     
+    # Extract user email from JWT token if available
+    user_email = None
     try:
-        history = await db_manager.get_query_history(user=user, limit=limit)
+        from .logging_context import get_user_id
+        user_email = get_user_id()
+    except Exception:
+        pass
+    
+    # Fallback: try to extract from X-User-Token header (set by frontend API routes)
+    if not user_email:
+        try:
+            token = request.headers.get("X-User-Token")
+            if token:
+                from .security import decode_access_token
+                payload = decode_access_token(token)
+                user_email = payload.get("email")
+        except Exception:
+            pass
+    
+    # Use provided user parameter as last resort (for backward compatibility)
+    if not user_email:
+        user_email = user or "api_user"
+    
+    try:
+        history = await db_manager.get_query_history(user=user_email, limit=limit)
         
         # Format for frontend
         formatted_history = []
@@ -2699,7 +2738,7 @@ async def get_machine_models_for_selection_endpoint():
 
 
 @app.get("/documents")
-async def get_user_documents():
+async def get_user_documents(request: Request):
     """
     Get documents available to the current user based on their machine models.
     For customers: returns documents for their assigned machines + GENERAL documents.
@@ -2711,10 +2750,37 @@ async def get_user_documents():
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
     try:
-        # Get user information from context
-        from .logging_context import get_user_id, get_user_role
-        user_id = get_user_id()
-        user_role = get_user_role()
+        # Extract user email from JWT token if available
+        user_id = None
+        try:
+            from .logging_context import get_user_id, get_user_role
+            user_id = get_user_id()
+        except Exception:
+            pass
+        
+        # Fallback: try to extract from X-User-Token header (set by frontend API routes)
+        user_role = None
+        if not user_id:
+            try:
+                token = request.headers.get("X-User-Token")
+                if token:
+                    from .security import decode_access_token
+                    from .logging_context import set_user_id, set_user_role
+                    payload = decode_access_token(token)
+                    user_id = payload.get("email")
+                    user_role = payload.get("role")
+                    # Set in context for downstream code
+                    if user_id:
+                        set_user_id(user_id)
+                    if user_role:
+                        set_user_role(user_role)
+            except Exception:
+                pass
+        
+        # Get user role from context if not already set
+        if not user_role:
+            from .logging_context import get_user_role
+            user_role = get_user_role()
         user_machine_models = None
         
         # Get machine models for user if available

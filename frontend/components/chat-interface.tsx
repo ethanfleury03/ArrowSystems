@@ -1,3 +1,11 @@
+/**
+ * ChatInterface Component
+ * 
+ * Main chat interface component that handles:
+ * - Message display and input
+ * - Query execution with configurable settings
+ * - Query settings management (admin can customize, customers use hardcoded defaults)
+ */
 "use client"
 
 import type React from "react"
@@ -52,11 +60,15 @@ export function ChatInterface() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const addNewConversationRef = useRef<((conversation: ChatHistoryItem) => void) | null>(null)
-  const querySettingsRef = useRef<QuerySettings>({
+  
+  // Default query settings - used for customers (hardcoded) and as fallback for admins
+  const DEFAULT_QUERY_SETTINGS: QuerySettings = {
     topK: 10,
     alpha: 0.5,
     dynamicWindowing: true,
-  })
+  }
+  
+  const querySettingsRef = useRef<QuerySettings>(DEFAULT_QUERY_SETTINGS)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -358,11 +370,12 @@ export function ChatInterface() {
 
     // Call RAG backend API
     try {
-      const currentSettings = querySettingsRef.current
+      // Get effective query settings: use defaults for customers, allow customization for admins
+      const effectiveSettings = getEffectiveQuerySettings(userInfo, querySettingsRef.current)
       const response = await sendQuery(userMessage.content, {
-        top_k: currentSettings.topK,
-        alpha: currentSettings.alpha,
-        dynamic_windowing: currentSettings.dynamicWindowing,
+        top_k: effectiveSettings.topK,
+        alpha: effectiveSettings.alpha,
+        dynamic_windowing: effectiveSettings.dynamicWindowing,
         machine_confirmation: machineConfirmation || undefined,
         selected_machine: selectedMachine || undefined,
       })
@@ -397,8 +410,8 @@ export function ChatInterface() {
           intentType: response.intent_type,
           intentConfidence: response.intent_confidence,
           sessionId: response.session_id ?? undefined,
-          topK: currentSettings.topK,
-          alpha: currentSettings.alpha,
+          topK: effectiveSettings.topK,
+          alpha: effectiveSettings.alpha,
           matchedMachineName: response.matched_machine_name ?? undefined,
           isSaved: response.is_saved ?? false,
         },
@@ -488,8 +501,24 @@ export function ChatInterface() {
     addNewConversationRef.current = adder
   }
 
+  /**
+   * Get effective query settings based on user role.
+   * Customers always use hardcoded defaults, admins can customize.
+   */
+  const getEffectiveQuerySettings = (currentUser: UserInfo | null, userSettings: QuerySettings): QuerySettings => {
+    if (!currentUser || currentUser.role?.toUpperCase() !== "ADMIN") {
+      // Customers always use defaults
+      return DEFAULT_QUERY_SETTINGS
+    }
+    // Admins can customize
+    return userSettings
+  }
+
   const handleSettingsChange = (settings: QuerySettings) => {
-    querySettingsRef.current = settings
+    // Only allow settings changes for admins (customers won't see the UI anyway)
+    if (userInfo?.role === 'ADMIN') {
+      querySettingsRef.current = settings
+    }
   }
 
   const handleLoadConversation = (loadedMessages: Message[]) => {
