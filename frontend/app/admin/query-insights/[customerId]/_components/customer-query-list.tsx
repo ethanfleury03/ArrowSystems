@@ -26,6 +26,18 @@ export function CustomerQueryList({ data, initialSearch }: Props) {
   const searchParams = useSearchParams();
   const [search, setSearch] = useState(initialSearch);
 
+  // Debug logging
+  useEffect(() => {
+    console.log("QueryInsights: customer page props", {
+      customerId: data.customer_id,
+      customerName: data.customer_name,
+      totalQueries: data.total_queries,
+      queriesLength: data.queries.length,
+      lastQueryAt: data.last_query_at,
+      queries: data.queries.slice(0, 3), // First 3 queries for inspection
+    });
+  }, [data]);
+
   // Update URL query param when search changes (debounced).
   useEffect(() => {
     const timeout = setTimeout(() => {
