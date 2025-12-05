@@ -35,9 +35,11 @@ echo "=========================================="
 echo "Step 2: Remove any existing GCS volume mounts (if present)"
 echo "=========================================="
 # Remove any existing volume mounts to ensure clean state
+# Note: Explicitly preserve min-instances=1 to prevent reset to default (0)
 gcloud run services update $SERVICE \
   --remove-volume=rag-index \
   --remove-volume-mount=rag-index \
+  --min-instances=1 \
   --region=$REGION \
   --platform=managed \
   --project=$PROJECT 2>/dev/null || echo "No rag-index volume to remove (expected)"
@@ -45,6 +47,7 @@ gcloud run services update $SERVICE \
 gcloud run services update $SERVICE \
   --remove-volume=data-volume \
   --remove-volume-mount=data-volume \
+  --min-instances=1 \
   --region=$REGION \
   --platform=managed \
   --project=$PROJECT 2>/dev/null || echo "No data-volume volume to remove (expected)"

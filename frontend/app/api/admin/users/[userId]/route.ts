@@ -59,20 +59,42 @@ export async function DELETE(
       'X-User-Token': token,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      return NextResponse.json(
-        { detail: (error as any).detail || 'Failed to delete user' },
-        { status: response.status }
-      );
-    }
-
-    // Backend returns 204 No Content on success; normalize to 200 with a simple JSON body
+    // Handle 204 No Content: backend successfully deleted the user
+    // Return 200 with success JSON (204 cannot have a body in NextResponse)
     if (response.status === 204) {
       return NextResponse.json({ success: true }, { status: 200 });
     }
 
-    const data = await response.json().catch(() => ({}));
+    // For error responses, try to parse error details
+    if (!response.ok) {
+      let error: any = {};
+      try {
+        // Only try to parse JSON if there's actually content
+        const text = await response.text();
+        if (text) {
+          error = JSON.parse(text);
+        }
+      } catch {
+        // If parsing fails, use default error
+        error = { detail: 'Failed to delete user' };
+      }
+      return NextResponse.json(
+        { detail: error.detail || 'Failed to delete user' },
+        { status: response.status }
+      );
+    }
+
+    // For other success statuses, parse and return data
+    let data: any = {};
+    try {
+      const text = await response.text();
+      if (text) {
+        data = JSON.parse(text);
+      }
+    } catch {
+      // If parsing fails, return success indicator
+      data = { success: true };
+    }
     return NextResponse.json(data);
   } catch (error) {
     console.error('Admin user delete API error:', error);

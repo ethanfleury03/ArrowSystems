@@ -116,9 +116,7 @@ export async function iamBackendRequest(
 
     // Convert the response to a standard Response object
     // Preserve all headers from the backend response, especially Set-Cookie for auth
-    const responseHeaders: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
+    const responseHeaders: Record<string, string> = {};
     
     // Copy important headers from backend response
     if (response.headers) {
@@ -133,6 +131,20 @@ export async function iamBackendRequest(
           responseHeaders[headerName] = response.headers[headerName];
         }
       });
+    }
+
+    // Handle 204 No Content: return Response without body (204 cannot have a body)
+    if (statusCode === 204) {
+      return new Response(null, {
+        status: 204,
+        headers: responseHeaders,
+      });
+    }
+
+    // For other statuses, include JSON body
+    // Only set Content-Type if we're actually returning JSON
+    if (!responseHeaders['content-type']) {
+      responseHeaders['Content-Type'] = 'application/json';
     }
 
     return new Response(JSON.stringify(response.data), {
