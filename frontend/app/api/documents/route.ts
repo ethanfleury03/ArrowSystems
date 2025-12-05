@@ -4,9 +4,6 @@ import { iamBackendGet } from '@/lib/iam-backend';
 
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const limit = searchParams.get('limit') || '50';
-    
     // Extract JWT from cookie and forward as X-User-Token (same pattern as admin routes)
     const cookieStore = await cookies();
     const token = cookieStore.get('access_token')?.value || cookieStore.get('auth_token')?.value;
@@ -16,8 +13,9 @@ export async function GET(request: NextRequest) {
       headers['X-User-Token'] = token;
     }
     
-    // Backend will extract user email from JWT token, so we don't need to pass user param
-    const response = await iamBackendGet(`/history?limit=${limit}`, headers);
+    // Proxy to backend /documents endpoint
+    // The backend will filter documents based on the authenticated user's machine models
+    const response = await iamBackendGet('/documents', headers);
 
     if (!response.ok) {
       const error = await response.json();
@@ -30,7 +28,7 @@ export async function GET(request: NextRequest) {
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error) {
-    console.error('API route error:', error);
+    console.error('Documents API route error:', error);
     
     return NextResponse.json(
       { detail: error instanceof Error ? error.message : 'Internal server error' },

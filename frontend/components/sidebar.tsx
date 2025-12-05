@@ -1,3 +1,14 @@
+/**
+ * Sidebar Component
+ * 
+ * Main sidebar for the chat interface with tabs for:
+ * - Options (chat history, documents, settings)
+ * - Saved responses
+ * - Settings (Query Preferences and Data Management - admin only)
+ * 
+ * Query Preferences panel: lets users tune chunk count, retrieval mode, etc. (admin only)
+ * Data Management panel: Export/Clear chat history (admin only)
+ */
 "use client"
 
 import { Settings, FileText, History, Menu, LogOut, User, Bookmark, Search, MessageSquare, Clock, Download, Trash2, Database, Server, CheckCircle2, XCircle, Info, Shield } from "lucide-react"
@@ -35,6 +46,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   const [searchQuery, setSearchQuery] = useState("")
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([])
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const [showChatHistory, setShowChatHistory] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showDocuments, setShowDocuments] = useState(false)
@@ -42,6 +54,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   const [isLoadingSaved, setIsLoadingSaved] = useState(false)
   const [documents, setDocuments] = useState<Document[]>([])
   const [isLoadingDocuments, setIsLoadingDocuments] = useState(false)
+  const [documentsError, setDocumentsError] = useState<string | null>(null)
   const [userProfile, setUserProfile] = useState<{ name?: string | null; email?: string | null; role?: string | null } | null>(null)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   
@@ -127,13 +140,20 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
 
   const fetchChatHistory = async (email: string) => {
     setIsLoadingHistory(true)
+    setHistoryError(null)
     try {
       const response = await getChatHistory(email, 50)
       if (response.status === 'success') {
         setChatHistory(response.history)
+        setHistoryError(null)
+      } else {
+        // Backend returned an error status but didn't throw
+        setHistoryError(response.message || 'Failed to load chat history')
+        setChatHistory([])
       }
     } catch (error) {
       console.error('Failed to fetch chat history:', error)
+      setHistoryError(error instanceof Error ? error.message : 'Failed to load chat history. Please refresh.')
       setChatHistory([])
     } finally {
       setIsLoadingHistory(false)
@@ -157,11 +177,14 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
 
   const fetchDocuments = async () => {
     setIsLoadingDocuments(true)
+    setDocumentsError(null)
     try {
       const response = await getUserDocuments()
-      setDocuments(response.documents)
+      setDocuments(response.documents || [])
+      setDocumentsError(null)
     } catch (error) {
       console.error('Failed to fetch documents:', error)
+      setDocumentsError(error instanceof Error ? error.message : 'Failed to load documents. Please refresh.')
       setDocuments([])
     } finally {
       setIsLoadingDocuments(false)
@@ -666,7 +689,22 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
               <div className="flex-1 overflow-y-auto p-4">
                 {isLoadingHistory ? (
                   <div className="flex items-center justify-center py-8">
-                    <div className="text-sm text-muted-foreground">Loading...</div>
+                    <div className="text-sm text-muted-foreground">Loading chat history...</div>
+                  </div>
+                ) : historyError ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <History className="h-12 w-12 text-destructive/30 mb-3" />
+                    <p className="text-sm font-medium text-foreground mb-1">Could not load chat history</p>
+                    <p className="text-xs text-muted-foreground mb-4">
+                      {historyError}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fetchChatHistory(currentUserEmail)}
+                    >
+                      Try again
+                    </Button>
                   </div>
                 ) : filteredChatHistory.length > 0 ? (
                   <div className="space-y-2">
@@ -848,7 +886,22 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
               <div className="flex-1 overflow-y-auto p-4">
                 {isLoadingDocuments ? (
                   <div className="flex items-center justify-center py-8">
-                    <div className="text-sm text-muted-foreground">Loading...</div>
+                    <div className="text-sm text-muted-foreground">Loading documents...</div>
+                  </div>
+                ) : documentsError ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <FileText className="h-12 w-12 text-destructive/30 mb-3" />
+                    <p className="text-sm font-medium text-foreground mb-1">Could not load documents</p>
+                    <p className="text-xs text-muted-foreground mb-4">
+                      {documentsError}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fetchDocuments()}
+                    >
+                      Try again
+                    </Button>
                   </div>
                 ) : documents.length > 0 ? (
                   <div className="space-y-2">
@@ -928,9 +981,10 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
 
               {/* Settings Content */}
               <div className="flex-1 overflow-y-auto p-4 space-y-6">
-                {/* Query Preferences */}
-                <div className="space-y-4">
-                  <h4 className="text-sm font-semibold text-foreground">Query Preferences</h4>
+                {/* Query Preferences - Admin only */}
+                {userInfo?.role === 'ADMIN' && (
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-semibold text-foreground">Query Preferences</h4>
                   
                   {/* Top-K Slider */}
                   <div className="space-y-2">
@@ -992,13 +1046,15 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                       onCheckedChange={(checked) => updateQuerySettings({ dynamicWindowing: checked })}
                     />
                   </div>
-                </div>
+                  </div>
+                )}
 
-                <div className="border-t border-border" />
-
-                {/* Data Management */}
-                <div className="space-y-3">
-                  <h4 className="text-sm font-semibold text-foreground">Data Management</h4>
+                {/* Data Management - Admin only */}
+                {userInfo?.role === 'ADMIN' && (
+                  <>
+                    <div className="border-t border-border" />
+                    <div className="space-y-3">
+                      <h4 className="text-sm font-semibold text-foreground">Data Management</h4>
                   
                   <Button
                     variant="outline"
@@ -1019,7 +1075,9 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                     <Trash2 className="h-4 w-4" />
                     Clear Chat History
                   </Button>
-                </div>
+                    </div>
+                  </>
+                )}
 
                 <div className="border-t border-border" />
 
