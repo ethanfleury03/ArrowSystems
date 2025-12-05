@@ -58,8 +58,25 @@ export async function fetchQueryInsightsCustomers(): Promise<QueryInsightsCustom
     headers: fetchHeaders,
     cache: "no-store", // Ensure fresh data
   });
-  if (!res.ok) throw new Error("Failed to load customers");
-  return res.json();
+  
+  if (!res.ok) {
+    let errorMessage = "Failed to load customers";
+    try {
+      const errorData = await res.json();
+      errorMessage = errorData.detail || errorData.message || errorMessage;
+    } catch {
+      errorMessage = `Failed to load customers: ${res.status} ${res.statusText}`;
+    }
+    throw new Error(errorMessage);
+  }
+  
+  const data = await res.json();
+  // Ensure we return an array even if backend returns unexpected format
+  if (!Array.isArray(data)) {
+    console.warn('Query Insights API returned non-array data:', data);
+    return [];
+  }
+  return data;
 }
 
 export async function fetchCustomerQueries(
