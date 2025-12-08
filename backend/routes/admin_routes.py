@@ -1318,17 +1318,25 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         For a given customer, return:
         - customer_id
         - customer_name
-        - total_queries: number of conversations for this customer
-        - last_query_at: max(created_at) over conversations
+        - total_queries: number of queries for this customer
+        - last_query_at: max(created_at) over queries
         - queries: list of CustomerQuerySummary sorted by created_at DESC
         """
         def _fetch():
             with SessionLocal() as session:
-                logger.info(f"[QueryInsights] Fetching queries for customer_id={customer_id} (type: {type(customer_id)})")
+                logger.info(f"[QueryInsights] Fetching queries for customer_id={customer_id}")
                 
-                # Get customer
+                # Get customer by ID
+                try:
+                    customer_id_int = int(customer_id)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid customer_id"
+                    )
+                
                 customer = session.query(User).filter(
-                    User.id == int(customer_id),
+                    User.id == customer_id_int,
                     User.role == "CUSTOMER"
                 ).first()
                 
@@ -1339,32 +1347,12 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                         detail="Customer not found"
                     )
                 
-                logger.info(f"[QueryInsights] Found customer: id={customer.id}, email={customer.email}, name={customer.name}")
-                
                 customer_name = customer.contact_name or customer.name or customer.email or "Unknown"
+                logger.info(f"[QueryInsights] Found customer: id={customer.id}, email={customer.email}, name={customer_name}")
                 
-                # Get all queries for this customer
-                # Use load_only to exclude updated_at column which may not exist in DB
-                customer_id_int = int(customer_id)
-                logger.info(f"[QueryInsights] Querying QueryHistory with user_id={customer_id_int}")
-                
-                base_query = session.query(QueryHistory).options(
-                    load_only(
-                        QueryHistory.id,
-                        QueryHistory.user_id,
-                        QueryHistory.query_text,
-                        QueryHistory.answer_text,
-                        QueryHistory.response_time_ms,
-                        QueryHistory.metadata_json,
-                        QueryHistory.created_at,
-                        QueryHistory.machine_name,
-                        QueryHistory.token_input,
-                        QueryHistory.token_output,
-                        QueryHistory.token_total,
-                        QueryHistory.cost_usd,
-                        QueryHistory.sources_json
-                    )
-                ).filter(
+                # Get all queries for this customer - similar to chat history logic
+                # Filter by user_id (which is the foreign key to users.id)
+                base_query = session.query(QueryHistory).filter(
                     QueryHistory.user_id == customer_id_int
                 )
                 
@@ -1378,17 +1366,6 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 all_queries = base_query.order_by(desc(QueryHistory.created_at)).all()
                 logger.info(f"[QueryInsights] Found {len(all_queries)} query_history rows for user_id={customer_id_int}")
                 
-                # Debug: log sample user_ids from query_history to verify data
-                if len(all_queries) == 0:
-                    # Check if there are ANY queries in the table
-                    total_queries = session.query(QueryHistory).count()
-                    logger.info(f"[QueryInsights] Total queries in query_history table: {total_queries}")
-                    
-                    # Get sample user_ids to see what values exist
-                    sample_queries = session.query(QueryHistory.user_id).distinct().limit(10).all()
-                    sample_user_ids = [q[0] for q in sample_queries]
-                    logger.info(f"[QueryInsights] Sample user_ids in query_history: {sample_user_ids}")
-                
                 if not all_queries:
                     return {
                         "customer_id": customer_id,
@@ -1398,72 +1375,52 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                         "queries": [],
                     }
                 
-                # Group queries by sessionId (conversation)
-                # Extract sessionId from metadata_json (JSONB field)
-                conversations = {}
+                # Convert queries to summaries - one per query (simpler than grouping by conversation)
+                query_summaries = []
                 for query in all_queries:
-                    session_id = None
+                    # Extract sessionId from metadata for conversation_id
+                    conversation_id = f"query_{query.id}"  # Default fallback
                     if query.metadata_json:
                         if isinstance(query.metadata_json, dict):
                             session_id = query.metadata_json.get("sessionId")
+                            if session_id:
+                                conversation_id = str(session_id)
                         elif isinstance(query.metadata_json, str):
                             try:
                                 metadata = json.loads(query.metadata_json)
-                                session_id = metadata.get("sessionId") if isinstance(metadata, dict) else None
+                                if isinstance(metadata, dict):
+                                    session_id = metadata.get("sessionId")
+                                    if session_id:
+                                        conversation_id = str(session_id)
                             except (json.JSONDecodeError, TypeError):
                                 pass
                     
-                    # If no session_id, treat each query as its own conversation
-                    if not session_id:
-                        session_id = f"query_{query.id}"
-                    
-                    if session_id not in conversations:
-                        conversations[session_id] = {
-                            "conversation_id": session_id,
-                            "created_at": query.created_at,
-                            "query_text": query.query_text or "",
-                            "query_ids": [],
-                        }
-                    
-                    conversations[session_id]["query_ids"].append(query.id)
-                    # Update created_at to earliest query in conversation
-                    if query.created_at < conversations[session_id]["created_at"]:
-                        conversations[session_id]["created_at"] = query.created_at
-                
-                # Convert to list and sort by created_at DESC
-                query_summaries = []
-                for conv_id, conv_data in conversations.items():
-                    # Count messages: each query has 2 messages (user query + assistant answer)
-                    message_count = len(conv_data["query_ids"]) * 2
+                    # Count messages in this conversation (if we want to group later, we can)
+                    # For now, each query is 2 messages (user + assistant)
+                    message_count = 2
                     
                     query_summaries.append({
-                        "id": str(conv_data["query_ids"][0]),  # Use first query ID
-                        "conversation_id": conv_data["conversation_id"],
-                        "created_at": conv_data["created_at"],
-                        "query_text": conv_data["query_text"],
+                        "id": str(query.id),
+                        "conversation_id": conversation_id,
+                        "created_at": query.created_at,  # Keep as datetime, Pydantic will serialize
+                        "query_text": query.query_text or "",
                         "message_count": message_count,
                     })
                 
-                logger.info(f"[QueryInsights] Grouped into {len(conversations)} conversations, {len(query_summaries)} summaries")
-                
-                # Sort by created_at DESC
+                # Sort by created_at DESC (already sorted by DB query, but ensure)
                 query_summaries.sort(key=lambda x: x["created_at"], reverse=True)
                 
                 # Calculate totals
                 total_queries = len(query_summaries)
-                last_query_at = max(q["created_at"] for q in query_summaries) if query_summaries else None
+                last_query_at = query_summaries[0]["created_at"] if query_summaries else None
                 
-                logger.info(f"[QueryInsights] Returning response: total_queries={total_queries}, last_query_at={last_query_at}, queries_count={len(query_summaries)}")
-                
-                # Debug: log first few query summaries to verify structure
-                if query_summaries:
-                    logger.info(f"[QueryInsights] Sample query summary: {query_summaries[0]}")
+                logger.info(f"[QueryInsights] Returning {total_queries} queries for customer_id={customer_id}")
                 
                 return {
                     "customer_id": customer_id,
                     "customer_name": customer_name,
                     "total_queries": total_queries,
-                    "last_query_at": last_query_at,  # Pydantic will serialize datetime to ISO string
+                    "last_query_at": last_query_at,
                     "queries": query_summaries,
                 }
         
@@ -1472,11 +1429,6 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             return result
         except HTTPException:
             raise
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid customer_id"
-            )
         except Exception as e:
             logger.error(f"Error fetching customer queries: {e}", exc_info=True)
             raise HTTPException(

@@ -26,6 +26,11 @@ export function CustomerQueryList({ data, initialSearch }: Props) {
   const searchParams = useSearchParams();
   const [search, setSearch] = useState(initialSearch);
 
+  // Temporary deep log to verify data shape from API.
+  useEffect(() => {
+    console.log("ADMIN QUERY INSIGHTS – customer query list data", data);
+  }, [data]);
+
   // Debug logging
   useEffect(() => {
     console.log("QueryInsights: customer page props", {
