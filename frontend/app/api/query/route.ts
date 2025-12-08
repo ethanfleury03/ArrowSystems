@@ -100,6 +100,7 @@ export async function POST(request: NextRequest) {
       machine_confirmation,
       selected_machine,
       session_id,
+      conversation_id,
     } = body;
 
     const queryRequest: Record<string, any> = {
@@ -110,6 +111,12 @@ export async function POST(request: NextRequest) {
     if (typeof session_id === 'string' && session_id.trim().length > 0) {
       queryRequest.session_id = session_id;
     }
+
+    if (typeof conversation_id === 'string' && conversation_id.trim().length > 0) {
+      queryRequest.conversation_id = conversation_id;
+    }
+    
+    console.log("BACKEND PROXY PAYLOAD", queryRequest);
 
     if (top_k !== undefined && top_k !== null && top_k !== '') {
       const parsedTopK = Number(top_k);

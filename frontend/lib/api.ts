@@ -60,6 +60,7 @@ export interface QueryResponse {
   intent_confidence?: number;
   response_time_ms?: number;
   session_id?: string;
+  conversation_id?: string;
   cache_hit?: boolean;
   matched_machine_name?: string;
   summarization_info?: SummarizationInfo;
@@ -72,6 +73,7 @@ export interface QueryParams {
   dynamic_windowing?: boolean;
   machine_confirmation?: boolean;
   selected_machine?: string;
+  conversation_id?: string;
 }
 
 export interface UserInfo {
@@ -88,14 +90,23 @@ export interface UserInfo {
 export async function sendQuery(query: string, params?: QueryParams): Promise<QueryResponse> {
   try {
     // JWT token is automatically added by the axios interceptor
-    const response = await apiClient.post<QueryResponse>('/query', {
+    const payload: Record<string, any> = {
       query,
       top_k: params?.top_k ?? 10,
       alpha: params?.alpha ?? 0.5,
       dynamic_windowing: params?.dynamic_windowing ?? true,
       machine_confirmation: params?.machine_confirmation,
       selected_machine: params?.selected_machine,
-    });
+    };
+    
+    // Include conversation_id if provided
+    if (params?.conversation_id) {
+      payload.conversation_id = params.conversation_id;
+    }
+    
+    console.log("CHAT REQUEST PAYLOAD", payload);
+    
+    const response = await apiClient.post<QueryResponse>('/query', payload);
     
     return response.data;
   } catch (error) {

@@ -300,6 +300,7 @@ class DatabaseManager:
         confidence: Optional[float] = None,
         response_time_ms: Optional[int] = None,
         session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         machine_name: Optional[str] = None,
         token_input: Optional[int] = None,
         token_output: Optional[int] = None,
@@ -331,6 +332,7 @@ class DatabaseManager:
 
                     record = QueryHistory(
                         user_id=user_id,
+                        conversation_id=conversation_id,
                         query_text=query_text,
                         answer_text=answer_text,
                         response_time_ms=response_time_ms,

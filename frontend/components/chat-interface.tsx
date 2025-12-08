@@ -55,6 +55,7 @@ export function ChatInterface() {
   const [ragStatus, setRagStatus] = useState<'unknown' | 'ready' | 'warming' | 'disabled'>('unknown')
   const [ragLastError, setRagLastError] = useState<string | null>(null)
   const [checkingRag, setCheckingRag] = useState<boolean>(true)
+  const [conversationId, setConversationId] = useState<string | null>(null) // Track current conversation
   const ragPollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const onboardingShownRef = useRef(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -378,7 +379,13 @@ export function ChatInterface() {
         dynamic_windowing: effectiveSettings.dynamicWindowing,
         machine_confirmation: machineConfirmation || undefined,
         selected_machine: selectedMachine || undefined,
+        conversation_id: conversationId || undefined,
       })
+      
+      // Store conversation_id from response if we don't have one yet
+      if (!conversationId && response.conversation_id) {
+        setConversationId(response.conversation_id)
+      }
       const structuredSources = (response.sources ?? []).map((source) => ({
         id: source.id,
         name: source.name,
@@ -528,6 +535,7 @@ export function ChatInterface() {
     }
 
     setMessages(loadedMessages)
+    setConversationId(null) // Reset conversation_id when loading from history (starts new conversation)
     setSidebarOpen(false)
     setInput("")
     // Reset confirmation state when loading a conversation
@@ -538,6 +546,13 @@ export function ChatInterface() {
        msg.content.includes("What can I help you with today?"))
     )
     setMachineConfirmation(hasConfirmation)
+    textareaRef.current?.focus()
+  }
+  
+  const handleNewConversation = () => {
+    setMessages([])
+    setConversationId(null)
+    setInput("")
     textareaRef.current?.focus()
   }
 
