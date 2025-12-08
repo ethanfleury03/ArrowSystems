@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -21,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    func,
     inspect,
     text,
 )
@@ -149,13 +150,20 @@ class QueryHistory(Base):
 
     # NOTE: query_history table in DB does NOT currently have an updated_at column.
     # We only use created_at for Query Insights.
+    # created_at is timezone-aware UTC to ensure proper serialization and frontend display.
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     query_text = Column(Text, nullable=False)
     answer_text = Column(Text)
     response_time_ms = Column(Integer)
     metadata_json = Column("metadata", JSON, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True
+    )
     
     # Analytics columns
     machine_name = Column(String(255), nullable=True)
