@@ -7,8 +7,23 @@ interface Props {
   conversation: ConversationDetails;
 }
 
+/**
+ * Parse a backend date string, treating it as UTC if no timezone is present.
+ * Backend may send naive UTC datetimes (e.g., "2025-12-08T15:10:00") which
+ * should be interpreted as UTC, not local time.
+ */
+function parseBackendDate(dateString: string): Date {
+  if (!dateString) return new Date();
+  
+  // If the string already has timezone info (Z or offset), use as-is
+  const hasTZ = /[zZ]|[+\-]\d{2}:?\d{2}$/.test(dateString);
+  const normalized = hasTZ ? dateString : dateString + "Z";
+  
+  return new Date(normalized);
+}
+
 function formatDate(dateString: string): string {
-  const date = new Date(dateString);
+  const date = parseBackendDate(dateString);
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
