@@ -143,6 +143,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     setHistoryError(null)
     try {
       const response = await getChatHistory(email, 50)
+      console.log("CHAT HISTORY – items prop", response.history)
       if (response.status === 'success') {
         setChatHistory(response.history)
         setHistoryError(null)
@@ -318,9 +319,25 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
     setSearchQuery("")
   }
 
-  const formatTimestamp = (timestamp: string) => {
+  /**
+   * Parse a backend date string, treating it as UTC if no timezone is present.
+   * Backend may send naive UTC datetimes (e.g., "2025-12-08T15:10:00") which
+   * should be interpreted as UTC, not local time.
+   */
+  const parseBackendDate = (dateString: string | null | undefined): Date | null => {
+    if (!dateString) return null;
+    const hasTZ = /[zZ]|[+\-]\d{2}:?\d{2}$/.test(dateString);
+    const normalized = hasTZ ? dateString : dateString + "Z";
+    const d = new Date(normalized);
+    return isNaN(d.getTime()) ? null : d;
+  };
+
+  const formatTimestamp = (timestamp: string | null | undefined) => {
+    if (!timestamp) return "";
+    const date = parseBackendDate(timestamp);
+    if (!date) return "";
+    
     try {
-      const date = new Date(timestamp)
       const now = new Date()
       const diffMs = now.getTime() - date.getTime()
       const diffMins = Math.floor(diffMs / 60000)
@@ -337,6 +354,10 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
         day: "numeric",
         year: date.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
       })
+    } catch (error) {
+      console.error("Error formatting timestamp:", error);
+      return "";
+    }
     } catch {
       return timestamp
     }
@@ -721,24 +742,28 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                           <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5 group-hover:text-primary transition-colors" />
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-foreground line-clamp-1 leading-relaxed">
-                              {chat.query}
+                              {chat.query || 'Untitled conversation'}
                             </p>
-                            <p className="text-xs text-muted-foreground line-clamp-2 mt-1 leading-relaxed">
-                              {chat.answer}
-                            </p>
+                            {chat.answer && (
+                              <p className="text-xs text-muted-foreground line-clamp-2 mt-1 leading-relaxed">
+                                {chat.answer}
+                              </p>
+                            )}
                             <div className="flex items-center gap-3 mt-2">
-                              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                                <Clock className="h-3 w-3" />
-                                {formatTimestamp(chat.timestamp)}
-                              </div>
+                              {chat.timestamp && (
+                                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                  <Clock className="h-3 w-3" />
+                                  {formatTimestamp(chat.timestamp) || 'Invalid Date'}
+                                </div>
+                              )}
                               {chat.intent_type && (
                                 <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
                                   {chat.intent_type}
                                 </span>
                               )}
-                              {chat.confidence !== undefined && (
+                              {chat.confidence !== undefined && chat.confidence !== null && (
                                 <span className="text-xs text-muted-foreground">
-                                  {(chat.confidence * 100).toFixed(0)}%
+                                  {Math.round(chat.confidence * 100)}%
                                 </span>
                               )}
                             </div>
@@ -776,7 +801,7 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
                             setActiveTab("history")
                           }}
                         >
-                          <p className="text-sm font-medium text-foreground line-clamp-1">{chat.query}</p>
+                          <p className="text-sm font-medium text-foreground line-clamp-1">{chat.query || 'Untitled conversation'}</p>
                           <p className="mt-1 text-xs text-muted-foreground line-clamp-1">{chat.answer}</p>
                           <p className="mt-1 text-xs text-muted-foreground">
                             {formatTimestamp(chat.timestamp)}

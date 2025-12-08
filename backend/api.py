@@ -2568,21 +2568,41 @@ async def get_chat_history(request: Request, user: Optional[str] = None, limit: 
         user_email = user or "api_user"
     
     try:
+        logger.info("[ChatHistory] Fetching history for user_email=%s, limit=%d", user_email, limit)
         history = await db_manager.get_query_history(user=user_email, limit=limit)
+        logger.info("[ChatHistory] Found %d query_history rows for user_email=%s", len(history), user_email)
         
         # Format for frontend
+        # Note: db_manager.get_query_history already returns dicts with 'query', 'answer', 'timestamp', etc.
         formatted_history = []
         for entry in history:
+            # The entry already has 'query', 'answer', 'timestamp' from database_manager
+            # We just need to ensure timestamp is properly formatted
+            timestamp = entry.get('timestamp', '')
+            if timestamp:
+                # If it's a datetime object, convert to ISO string
+                if hasattr(timestamp, 'isoformat'):
+                    timestamp = timestamp.isoformat()
+                elif not isinstance(timestamp, str):
+                    timestamp = str(timestamp)
+            
             formatted_history.append({
-                "id": entry.get('id', ''),
-                "query": entry.get('query_text', ''),
-                "answer": entry.get('answer_text', ''),
-                "timestamp": entry.get('created_at', ''),
+                "id": str(entry.get('id', '')),
+                "query": entry.get('query', '') or 'Untitled conversation',
+                "answer": entry.get('answer', ''),
+                "timestamp": timestamp,
                 "intent_type": entry.get('intent_type', ''),
                 "confidence": entry.get('confidence', 0.0),
                 "sources": entry.get('sources', []),
                 "response_time_ms": entry.get('response_time_ms', 0)
             })
+        
+        logger.info("[ChatHistory] Returning %d formatted items", len(formatted_history))
+        if formatted_history:
+            logger.info("[ChatHistory] Sample item: id=%s, query=%s, timestamp=%s", 
+                       formatted_history[0].get('id'), 
+                       formatted_history[0].get('query')[:50],
+                       formatted_history[0].get('timestamp'))
         
         return {
             "status": "success",

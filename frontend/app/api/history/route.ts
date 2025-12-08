@@ -27,8 +27,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const data = await response.json();
-    return NextResponse.json(data);
+    const backendJson = await response.json();
+    console.log("/api/history backendJson", backendJson);
+    return NextResponse.json(backendJson);
   } catch (error) {
     console.error('API route error:', error);
     
