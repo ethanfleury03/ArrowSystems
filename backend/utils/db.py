@@ -153,6 +153,7 @@ class QueryHistory(Base):
     # created_at is timezone-aware UTC to ensure proper serialization and frontend display.
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(String(255), nullable=True, index=True)  # Groups queries into conversations
     query_text = Column(Text, nullable=False)
     answer_text = Column(Text)
     response_time_ms = Column(Integer)

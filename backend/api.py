@@ -772,6 +772,7 @@ class QueryRequest(BaseModel):
     """Request model for query endpoint."""
     query: str = Field(..., description="User query", min_length=1, max_length=5000)
     session_id: Optional[str] = Field(None, description="Session ID for chat history (auto-generated if not provided)")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID to group related queries (auto-generated if not provided)")
     top_k: int = Field(10, description="Number of chunks to retrieve", ge=1, le=50)
     alpha: float = Field(0.5, description="Hybrid search weight (0=BM25 only, 1=dense only)", ge=0.0, le=1.0)
     metadata_filters: Optional[Dict[str, Any]] = Field(None, description="Optional metadata filters")
@@ -807,6 +808,7 @@ class QueryResponse(BaseModel):
     intent_confidence: float
     response_time_ms: int
     session_id: Optional[str] = None
+    conversation_id: Optional[str] = None  # Conversation ID for grouping related queries
     cache_hit: bool = False
     matched_machine_name: Optional[str] = None  # Machine name matched in query (if >=95% similarity)
     is_saved: bool = False
@@ -2040,14 +2042,57 @@ async def query_knowledge_base(request: Request):
             # may be limited.
             logger.warning("query_user_token_decode_failed", error=str(e), exc_info=True)
 
-        # Generate or use provided session_id
+        # Generate or use provided conversation_id
+        conversation_id = query_request.conversation_id
+        if not conversation_id:
+            import uuid
+            conversation_id = str(uuid.uuid4())
+        
+        # Generate session_id for backward compatibility (used in metadata)
         session_id = query_request.session_id
         if not session_id:
-            # Generate a simple session ID (in production, use proper UUID)
             session_id = f"session_{int(time.time() * 1000)}"
         
-        # Get chat history for this session (last 10 messages)
-        chat_history = await session_manager.get_conversation_messages(session_id)
+        # Load chat history from QueryHistory for this conversation
+        chat_history = []
+        if db_manager and user_id:
+            try:
+                # Get user's database ID
+                user = await db_manager.get_user_by_email(user_id)
+                if user:
+                    user_db_id = int(user.get("id"))
+                    
+                    # Load recent history for this conversation (last 3 Q/A pairs = 6 messages)
+                    HISTORY_LIMIT = 3
+                    from .utils.db import QueryHistory
+                    from sqlalchemy import desc
+                    
+                    def _load_history():
+                        with SessionLocal() as session:
+                            history_rows = (
+                                session.query(QueryHistory)
+                                .filter(
+                                    QueryHistory.user_id == user_db_id,
+                                    QueryHistory.conversation_id == conversation_id
+                                )
+                                .order_by(QueryHistory.created_at.asc())
+                                .limit(HISTORY_LIMIT)
+                                .all()
+                            )
+                            
+                            messages = []
+                            for row in history_rows:
+                                if row.query_text:
+                                    messages.append({"role": "user", "content": row.query_text})
+                                if row.answer_text:
+                                    messages.append({"role": "assistant", "content": row.answer_text})
+                            return messages
+                    
+                    chat_history = await run_sync(_load_history)
+                    logger.info(f"[ChatHistory] Loaded {len(chat_history)} messages for conversation_id={conversation_id}")
+            except Exception as e:
+                logger.warning(f"Failed to load chat history: {e}", exc_info=True)
+                chat_history = []
         
         # Get user information from context (set by middleware)
         from .logging_context import get_user_id, get_user_role
@@ -2244,6 +2289,7 @@ async def query_knowledge_base(request: Request):
                     confidence=response.confidence,
                     response_time_ms=response_time_ms,
                     session_id=session_id,
+                    conversation_id=conversation_id,
                     machine_name=machine_name,
                     token_input=token_input,
                     token_output=token_output,
@@ -2272,6 +2318,7 @@ async def query_knowledge_base(request: Request):
             intent_confidence=response.intent.confidence,
             response_time_ms=response_time_ms,
             session_id=session_id,
+            conversation_id=conversation_id,
             matched_machine_name=response.matched_machine_name,
             is_saved=is_saved
         )
