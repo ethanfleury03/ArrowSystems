@@ -46,8 +46,9 @@ export async function GET(
       );
     }
 
-    const data = await response.json();
-    return NextResponse.json(data);
+    const backendJson = await response.json();
+    console.log("API /api/admin/query-insights/customers/[customerId]/queries backendJson", backendJson);
+    return NextResponse.json(backendJson);
   } catch (error) {
     console.error('Admin query insights customer queries API error:', error);
     return NextResponse.json(
