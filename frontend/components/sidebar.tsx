@@ -358,9 +358,6 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
       console.error("Error formatting timestamp:", error);
       return "";
     }
-    } catch {
-      return timestamp
-    }
   }
 
   const handleLogout = async () => {
