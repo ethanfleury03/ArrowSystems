@@ -2082,16 +2082,18 @@ async def query_knowledge_base(request: Request):
                     
                     def _load_history():
                         with SessionLocal() as session:
-                            history_rows = (
+                            rows_desc = (
                                 session.query(QueryHistory)
                                 .filter(
                                     QueryHistory.user_id == user_db_id,
                                     QueryHistory.conversation_id == conversation_id
                                 )
-                                .order_by(QueryHistory.created_at.asc())
+                                .order_by(QueryHistory.created_at.desc())
                                 .limit(HISTORY_LIMIT)
                                 .all()
                             )
+                            # Reverse to chronological order after grabbing most recent
+                            history_rows = list(reversed(rows_desc))
                             
                             messages = []
                             for row in history_rows:
