@@ -144,6 +144,10 @@ COPY --from=dependencies /app/.cache/huggingface /app/.cache/huggingface
 # Set working directory for app code
 WORKDIR /app
 
+# Copy entrypoint script to run migrations then start the backend
+COPY backend/entrypoint.sh /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
 # Ensure Alembic can run inside Docker by including config file
 RUN mkdir -p /app/backend/migrations
 COPY backend/migrations/alembic.ini /app/backend/migrations/alembic.ini
@@ -280,5 +284,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
     CMD /app/healthcheck.sh || exit 1
 
-CMD ["/bin/bash", "/app/run_backend.sh"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 
