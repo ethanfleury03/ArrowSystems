@@ -2042,11 +2042,24 @@ async def query_knowledge_base(request: Request):
             # may be limited.
             logger.warning("query_user_token_decode_failed", error=str(e), exc_info=True)
 
+        # Resolve user context after token processing
+        from .logging_context import get_user_id, get_user_role
+        user_id = get_user_id() or "api_user"
+        user_role = get_user_role()
+
         # Generate or use provided conversation_id
         conversation_id = query_request.conversation_id
         if not conversation_id:
             import uuid
             conversation_id = str(uuid.uuid4())
+        
+        # Log early receipt for observability
+        logger.info(
+            "query_received",
+            user_id=user_id,
+            query_preview=query_request.query[:200],
+            conversation_id=conversation_id,
+        )
         
         # Generate session_id for backward compatibility (used in metadata)
         session_id = query_request.session_id
@@ -2094,10 +2107,6 @@ async def query_knowledge_base(request: Request):
                 logger.warning(f"Failed to load chat history: {e}", exc_info=True)
                 chat_history = []
         
-        # Get user information from context (set by middleware)
-        from .logging_context import get_user_id, get_user_role
-        user_id = get_user_id()
-        user_role = get_user_role()
         user_machine_models = None
         
         # Get machine models for user if available
@@ -2324,7 +2333,7 @@ async def query_knowledge_base(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Error processing query: {e}", exc_info=True)
+        logger.exception("[/query] Unhandled exception", extra={"user_id": locals().get("user_id"), "conversation_id": locals().get("conversation_id")})
         raise HTTPException(
             status_code=500,
             detail=get_error_detail(e, "An internal error occurred while processing your request")
