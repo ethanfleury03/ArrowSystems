@@ -987,6 +987,11 @@ class InviteAcceptRequest(BaseModel):
     password: str
 
 
+class InviteCompleteResponse(BaseModel):
+    detail: str
+    email: str
+
+
 # Helper function to conditionally apply rate limiting
 def apply_rate_limit(limit_str: str):
     """Conditionally apply rate limit decorator if rate limiting is enabled."""
@@ -1801,24 +1806,22 @@ async def auth_invite_validate(token: str = Query(...), db: Session = Depends(ge
     return InviteValidateResponse(email=user.email, name=user.name)
 
 
-@app.post("/auth/invite/accept", response_model=LoginResponse)
+@app.post("/auth/invite/accept", response_model=InviteCompleteResponse)
 async def auth_invite_accept(
     request: Request,
-    response: Response,
     payload: InviteAcceptRequest,
     db: Session = Depends(get_db),
 ):
     """
     Accept an invite token and set the user's password.
-    Automatically logs the user in after password is set.
+    Does NOT automatically log the user in - they must sign in via /auth/login.
     
     Args:
         request: FastAPI request object
-        response: FastAPI response object (for setting cookie)
         payload: Token and password
         
     Returns:
-        LoginResponse with user data and JWT cookie set
+        InviteCompleteResponse with success message and user email
         
     Raises:
         400: If token is invalid/expired or password is too short
@@ -1851,39 +1854,6 @@ async def auth_invite_accept(
     # Mark token as used
     mark_invite_token_used(db, payload.token, purpose="invite")
     
-    # Build user dict for response (mirror /auth/login format)
-    user_dict = {
-        "id": str(user.id),
-        "email": user.email,
-        "name": user.name,
-        "role": user.role or "TECHNICIAN",
-        "company_name": user.company_name,
-        "contact_name": user.contact_name,
-        "contact_phone": user.contact_phone,
-        "machine_models": user.machine_models or [],
-    }
-    
-    # Create JWT token and set cookie (mirror /auth/login behavior)
-    token = create_access_token({"email": user.email, "role": user.role or "TECHNICIAN"})
-    
-    cookie_options = auth_config.get_cookie_options()
-    set_cookie_params = {
-        "key": cookie_options["key"],
-        "value": token,
-        "httponly": cookie_options["httponly"],
-        "secure": cookie_options["secure"],
-        "samesite": cookie_options["samesite"],
-        "path": cookie_options["path"],
-    }
-    
-    if "max_age" in cookie_options:
-        set_cookie_params["max_age"] = cookie_options["max_age"]
-    
-    if "domain" in cookie_options:
-        set_cookie_params["domain"] = cookie_options["domain"]
-    
-    response.set_cookie(**set_cookie_params)
-    
     # Audit log invite acceptance
     await audit_log(
         "user_invite_accepted",
@@ -1894,7 +1864,10 @@ async def auth_invite_accept(
         request=request,
     )
     
-    return LoginResponse(user=user_dict, message="Invite accepted and password set")
+    return InviteCompleteResponse(
+        detail="Password set successfully. You can now sign in.",
+        email=user.email
+    )
 
 
 @app.get("/auth/me", response_model=UserResponse)

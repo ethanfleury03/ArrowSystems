@@ -1,23 +1,37 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showInviteSuccess, setShowInviteSuccess] = useState(false);
 
   useEffect(() => {
     console.log('LOGIN PAGE HYDRATED - Build 2025-11-21-v3');
+    
+    // Check for invite success query param
+    const inviteParam = searchParams.get('invite');
+    if (inviteParam === 'success') {
+      setShowInviteSuccess(true);
+      // Prefill email if provided
+      const emailParam = searchParams.get('email');
+      if (emailParam) {
+        setEmail(decodeURIComponent(emailParam));
+      }
+    }
     
     // Check if user is already authenticated
     const checkAuth = async () => {
@@ -36,7 +50,7 @@ export default function LoginPage() {
     };
     
     checkAuth();
-  }, []);
+  }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -126,6 +140,13 @@ export default function LoginPage() {
           </p>
         </CardHeader>
         <CardContent>
+          {showInviteSuccess && (
+            <Alert className="mb-4 border-green-500/50 bg-green-500/10 text-green-700 dark:text-green-400">
+              <AlertDescription>
+                Password set successfully. You can now sign in with your new credentials.
+              </AlertDescription>
+            </Alert>
+          )}
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>

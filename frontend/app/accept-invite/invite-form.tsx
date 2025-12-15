@@ -75,8 +75,9 @@ export function InviteAcceptForm({ initialToken }: InviteAcceptFormProps) {
         setError(data?.detail || "Failed to set password.");
         return;
       }
-      // On success, redirect to main app or dashboard
-      router.push("/");
+      // On success, redirect to login page with success message
+      const emailParam = info?.email ? `&email=${encodeURIComponent(info.email)}` : '';
+      router.push(`/login?invite=success${emailParam}`);
     } catch (e) {
       setError("An unexpected error occurred.");
     } finally {
