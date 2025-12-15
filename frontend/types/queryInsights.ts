@@ -54,3 +54,13 @@ export interface RecentQueryLogItem {
   conversation_id: string;
 }
 
+// New type for bubble chart
+export type UserInsightPoint = {
+  userId: string;
+  email: string;
+  role: "customer" | "technician" | "unknown";
+  totalQueries: number;
+  queries7d: number;
+  lastActiveMs: number; // Date.getTime()
+  name: string;
+};

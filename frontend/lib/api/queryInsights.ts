@@ -116,3 +116,44 @@ export async function fetchConversationDetails(
   return res.json();
 }
 
+export interface UserInsightResponse {
+  user_id: string;
+  email: string;
+  name: string;
+  role: string;
+  total_queries: number;
+  queries_7d: number;
+  last_query_at: string | null;
+}
+
+export async function fetchUserInsights(): Promise<UserInsightResponse[]> {
+  const { baseUrl, headers: fetchHeaders } = await getServerFetchOptions();
+  const url = baseUrl 
+    ? `${baseUrl}/api/admin/query-insights/users`
+    : "/api/admin/query-insights/users";
+  
+  const res = await fetch(url, {
+    credentials: "include",
+    headers: fetchHeaders,
+    cache: "no-store",
+  });
+  
+  if (!res.ok) {
+    let errorMessage = "Failed to load user insights";
+    try {
+      const errorData = await res.json();
+      errorMessage = errorData.detail || errorData.message || errorMessage;
+    } catch {
+      errorMessage = `Failed to load user insights: ${res.status} ${res.statusText}`;
+    }
+    throw new Error(errorMessage);
+  }
+  
+  const data = await res.json();
+  if (!Array.isArray(data)) {
+    console.warn('User insights API returned non-array data:', data);
+    return [];
+  }
+  return data;
+}
+
