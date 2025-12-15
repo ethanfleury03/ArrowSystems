@@ -165,28 +165,28 @@ export function QueryInsightsDashboard({ initialCustomers }: QueryInsightsDashbo
 
   return (
     <Card className="w-full">
-      <CardContent className="p-6 flex flex-col lg:flex-row gap-6">
-        <div className="flex-1 min-h-[320px]">
+      <CardContent className="p-6 flex flex-col lg:flex-row gap-6 h-[600px]">
+        <div className="flex-1 min-w-0 flex flex-col min-h-0">
           {isLoadingInsights ? (
-            <div className="flex items-center justify-center min-h-[320px] text-muted-foreground">
+            <div className="flex items-center justify-center flex-1 text-muted-foreground">
               <p className="text-sm">Loading user insights...</p>
             </div>
           ) : (
-            <UserBubbleMap
-              points={userInsights}
-              selectedUserId={selectedUser?.userId ?? null}
-              onSelectUser={handleSelectUser}
-              roleFilter={roleFilter}
-            />
+            <div className="flex-1 min-h-0">
+              <UserBubbleMap
+                points={userInsights}
+                selectedUserId={selectedUser?.userId ?? null}
+                onSelectUser={handleSelectUser}
+                roleFilter={roleFilter}
+              />
+            </div>
           )}
         </div>
-        <div className="w-full lg:w-[380px] xl:w-[420px] lg:border-l lg:pl-6 lg:mt-0 mt-4 pt-4 lg:pt-0">
+        <div className="w-full lg:w-[380px] xl:w-[420px] lg:border-l lg:pl-6 lg:mt-0 mt-4 pt-4 lg:pt-0 flex flex-col min-h-0">
           <CustomerDetailPanel
             customer={selectedCustomer}
             queries={queries}
             isLoading={isLoading}
-            roleFilter={roleFilter}
-            onRoleFilterChange={setRoleFilter}
           />
         </div>
       </CardContent>
