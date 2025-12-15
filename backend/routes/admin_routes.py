@@ -251,9 +251,10 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 user_obj = db.query(User).filter(User.id == int(created["id"])).first()
                 if user_obj:
                     raw_token = create_invite_token(db, user_obj, purpose="invite")
-                    invite_link = f"{FRONTEND_BASE_URL.rstrip('/')}/accept-invite?token={raw_token}"
+                    base_url = FRONTEND_BASE_URL.rstrip("/")
+                    invite_link = f"{base_url}/accept-invite?token={raw_token}"
                     send_invite_email(user_obj.email, invite_link)
-                    logger.info(f"Sent invite email to new user {user_obj.email}")
+                    logger.info("Invite email dispatched to %s", user_obj.email)
             except Exception as e:
                 logger.error(f"Failed to generate invite token or send email for user {payload.email}: {e}", exc_info=True)
             finally:

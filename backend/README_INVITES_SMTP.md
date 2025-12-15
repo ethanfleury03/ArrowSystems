@@ -27,9 +27,14 @@ If `SMTP_HOST` or `SMTP_PORT` is missing, the code will **not send email** and w
 
 This is useful in local/staging environments where you just want the link from logs.
 
-## Example: Configure SMTP via gcloud (Gmail / Google Workspace)
+## Example: Gmail / Google Workspace with App Password
 
-For early testing you can use a Gmail or Workspace account with an **App Password**:
+In your Google Account for `ethan@arrsys.com`:
+
+- Enable 2-Step Verification
+- Create an App password for "Mail"
+
+Then configure Cloud Run:
 
 ```bash
 gcloud run services update arrow-rag-backend \
@@ -48,4 +53,21 @@ gcloud run services update arrow-rag-backend \
 Replace `YOUR_APP_PASSWORD_HERE` with the 16-character app password from Google.
 
 After setting these, new users created in the Admin → Users page will receive an invite email with a link to `/accept-invite?token=...`, where they can set their password and log in.
+
+## Troubleshooting
+
+### "SMTP not configured" appears in logs
+
+This means `SMTP_HOST` or `SMTP_PORT` environment variables are not set. Check your Cloud Run environment variables.
+
+### SMTP connection/auth errors
+
+If you see exceptions like "Failed to send invite email via SMTP", check:
+
+- App password is correct (16 characters, no spaces)
+- 2-Step Verification is enabled on the Google account
+- `SMTP_USERNAME` matches the email address exactly
+- `SMTP_USE_TLS=true` is set (required for Gmail on port 587)
+
+The system will log the invite link as a fallback even if SMTP fails, so you can still manually send invites.
 
