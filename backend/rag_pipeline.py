@@ -272,7 +272,9 @@ class RAGPipeline:
         chat_history: Optional[List[Dict[str, str]]] = None,
         role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
         user_machine_models: Optional[List[str]] = None,  # Machine models for document-level filtering
-        machine_confirmation: bool = False  # Whether user has confirmed their machine list
+        machine_confirmation: bool = False,  # Whether user has confirmed their machine list
+        query_original: Optional[str] = None,  # Original query in user's language (for LLM response)
+        detected_language: Optional[str] = None  # Detected language code (for LLM response)
     ) -> StructuredResponse:
         """
         Execute RAG query with full orchestration.
@@ -293,7 +295,7 @@ class RAGPipeline:
             raise RuntimeError("RAG Pipeline not initialized. Call initialize() first.")
         
         return self.orchestrator.orchestrate_query(
-            query=query,
+            query=query,  # Translated query for retrieval
             top_k=top_k,
             alpha=alpha,
             metadata_filters=metadata_filters,
@@ -301,7 +303,9 @@ class RAGPipeline:
             chat_history=chat_history,
             role=role,
             user_machine_models=user_machine_models,
-            machine_confirmation=machine_confirmation
+            machine_confirmation=machine_confirmation,
+            query_original=query_original or query,  # Original query for LLM response
+            detected_language=detected_language  # Language for LLM response
         )
     
     def format_response(self, response: StructuredResponse) -> str:

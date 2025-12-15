@@ -1713,7 +1713,8 @@ class ResponseGenerator:
         chat_history: Optional[List[Dict[str, str]]] = None,
         matched_machine_name: Optional[str] = None,
         user_machine_models: Optional[List[str]] = None,
-        machine_confirmation: bool = False
+        machine_confirmation: bool = False,
+        detected_language: Optional[str] = None  # Detected language for LLM response
     ) -> StructuredResponse:
         """Generate structured response with answer, reasoning, and sources."""
         
@@ -1721,7 +1722,7 @@ class ResponseGenerator:
         self.source_counter = 1
         
         # Build answer from context (with LLM if available, including chat history)
-        answer = self._build_answer(query, context, intent, answer_generator, chat_history or [], user_machine_models, machine_confirmation)
+        answer = self._build_answer(query, context, intent, answer_generator, chat_history or [], user_machine_models, machine_confirmation, detected_language)
         
         # Capture token usage from answer generator if available
         token_input = None
@@ -1766,7 +1767,8 @@ class ResponseGenerator:
         answer_generator=None,
         chat_history: Optional[List[Dict[str, str]]] = None,
         user_machine_models: Optional[List[str]] = None,
-        machine_confirmation: bool = False
+        machine_confirmation: bool = False,
+        detected_language: Optional[str] = None
     ) -> str:
         """Build answer from retrieved context using LLM or fallback to chunk-based."""
         
@@ -1785,7 +1787,8 @@ class ResponseGenerator:
                     intent=intent,
                     chat_history=chat_history or [],
                     user_machine_models=user_machine_models,
-                    machine_confirmation=machine_confirmation
+                    machine_confirmation=machine_confirmation,
+                    detected_language=detected_language
                 )
                 return llm_answer
             except Exception as e:
@@ -2848,7 +2851,8 @@ class ClaudeAnswerGenerator:
         intent: QueryIntent,
         chat_history: Optional[List[Dict[str, str]]] = None,
         user_machine_models: Optional[List[str]] = None,
-        machine_confirmation: bool = False
+        machine_confirmation: bool = False,
+        detected_language: Optional[str] = None
     ) -> str:
         """
         Generate a clean, ChatGPT-style answer from retrieved documents.
@@ -2893,13 +2897,13 @@ class ClaudeAnswerGenerator:
             context = self._prepare_document_context(documents)
             
             # Build base prompt template (without history) to estimate fixed token usage
-            base_prompt = self._build_answer_prompt(query, context, intent, chat_history=None, user_machine_models=user_machine_models, machine_confirmation=machine_confirmation)
+            base_prompt = self._build_answer_prompt(query, context, intent, chat_history=None, user_machine_models=user_machine_models, machine_confirmation=machine_confirmation, detected_language=detected_language)
             
             # Trim chat history to fit within token budget (removes oldest first)
             trimmed_history = self._trim_chat_history(chat_history or [], query, context, base_prompt)
             
             # Build final prompt with trimmed history
-            prompt = self._build_answer_prompt(query, context, intent, trimmed_history, user_machine_models=user_machine_models, machine_confirmation=machine_confirmation)
+            prompt = self._build_answer_prompt(query, context, intent, trimmed_history, user_machine_models=user_machine_models, machine_confirmation=machine_confirmation, detected_language=detected_language)
             
             # Final safety check: verify prompt doesn't exceed budget
             total_tokens = self._estimate_tokens(prompt)
@@ -3064,7 +3068,7 @@ class ClaudeAnswerGenerator:
         
         return "\n".join(context_parts)
     
-    def _build_answer_prompt(self, query: str, context: str, intent: QueryIntent, chat_history: Optional[List[Dict[str, str]]] = None, user_machine_models: Optional[List[str]] = None, machine_confirmation: bool = False) -> str:
+    def _build_answer_prompt(self, query: str, context: str, intent: QueryIntent, chat_history: Optional[List[Dict[str, str]]] = None, user_machine_models: Optional[List[str]] = None, machine_confirmation: bool = False, detected_language: Optional[str] = None) -> str:
         """Build prompt for technical answer generation."""
         
         intent_guidance = {
@@ -3076,6 +3080,11 @@ class ClaudeAnswerGenerator:
         }
         
         guidance = intent_guidance.get(intent.intent_type, "Provide a comprehensive technical answer.")
+        
+        # Add language instruction if detected language is not English
+        language_instruction = ""
+        if detected_language and detected_language != "en":
+            language_instruction = f"\n\nLANGUAGE REQUIREMENT: The user's question is in {detected_language}. Respond in {detected_language}. Use the retrieved English documents as context, but provide your answer in {detected_language}."
         
         # Add machine restriction note if confirmed
         machine_restriction = ""
@@ -3098,7 +3107,7 @@ class ClaudeAnswerGenerator:
                     history_context += f"Assistant: {content}\n"
             history_context += "\nUse the conversation history to understand context, corrections, or follow-up questions.\n"
         
-        return f"""TASK: Generate a clean, technical answer to the user's query using ONLY the provided documents.{machine_restriction}{history_context}
+        return f"""TASK: Generate a clean, technical answer to the user's query using ONLY the provided documents.{machine_restriction}{history_context}{language_instruction}
 
 CONSTRAINTS:
 - Use ONLY information from the provided documents
@@ -3752,7 +3761,9 @@ class RAGOrchestrator:
         chat_history: Optional[List[Dict[str, str]]] = None,
         role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER) for machine-based filtering
         user_machine_models: Optional[List[str]] = None,  # Machine models for document-level filtering
-        machine_confirmation: bool = False  # Whether user has confirmed their machine list
+        machine_confirmation: bool = False,  # Whether user has confirmed their machine list
+        query_original: Optional[str] = None,  # Original query in user's language (for LLM response)
+        detected_language: Optional[str] = None  # Detected language code (for LLM response)
     ) -> StructuredResponse:
         """
         Main orchestration method - handles complete RAG pipeline.
@@ -4178,15 +4189,18 @@ class RAGOrchestrator:
         context = self._build_retrieval_context(unique_nodes)
         
         # Step 4: Generate structured response (with chat history if provided)
+        # Use original query for LLM response (so it responds in user's language)
+        query_for_llm = query_original if query_original else query
         response = self.response_generator.generate_structured_response(
-            query=query,
+            query=query_for_llm,  # Use original query for LLM
             context=context,
             intent=intent,
             answer_generator=self.answer_generator,
             chat_history=chat_history or [],
             matched_machine_name=matched_machine_name,
             user_machine_models=user_machine_models,
-            machine_confirmation=machine_confirmation
+            machine_confirmation=machine_confirmation,
+            detected_language=detected_language  # Pass detected language for LLM response
         )
 
         # Optionally preface with a short glossary definition if we found one

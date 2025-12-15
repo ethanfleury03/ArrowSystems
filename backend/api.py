@@ -43,6 +43,7 @@ from .utils.migration_runner import run_migrations, check_pending_migrations, ch
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
 from .utils.saved_response_manager import SavedResponseManager
+from .utils.translation import process_query_for_retrieval
 from .security import create_access_token, get_current_user_from_token
 from .routes.admin_routes import create_admin_router
 from .config.auth import auth_config
@@ -812,6 +813,12 @@ class QueryResponse(BaseModel):
     cache_hit: bool = False
     matched_machine_name: Optional[str] = None  # Machine name matched in query (if >=95% similarity)
     is_saved: bool = False
+    # Language metadata
+    query_original: Optional[str] = None  # Original query in user's language
+    query_retrieval: Optional[str] = None  # English query used for retrieval
+    detected_language: Optional[str] = None  # Detected language code (ISO 639-1)
+    language_confidence: Optional[float] = None  # Language detection confidence (0.0-1.0)
+    translation_provider: Optional[str] = None  # Translation provider used ("llm", "none", etc.)
 
 
 class FeedbackRequest(BaseModel):
@@ -2173,10 +2180,22 @@ async def query_knowledge_base(request: Request):
                 f"Using hybrid approach: filtering to selected machine '{query_request.selected_machine}' + GENERAL"
             )
         
-        # Log query start with structured logging
+        # Detect language and translate query if needed (for retrieval)
+        query_original = query_request.query
+        query_for_retrieval, lang_detect_result, translation_result = process_query_for_retrieval(query_original)
+        
+        # Log language detection results
+        detected_lang = lang_detect_result.lang
+        lang_confidence = lang_detect_result.confidence
+        translation_provider = translation_result.provider if translation_result else None
+        
         logger.info(
             "rag_query_start",
-            query=query_request.query[:500],  # First 500 chars
+            query=query_original[:500],  # First 500 chars
+            query_retrieval=query_for_retrieval[:500] if query_for_retrieval != query_original else None,
+            detected_language=detected_lang,
+            language_confidence=lang_confidence,
+            translation_provider=translation_provider,
             session_id=session_id,
             chat_history_length=len(chat_history),
             top_k=query_request.top_k,
@@ -2188,11 +2207,13 @@ async def query_knowledge_base(request: Request):
         )
         
         # Execute RAG query with chat history and machine filtering
-        # Note: Retrieval uses only current query, but LLM gets chat history
+        # Note: Retrieval uses translated query, but LLM gets original query for response language
         # Wrap blocking RAG operation in thread pool for concurrency
         response = await run_blocking_rag_operation(
             rag_pipeline.query,
-            query=query_request.query,
+            query=query_for_retrieval,  # Use translated query for retrieval
+            query_original=query_original,  # Pass original for LLM response language
+            detected_language=detected_lang,  # Pass detected language for LLM
             top_k=query_request.top_k,
             alpha=query_request.alpha,
             metadata_filters=query_request.metadata_filters,
@@ -2292,7 +2313,7 @@ async def query_knowledge_base(request: Request):
                 
                 await db_manager.save_query(
                     user=user_id,
-                    query_text=query_request.query,
+                    query_text=query_original,  # Store original query
                     answer_text=response.answer,
                     intent_type=response.intent.intent_type,
                     intent_confidence=response.intent.confidence,
@@ -2305,7 +2326,12 @@ async def query_knowledge_base(request: Request):
                     token_input=token_input,
                     token_output=token_output,
                     token_total=token_total,
-                    cost_usd=cost_usd
+                    cost_usd=cost_usd,
+                    # Language metadata
+                    detected_language=detected_lang,
+                    language_confidence=lang_confidence,
+                    query_retrieval=query_for_retrieval if query_for_retrieval != query_original else None,
+                    translation_provider=translation_provider
                 )
                 logger.info("Query saved to database")
             except Exception as e:
@@ -2319,7 +2345,7 @@ async def query_knowledge_base(request: Request):
                 logger.debug(f"Saved-state check failed: {e}")
         
         return QueryResponse(
-            query=response.query,
+            query=query_original,  # Return original query
             answer=response.answer,
             reasoning=response.reasoning,
             sources=sources,
@@ -2331,7 +2357,13 @@ async def query_knowledge_base(request: Request):
             session_id=session_id,
             conversation_id=conversation_id,
             matched_machine_name=response.matched_machine_name,
-            is_saved=is_saved
+            is_saved=is_saved,
+            # Language metadata
+            query_original=query_original,
+            query_retrieval=query_for_retrieval if query_for_retrieval != query_original else None,
+            detected_language=detected_lang,
+            language_confidence=lang_confidence,
+            translation_provider=translation_provider
         )
         
     except Exception as e:
