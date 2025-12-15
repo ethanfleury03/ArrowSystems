@@ -23,6 +23,7 @@ from ..schemas.query_insights import (
     CustomerQuerySummary,
     ConversationDetails,
     ConversationMessage,
+    RecentQueryLogItem,
 )
 
 logger = get_logger(__name__)
@@ -1600,6 +1601,79 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to fetch conversation: {str(e)}"
+            )
+    
+    @router.get("/query-insights/recent-queries", response_model=List[RecentQueryLogItem])
+    async def get_recent_queries(
+        limit: int = Query(50, ge=1, le=200),
+        _: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+    ):
+        """
+        Get recent queries across all customers, ordered by created_at DESC.
+        Returns queries from both customers and technicians, with customer info resolved.
+        """
+        def _fetch():
+            with SessionLocal() as session:
+                # Join QueryHistory with User
+                rows = (
+                    session.query(QueryHistory, User)
+                    .join(User, QueryHistory.user_id == User.id)
+                    .order_by(desc(QueryHistory.created_at))
+                    .limit(limit)
+                    .all()
+                )
+                
+                items: list[RecentQueryLogItem] = []
+                for qh, user in rows:
+                    # Determine customer_id and customer_name
+                    # If user is a CUSTOMER, use their own id/name
+                    # If user is a TECHNICIAN, find the CUSTOMER with same company_name
+                    if user.role == "CUSTOMER":
+                        customer_id = user.id
+                        customer_name = user.contact_name or user.name or user.email or "Unknown"
+                    else:
+                        # Find customer with same company_name
+                        customer = session.query(User).filter(
+                            User.company_name == user.company_name,
+                            User.role == "CUSTOMER"
+                        ).first()
+                        if customer:
+                            customer_id = customer.id
+                            customer_name = customer.contact_name or customer.name or customer.email or "Unknown"
+                        else:
+                            # Fallback: use technician's info if no customer found
+                            customer_id = user.id
+                            customer_name = user.contact_name or user.name or user.email or "Unknown"
+                    
+                    # Get conversation_id
+                    conversation_id = qh.conversation_id or str(qh.id)
+                    
+                    items.append(
+                        RecentQueryLogItem(
+                            id=qh.id,
+                            created_at=qh.created_at,
+                            customer_id=customer_id,
+                            customer_name=customer_name,
+                            user_id=user.id,
+                            user_email=user.email,
+                            user_role=user.role or "",
+                            query_text=qh.query_text or "",
+                            machine_name=qh.machine_name,
+                            conversation_id=conversation_id,
+                        )
+                    )
+                
+                return items
+        
+        try:
+            result = await run_sync(_fetch)
+            return result
+        except Exception as e:
+            logger.error(f"Error fetching recent queries: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch recent queries: {str(e)}"
             )
 
     return router
