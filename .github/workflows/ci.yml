@@ -597,21 +597,29 @@ jobs:
             --region=us-central1 \
             --service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}" \
             --image="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${GITHUB_SHA}" \
-            --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
-            --set-env-vars="JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}" \
-            --set-env-vars="FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
-            --set-env-vars="ENV=prod" \
-            --set-env-vars="HF_HOME=/app/.cache/huggingface" \
-            --set-env-vars="TRANSFORMERS_CACHE=/app/.cache/huggingface" \
-            --set-env-vars="SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface" \
-            --set-env-vars="ENABLE_INGESTION_ON_STARTUP=false" \
-            --set-env-vars="PYTHONUNBUFFERED=1" \
-            --set-env-vars="GUNICORN_WORKERS=1" \
-            --set-env-vars="GUNICORN_TIMEOUT=600" \
-            --set-env-vars="CORS_ALLOWED_ORIGINS=https://arrow-rag-frontend-70705019874.us-central1.run.app" \
-            --set-env-vars="AUTH_COOKIE_SAMESITE=none" \
-            --set-env-vars="AUTH_COOKIE_SECURE=true" \
-            --set-env-vars="ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" \
+            --update-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }},\
+JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }},\
+FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }},\
+ENV=prod,\
+HF_HOME=/app/.cache/huggingface,\
+TRANSFORMERS_CACHE=/app/.cache/huggingface,\
+SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface,\
+ENABLE_INGESTION_ON_STARTUP=false,\
+PYTHONUNBUFFERED=1,\
+GUNICORN_WORKERS=1,\
+GUNICORN_TIMEOUT=600,\
+CORS_ALLOWED_ORIGINS=https://arrow-rag-frontend-70705019874.us-central1.run.app,\
+AUTH_COOKIE_SAMESITE=none,\
+AUTH_COOKIE_SECURE=true,\
+ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }},\
+SMTP_HOST=${{ secrets.SMTP_HOST }},\
+SMTP_PORT=${{ secrets.SMTP_PORT }},\
+SMTP_USERNAME=${{ secrets.SMTP_USERNAME }},\
+SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }},\
+SMTP_USE_TLS=${{ secrets.SMTP_USE_TLS }},\
+FRONTEND_BASE_URL=${{ secrets.FRONTEND_BASE_URL }},\
+INVITE_FROM_EMAIL=${{ secrets.INVITE_FROM_EMAIL }},\
+INVITE_FROM_NAME=${{ secrets.INVITE_FROM_NAME }}" \
             --set-cloudsql-instances="arrow-rag-support-prod:us-central1:rag-postgres" \
             --execution-environment=gen2 \
             --cpu=2 \

@@ -429,6 +429,10 @@ async def startup_event():
     print("[DEBUG] FastAPI startup_event running", flush=True)
     
     try:
+        # Log SMTP configuration status at startup (non-sensitive)
+        from .utils.email_utils import log_smtp_config_status
+        log_smtp_config_status()
+        
         # Log effective ENV value to confirm Cloud Run env vars are being used
         logger.info("env_runtime_value", 
                    env=settings.ENV,

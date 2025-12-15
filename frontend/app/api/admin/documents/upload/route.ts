@@ -1,20 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleAuth } from 'google-auth-library';
-import FormData from 'form-data';
+import { getBackendBaseUrl, getBackendIdentityToken } from '@/lib/iam-backend';
 import { extractJwtFromCookie } from '@/lib/authClient';
-
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL || 'http://localhost:8080';
-
-if (!BACKEND_URL) {
-  throw new Error('NEXT_PUBLIC_API_URL or BACKEND_URL environment variable must be set');
-}
 
 export async function POST(request: NextRequest) {
   try {
-    // Extract JWT from cookie for authentication
-    const token = await extractJwtFromCookie();
+    // Extract JWT from cookie for user authentication
+    const userToken = await extractJwtFromCookie();
     
-    if (!token) {
+    if (!userToken) {
       return NextResponse.json(
         { detail: 'Not authenticated' },
         { status: 401 }
@@ -31,92 +24,72 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Parse form data to validate required fields
-    const formData = await request.formData();
-    const file = formData.get('file') as File;
-    const machine_model = formData.get('machine_model');
+    // Get IAM identity token for backend authentication
+    const iamToken = await getBackendIdentityToken();
+    const backendUrl = `${getBackendBaseUrl()}/admin/documents/upload`;
+
+    // Prepare headers - forward Content-Type with boundary from client request
+    const headers = new Headers();
     
-    if (!file) {
+    // Forward the Content-Type header with boundary from the client
+    // This is critical - the boundary must match the actual body
+    if (contentType) {
+      headers.set('Content-Type', contentType);
+    }
+    
+    // Add IAM authentication token
+    headers.set('Authorization', `Bearer ${iamToken}`);
+    
+    // Add user JWT token for backend authorization
+    headers.set('X-User-Token', userToken);
+    
+    // Remove headers that shouldn't be forwarded
+    headers.delete('host');
+    headers.delete('content-length'); // Let fetch calculate it from the stream
+
+    // Get the request body stream
+    // In Next.js App Router, request.body is a ReadableStream
+    const requestBody = request.body;
+    
+    if (!requestBody) {
       return NextResponse.json(
-        { detail: 'No file provided' },
+        { detail: 'Request body is missing' },
         { status: 400 }
       );
     }
 
-    if (!machine_model || (typeof machine_model === 'string' && machine_model.trim() === '')) {
-      return NextResponse.json(
-        { detail: 'Machine model is required' },
-        { status: 400 }
-      );
-    }
-
-    // Use IAM authentication for multipart upload
-    const auth = new GoogleAuth();
-    const client = await auth.getIdTokenClient(BACKEND_URL);
-
-    // Convert File to Buffer for form-data library
-    const fileBuffer = Buffer.from(await file.arrayBuffer());
-    
-    // Create form-data with form-data library (compatible with gaxios)
-    const backendFormData = new FormData();
-    backendFormData.append('file', fileBuffer, {
-      filename: file.name,
-      contentType: file.type,
-    });
-    backendFormData.append('machine_model', String(machine_model).trim());
-    
-    const description = formData.get('description');
-    if (description) {
-      const descStr = String(description).trim();
-      if (descStr) {
-        backendFormData.append('description', descStr);
-      }
-    }
-
-    // Get headers from FormData (includes Content-Type with boundary)
-    const formDataHeaders = backendFormData.getHeaders();
-    
-    // Forward JWT in custom header to backend (X-User-Token)
-    // IMPORTANT: Do NOT override Content-Type - let FormData set it with the correct boundary
-    const headers: any = {
-      ...formDataHeaders,
-      'X-User-Token': token,
-    };
-
-    // Log request config in dev (without the actual file data)
-    if (process.env.NODE_ENV === 'development') {
-      console.log('Upload request config:', {
-        url: `${BACKEND_URL}/admin/documents/upload`,
-        method: 'POST',
-        hasData: !!backendFormData,
-        dataType: backendFormData.constructor.name,
-        contentType: headers['content-type'],
-        hasBody: false, // Confirm we're NOT setting body
-      });
-    }
-
-    // Make request with FormData as data (NOT body)
-    // gaxios will handle the multipart encoding automatically
-    const response = await client.request({
-      url: `${BACKEND_URL}/admin/documents/upload`,
+    // Forward the raw request body stream directly to backend
+    // Do NOT parse it as JSON or FormData - just stream it through
+    // This preserves the multipart/form-data encoding with the correct boundary
+    const backendResponse = await fetch(backendUrl, {
       method: 'POST',
       headers,
-      data: backendFormData,
-      // DO NOT set 'body' property - only use 'data'
+      body: requestBody, // Raw ReadableStream - preserves multipart encoding
     });
 
-    return NextResponse.json(response.data);
+    // Forward the response
+    const responseBody = backendResponse.body;
+    const responseHeaders = new Headers();
+    
+    // Copy response headers
+    backendResponse.headers.forEach((value, key) => {
+      responseHeaders.set(key, value);
+    });
+
+    return new NextResponse(responseBody, {
+      status: backendResponse.status,
+      statusText: backendResponse.statusText,
+      headers: responseHeaders,
+    });
   } catch (error: any) {
     console.error('Admin document upload API error:', {
       message: error.message,
-      status: error.response?.status || error.status,
-      statusText: error.response?.statusText || error.statusText,
-      detail: error.response?.data?.detail || error.detail,
-      // Don't log the full response data as it might contain file content
+      status: error.status,
+      detail: error.detail,
     });
     
-    const errorDetail = error.response?.data?.detail || error.detail || error.message || 'Internal server error';
-    const errorStatus = error.response?.status || error.status || 500;
+    const errorDetail = error.detail || error.message || 'Internal server error';
+    const errorStatus = error.status || 500;
     
     return NextResponse.json(
       { detail: errorDetail },

@@ -328,3 +328,28 @@ export async function iamBackendPatch(
   return iamBackendRequest(path, { method: 'PATCH', body, headers });
 }
 
+/**
+ * Get IAM identity token for backend authentication.
+ * Extracted for reuse in multipart upload routes.
+ * 
+ * @returns Promise<string> - The IAM identity token
+ */
+export async function getBackendIdentityToken(): Promise<string> {
+  const auth = new GoogleAuth();
+  const client = await auth.getIdTokenClient(BACKEND_URL);
+  
+  // Generate the identity token
+  const tokenResponse = await client.getIdToken();
+  return tokenResponse.token;
+}
+
+/**
+ * Get backend base URL.
+ * Extracted for reuse in multipart upload routes.
+ * 
+ * @returns string - The backend base URL
+ */
+export function getBackendBaseUrl(): string {
+  return BACKEND_URL;
+}
+
