@@ -18,9 +18,9 @@ def send_invite_email(to_email: str, invite_link: str) -> None:
         to_email: Recipient email address
         invite_link: Full URL to the invite acceptance page
     """
-    from_email = os.getenv("INVITE_FROM_EMAIL", "no-reply@example.com")
+    from_email = os.getenv("INVITE_FROM_EMAIL", "ethan@arrsys.com")
     from_name = os.getenv("INVITE_FROM_NAME", "Arrow Systems Support")
-    subject = os.getenv("INVITE_SUBJECT", "You've been invited to Arrow RAG Support")
+    subject = os.getenv("INVITE_SUBJECT", "You've been invited to Arrow Systems Support")
 
     body = (
         f"Hello,\n\n"

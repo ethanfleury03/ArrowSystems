@@ -240,7 +240,10 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             from ..utils.invite_tokens import create_invite_token
             from ..utils.email_utils import send_invite_email
             
-            FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://example.com")
+            FRONTEND_BASE_URL = os.getenv(
+                "FRONTEND_BASE_URL",
+                "https://arrow-rag-frontend-70705019874.us-central1.run.app",
+            )
             
             # Open DB session to load User ORM instance and generate invite
             db = SessionLocal()
