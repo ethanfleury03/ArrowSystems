@@ -28,30 +28,9 @@ export async function POST(request: NextRequest) {
 
     const data = await backendResponse.json();
 
-    // Extract JWT token from backend's Set-Cookie header (mirror /api/auth/login logic)
-    let jwtToken: string | null = null;
-    const setCookieHeader = backendResponse.headers.get('set-cookie');
-    if (setCookieHeader) {
-      const match = setCookieHeader.match(/access_token=([^;]+)/);
-      if (match) {
-        jwtToken = match[1];
-      }
-    }
-
-    const response = NextResponse.json(data, { status: 200 });
-
-    // Set JWT cookie on the frontend domain (mirror /api/auth/login behavior)
-    if (jwtToken) {
-      response.cookies.set('access_token', jwtToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-        path: '/',
-        // No maxAge = session cookie (expires when browser closes)
-      });
-    }
-
-    return response;
+    // Backend no longer returns JWT - user must sign in via /auth/login
+    // Simply forward the success response
+    return NextResponse.json(data, { status: 200 });
   } catch (error) {
     console.error('Invite accept error:', error);
     return NextResponse.json(
