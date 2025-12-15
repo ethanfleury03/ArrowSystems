@@ -50,3 +50,15 @@ class ConversationDetails(BaseModel):
     created_at: datetime
     messages: List[ConversationMessage]
 
+
+class RecentQueryLogItem(BaseModel):
+    id: int
+    created_at: datetime
+    customer_id: int
+    customer_name: str
+    user_id: int
+    user_email: str
+    user_role: str
+    query_text: str
+    machine_name: Optional[str] = None
+    conversation_id: str

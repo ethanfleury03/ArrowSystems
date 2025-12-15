@@ -41,3 +41,16 @@ export interface ConversationDetails {
   messages: ConversationMessage[];
 }
 
+export interface RecentQueryLogItem {
+  id: number;
+  created_at: string;
+  customer_id: number;
+  customer_name: string;
+  user_id: number;
+  user_email: string;
+  user_role: string;
+  query_text: string;
+  machine_name?: string | null;
+  conversation_id: string;
+}
+
