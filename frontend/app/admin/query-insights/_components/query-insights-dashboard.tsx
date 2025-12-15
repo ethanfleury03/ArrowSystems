@@ -4,8 +4,23 @@ import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { UserBubbleMap } from "./user-bubble-map";
 import { CustomerDetailPanel } from "./customer-detail-panel";
-import type { QueryInsightsCustomer, CustomerQuerySummary, CustomerQueriesResponse, UserInsightPoint } from "@/types/queryInsights";
-import { fetchUserInsights, type UserInsightResponse } from "@/lib/api/queryInsights";
+import type {
+  QueryInsightsCustomer,
+  CustomerQuerySummary,
+  CustomerQueriesResponse,
+  UserInsightPoint,
+} from "@/types/queryInsights";
+
+// Local type for user insights returned by the Next API route
+interface UserInsightResponse {
+  user_id: string;
+  email: string;
+  name: string;
+  role: string;
+  total_queries: number;
+  queries_7d: number;
+  last_query_at: string | null;
+}
 
 interface QueryInsightsDashboardProps {
   initialCustomers: QueryInsightsCustomer[];
@@ -46,21 +61,31 @@ export function QueryInsightsDashboard({ initialCustomers }: QueryInsightsDashbo
   const [isLoading, setIsLoading] = useState(false);
   const [roleFilter, setRoleFilter] = useState<"all" | "customer" | "technician">("all");
 
-  // Fetch user insights on mount
+  // Fetch user insights on mount (client-side via Next API route)
   useEffect(() => {
     let mounted = true;
     async function loadUserInsights() {
       setIsLoadingInsights(true);
       try {
-        const insights = await fetchUserInsights();
+        const res = await fetch("/api/admin/query-insights/users", {
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          console.error("Failed to fetch user insights:", res.status, res.statusText);
+          if (mounted) {
+            setUserInsights([]);
+          }
+          return;
+        }
+        const insights: UserInsightResponse[] = await res.json();
         const points = insights.map(mapUserInsightToPoint);
         if (!mounted) return;
-        
+
         setUserInsights(points);
-        
-        // Auto-select most active user if no selection and data exists
+
+        // Auto-select most active user if data exists
         if (points.length > 0) {
-          const mostActive = points.reduce((max, point) => 
+          const mostActive = points.reduce((max, point) =>
             point.totalQueries > max.totalQueries ? point : max
           );
           setSelectedUser(mostActive);
