@@ -121,18 +121,24 @@ export function CustomerQueryList({ data, initialSearch }: Props) {
                   }
                 >
                   <div className="flex items-center justify-between gap-4">
-                    <p className="text-sm font-medium truncate">
-                      {q.query_text}
-                    </p>
-                    <span className="text-xs text-muted-foreground whitespace-nowrap">
-                      {formatDate(q.created_at)}
-                    </span>
+                    <div className="flex flex-col gap-1 min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {q.query_text}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {formatDate(q.created_at)}
+                        {" · "}
+                        {q.user_role === "TECHNICIAN" ? "Technician" : "Customer"}
+                        {" "}
+                        ({q.user_email})
+                      </p>
+                    </div>
+                    {typeof q.message_count === "number" && (
+                      <span className="text-xs text-muted-foreground whitespace-nowrap ml-2">
+                        {q.message_count} messages
+                      </span>
+                    )}
                   </div>
-                  {typeof q.message_count === "number" && (
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {q.message_count} messages
-                    </p>
-                  )}
                 </button>
               </li>
             ))}

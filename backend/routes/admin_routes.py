@@ -1349,11 +1349,38 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 
                 customer_name = customer.contact_name or customer.name or customer.email or "Unknown"
                 logger.info(f"[QueryInsights] Found customer: id={customer.id}, email={customer.email}, name={customer_name}")
-                
-                # Get all queries for this customer - similar to chat history logic
-                # Filter by user_id (which is the foreign key to users.id)
-                base_query = session.query(QueryHistory).filter(
-                    QueryHistory.user_id == customer_id_int
+
+                # Determine all users that belong to this customer org.
+                # We treat users with the same company_name as belonging to the
+                # same customer, and include both CUSTOMER and TECHNICIAN roles.
+                company_name = (customer.company_name or "").strip()
+                users_for_customer = session.query(User).filter(
+                    User.company_name == company_name,
+                    User.role.in_(["CUSTOMER", "TECHNICIAN"]),
+                ).all()
+
+                if not users_for_customer:
+                    logger.info("[QueryInsights] No associated users found for customer_id=%s company_name=%s", customer_id, company_name)
+                    return {
+                        "customer_id": str(customer.id),
+                        "customer_name": customer_name,
+                        "total_queries": 0,
+                        "last_query_at": None,
+                        "queries": [],
+                    }
+
+                user_ids = [u.id for u in users_for_customer]
+                logger.info(
+                    "[QueryInsights] Associated users for customer_id=%s: %s",
+                    customer_id,
+                    [{"id": u.id, "email": u.email, "role": u.role} for u in users_for_customer],
+                )
+
+                # Get all queries for this customer org (customer + technicians)
+                base_query = (
+                    session.query(QueryHistory, User)
+                    .join(User, QueryHistory.user_id == User.id)
+                    .filter(QueryHistory.user_id.in_(user_ids))
                 )
                 
                 # Apply search filter if provided
@@ -1362,51 +1389,57 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                     base_query = base_query.filter(
                         QueryHistory.query_text.ilike(search_term)
                     )
-                
-                all_queries = base_query.order_by(desc(QueryHistory.created_at)).all()
-                logger.info(f"[QueryInsights] Found {len(all_queries)} query_history rows for user_id={customer_id_int}")
-                
-                if not all_queries:
+
+                rows = base_query.order_by(desc(QueryHistory.created_at)).all()
+                logger.info(
+                    "[QueryInsights] Found %d query_history rows for customer org (customer_id=%s)",
+                    len(rows),
+                    customer_id,
+                )
+
+                if not rows:
                     return {
-                        "customer_id": customer_id,
+                        "customer_id": str(customer.id),
                         "customer_name": customer_name,
                         "total_queries": 0,
                         "last_query_at": None,
                         "queries": [],
                     }
-                
+
                 # Convert queries to summaries - one per query (simpler than grouping by conversation)
                 query_summaries = []
-                for query in all_queries:
-                    # Extract sessionId from metadata for conversation_id
-                    conversation_id = f"query_{query.id}"  # Default fallback
-                    if query.metadata_json:
-                        if isinstance(query.metadata_json, dict):
-                            session_id = query.metadata_json.get("sessionId")
+                for qh, user in rows:
+                    # Prefer explicit conversation_id from column; fall back to sessionId metadata or query_id
+                    conversation_id = qh.conversation_id or f"query_{qh.id}"
+                    if not qh.conversation_id and qh.metadata_json:
+                        if isinstance(qh.metadata_json, dict):
+                            session_id = qh.metadata_json.get("sessionId")
                             if session_id:
                                 conversation_id = str(session_id)
-                        elif isinstance(query.metadata_json, str):
+                        elif isinstance(qh.metadata_json, str):
                             try:
-                                metadata = json.loads(query.metadata_json)
+                                metadata = json.loads(qh.metadata_json)
                                 if isinstance(metadata, dict):
                                     session_id = metadata.get("sessionId")
                                     if session_id:
                                         conversation_id = str(session_id)
                             except (json.JSONDecodeError, TypeError):
                                 pass
-                    
-                    # Count messages in this conversation (if we want to group later, we can)
-                    # For now, each query is 2 messages (user + assistant)
-                    message_count = 2
-                    
+
+                    # Each query row represents one user+assistant pair
+                    message_count = 2 if qh.answer_text else 1
+
                     query_summaries.append({
-                        "id": str(query.id),
+                        "id": str(qh.id),
                         "conversation_id": conversation_id,
-                        "created_at": query.created_at,  # Keep as datetime, Pydantic will serialize
-                        "query_text": query.query_text or "",
+                        "created_at": qh.created_at,
+                        "query_text": qh.query_text or "",
                         "message_count": message_count,
+                        "user_id": user.id,
+                        "user_email": user.email,
+                        "user_role": user.role or "",
                     })
-                
+
                 # Sort by created_at DESC (already sorted by DB query, but ensure)
                 query_summaries.sort(key=lambda x: x["created_at"], reverse=True)
                 
@@ -1417,7 +1450,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 logger.info(f"[QueryInsights] Returning {total_queries} queries for customer_id={customer_id}")
                 
                 return {
-                    "customer_id": customer_id,
+                    "customer_id": str(customer.id),
                     "customer_name": customer_name,
                     "total_queries": total_queries,
                     "last_query_at": last_query_at,
