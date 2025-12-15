@@ -152,6 +152,22 @@ class User(Base):
     query_history = relationship("QueryHistory", back_populates="user", cascade="all, delete", passive_deletes=True)
     feedback = relationship("Feedback", back_populates="user", cascade="all, delete", passive_deletes=True)
     saved_responses = relationship("SavedResponse", back_populates="user", cascade="all, delete", passive_deletes=True)
+    auth_tokens = relationship("AuthToken", back_populates="user", cascade="all, delete", passive_deletes=True)
+
+
+class AuthToken(Base):
+    """Authentication tokens for invite and password reset flows."""
+    __tablename__ = "auth_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String(255), nullable=False, index=True)
+    purpose = Column(String(50), nullable=False)  # e.g., "invite", "reset"
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    user = relationship("User", back_populates="auth_tokens")
 
 
 class QueryHistory(Base):

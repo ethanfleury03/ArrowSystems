@@ -104,7 +104,7 @@ class DatabaseManager:
     async def create_user(
         self,
         email: str,
-        password: str,
+        password: Optional[str] = None,
         role: str = "technician",
         name: Optional[str] = None,
         company_name: Optional[str] = None,
@@ -113,6 +113,7 @@ class DatabaseManager:
         machine_models: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         def _create():
+            import secrets
             from ..config.machine_models import normalize_machine_models
             
             with SessionLocal() as session:
@@ -123,7 +124,17 @@ class DatabaseManager:
                 if existing:
                     return self._serialize_user(existing)
 
-                hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                # Handle password: if provided, use it; otherwise generate random secret
+                if password and password.strip():
+                    # Password provided - hash and use it
+                    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                else:
+                    # No password provided - generate random secret and hash it
+                    # This ensures password_hash is not empty and cannot be guessed
+                    random_secret = secrets.token_urlsafe(32)
+                    hashed = bcrypt.hashpw(random_secret.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                    # Do not return or store the random password anywhere
+                
                 # Normalize machine_models using the helper
                 machine_models_list = normalize_machine_models(machine_models)
                 user = User(
