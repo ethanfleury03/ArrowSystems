@@ -8,6 +8,25 @@ from email.message import EmailMessage
 logger = logging.getLogger(__name__)
 
 
+def log_smtp_config_status():
+    """Log SMTP configuration status at startup (non-sensitive)."""
+    try:
+        smtp_host = os.getenv("SMTP_HOST")
+        smtp_port = os.getenv("SMTP_PORT")
+        smtp_use_tls = os.getenv("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes", "on")
+        smtp_configured = bool(smtp_host and smtp_port)
+        
+        logger.info(
+            "SMTP config status: configured=%s host=%s port=%s use_tls=%s",
+            smtp_configured,
+            smtp_host or "<none>",
+            smtp_port or "<none>",
+            smtp_use_tls,
+        )
+    except Exception as exc:
+        logger.warning("Failed to inspect SMTP config: %s", exc)
+
+
 def send_invite_email(to_email: str, invite_link: str) -> None:
     """
     Send an invite email with the given link.
