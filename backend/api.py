@@ -4679,6 +4679,25 @@ def validate_uploaded_file(file: UploadFile) -> None:
         )
 
 
+def check_machine_model_exists(normalized_machine_model: str) -> bool:
+    """
+    Check if a machine model exists in the database (case-insensitive).
+    
+    Args:
+        normalized_machine_model: The normalized machine model name (uppercase, normalized spacing)
+    
+    Returns:
+        True if the machine model exists, False otherwise
+    """
+    from sqlalchemy import func
+    
+    with SessionLocal() as session:
+        machine = session.query(MachineModel).filter(
+            func.upper(MachineModel.name) == normalized_machine_model.upper()
+        ).first()
+        return machine is not None
+
+
 @app.post("/admin/documents/upload")
 async def upload_document(
     http_request: Request,
@@ -4719,14 +4738,10 @@ async def upload_document(
     # Normalize machine_model to match MachineModel table format (uppercase, normalized spacing)
     normalized_machine_model = " ".join(machine_model.strip().upper().split())
     
-    def _check_machine_model():
-        with SessionLocal() as session:
-            machine = session.query(MachineModel).filter(
-                func.upper(MachineModel.name) == normalized_machine_model.upper()
-            ).first()
-            return machine is not None
-    
-    machine_exists = await run_sync(_check_machine_model)
+    machine_exists = await run_sync(
+        check_machine_model_exists,
+        normalized_machine_model,
+    )
     if not machine_exists:
         raise HTTPException(
             status_code=400,
