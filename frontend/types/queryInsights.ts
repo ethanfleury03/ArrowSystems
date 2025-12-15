@@ -11,6 +11,11 @@ export interface CustomerQuerySummary {
   created_at: string;
   query_text: string;
   message_count?: number;
+
+  // Who asked this query
+  user_id: number;
+  user_email: string;
+  user_role: string;
 }
 
 export interface CustomerQueriesResponse {

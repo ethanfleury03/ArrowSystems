@@ -22,6 +22,11 @@ class CustomerQuerySummary(BaseModel):
     query_text: str
     message_count: Optional[int] = None
 
+    # Who asked this query (customer vs technician)
+    user_id: int
+    user_email: str
+    user_role: str
+
 
 class CustomerQueriesResponse(BaseModel):
     customer_id: str

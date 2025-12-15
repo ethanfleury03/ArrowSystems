@@ -140,6 +140,15 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
+    # NOTE (Query Insights associations):
+    # - Customers are identified by role == "CUSTOMER"
+    # - Technicians are identified by role == "TECHNICIAN"
+    # - There is no explicit organization/customer link table.
+    # - For Query Insights we treat users with the same company_name as belonging
+    #   to the same customer org, so a customer's queries include:
+    #   * Their own queries (role "CUSTOMER")
+    #   * Queries from technicians (role "TECHNICIAN") that share company_name.
+
     query_history = relationship("QueryHistory", back_populates="user", cascade="all, delete", passive_deletes=True)
     feedback = relationship("Feedback", back_populates="user", cascade="all, delete", passive_deletes=True)
     saved_responses = relationship("SavedResponse", back_populates="user", cascade="all, delete", passive_deletes=True)
