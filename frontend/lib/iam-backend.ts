@@ -336,9 +336,10 @@ export async function iamBackendPatch(
  */
 export async function getBackendIdentityToken(): Promise<string> {
   const auth = new GoogleAuth();
+  const client = await auth.getIdTokenClient(BACKEND_URL);
   
-  // Get identity token directly using GoogleAuth
-  const token = await auth.getIdToken(BACKEND_URL);
+  // Get identity token using the idTokenProvider
+  const token = await client.idTokenProvider.fetchIdToken(BACKEND_URL);
   
   if (!token) {
     throw new Error('Failed to generate identity token');
