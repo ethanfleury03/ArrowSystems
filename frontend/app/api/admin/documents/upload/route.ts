@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getBackendBaseUrl, getBackendIdentityToken } from '@/lib/iam-backend';
 import { extractJwtFromCookie } from '@/lib/authClient';
 
+// This route must be dynamic so we can stream the body
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   try {
     // Extract JWT from cookie for user authentication
@@ -26,16 +29,15 @@ export async function POST(request: NextRequest) {
 
     // Get IAM identity token for backend authentication
     const iamToken = await getBackendIdentityToken();
-    const backendUrl = `${getBackendBaseUrl()}/admin/documents/upload`;
+    const backendBaseUrl = getBackendBaseUrl();
+    const backendUrl = `${backendBaseUrl}/admin/documents/upload`;
 
-    // Prepare headers - forward Content-Type with boundary from client request
-    const headers = new Headers();
+    // Start from the incoming headers
+    const headers = new Headers(request.headers);
     
     // Forward the Content-Type header with boundary from the client
     // This is critical - the boundary must match the actual body
-    if (contentType) {
-      headers.set('Content-Type', contentType);
-    }
+    // (Already set from request.headers, but ensure it's preserved)
     
     // Add IAM authentication token
     headers.set('Authorization', `Bearer ${iamToken}`);
@@ -43,9 +45,17 @@ export async function POST(request: NextRequest) {
     // Add user JWT token for backend authorization
     headers.set('X-User-Token', userToken);
     
-    // Remove headers that shouldn't be forwarded
-    headers.delete('host');
-    headers.delete('content-length'); // Let fetch calculate it from the stream
+    // Update host to match backend URL
+    const backendHost = new URL(backendBaseUrl).host;
+    headers.set('host', backendHost);
+    
+    // Let fetch compute the content-length from the stream
+    headers.delete('content-length');
+    
+    // Remove Next.js specific headers that shouldn't be forwarded
+    headers.delete('x-forwarded-host');
+    headers.delete('x-forwarded-port');
+    headers.delete('x-forwarded-proto');
 
     // Get the request body stream
     // In Next.js App Router, request.body is a ReadableStream
@@ -61,26 +71,28 @@ export async function POST(request: NextRequest) {
     // Forward the raw request body stream directly to backend
     // Do NOT parse it as JSON or FormData - just stream it through
     // This preserves the multipart/form-data encoding with the correct boundary
+    // Node/undici requires duplex: 'half' when sending a stream body
     const backendResponse = await fetch(backendUrl, {
       method: 'POST',
       headers,
       body: requestBody, // Raw ReadableStream - preserves multipart encoding
+      // @ts-ignore – duplex isn't in the TS types yet but is required by Node.js fetch
+      duplex: 'half',
     });
 
-    // Forward the response
-    const responseBody = backendResponse.body;
-    const responseHeaders = new Headers();
+    // Try to pass back JSON if possible, otherwise stream text
+    const responseContentType = backendResponse.headers.get('content-type') || '';
     
-    // Copy response headers
-    backendResponse.headers.forEach((value, key) => {
-      responseHeaders.set(key, value);
-    });
-
-    return new NextResponse(responseBody, {
-      status: backendResponse.status,
-      statusText: backendResponse.statusText,
-      headers: responseHeaders,
-    });
+    if (responseContentType.includes('application/json')) {
+      const data = await backendResponse.json();
+      return NextResponse.json(data, { status: backendResponse.status });
+    } else {
+      const text = await backendResponse.text();
+      return new NextResponse(text, {
+        status: backendResponse.status,
+        headers: { 'content-type': responseContentType || 'text/plain' },
+      });
+    }
   } catch (error: any) {
     console.error('Admin document upload API error:', {
       message: error.message,

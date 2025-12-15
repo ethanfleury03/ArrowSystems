@@ -26,9 +26,12 @@ export function middleware(request: NextRequest) {
   const publicRoutes = [
     '/login',
     '/register',
+    '/accept-invite', // Invite password setup page
     '/api/auth/login',
     '/api/auth/register',
     '/api/auth/logout',
+    '/api/auth/invite/validate', // Invite validation endpoint
+    '/api/auth/invite/accept', // Invite acceptance endpoint
     '/api/health',
     '/api/rag/status',
   ];
@@ -48,8 +51,9 @@ export function middleware(request: NextRequest) {
   if (!token) {
     // No token, redirect to login
     const loginUrl = new URL('/login', request.url);
-    // Preserve the original URL as a redirect parameter
-    loginUrl.searchParams.set('redirect', pathname);
+    // Preserve the full original URL (path + query) as a redirect parameter
+    const fullPath = request.nextUrl.pathname + request.nextUrl.search;
+    loginUrl.searchParams.set('redirect', fullPath);
     return NextResponse.redirect(loginUrl);
   }
   
