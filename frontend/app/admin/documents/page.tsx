@@ -291,6 +291,8 @@ export default function AdminDocumentsPage() {
   const handleUpload = () => {
     resetFormState();
     setIsUploadModalOpen(true);
+    // Refresh machine models list when opening upload modal to ensure latest models are available
+    fetchAllowedMachineModels();
   };
 
   const handleEdit = (doc: Document) => {

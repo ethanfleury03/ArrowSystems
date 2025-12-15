@@ -2952,19 +2952,57 @@ async def get_allowed_machine_models_endpoint():
     Get the list of allowed machine models.
     Used by frontend to build dropdown selectors.
     Returns all machine models including "GENERAL" and "Any".
+    Merges models from config file with models from database.
     """
     try:
         from .config.machine_models import get_allowed_machine_models
-        allowed_models = get_allowed_machine_models()
+        
+        # Get models from config file
+        config_models = get_allowed_machine_models()
+        
+        # Get models from database
+        def _get_db_models():
+            with SessionLocal() as session:
+                db_machines = session.query(MachineModel).order_by(MachineModel.name).all()
+                return [m.name for m in db_machines]
+        
+        db_models = await run_sync(_get_db_models)
+        
+        # Merge: start with config models, then add any database models not in config
+        # Use a set to track what we've seen (case-insensitive)
+        seen_models = {m.upper() for m in config_models}
+        merged_models = config_models.copy()
+        
+        for db_model in db_models:
+            if db_model.upper() not in seen_models:
+                merged_models.append(db_model)
+                seen_models.add(db_model.upper())
+        
+        # Sort the merged list (case-insensitive)
+        merged_models.sort(key=lambda x: x.upper())
+        
         return {
-            "allowed_machine_models": allowed_models,
-            "total": len(allowed_models)
+            "allowed_machine_models": merged_models,
+            "total": len(merged_models)
         }
     except ImportError:
-        return {
-            "allowed_machine_models": [],
-            "total": 0
-        }
+        # Fallback: just return database models if config import fails
+        def _get_db_models():
+            with SessionLocal() as session:
+                db_machines = session.query(MachineModel).order_by(MachineModel.name).all()
+                return [m.name for m in db_machines]
+        
+        try:
+            db_models = await run_sync(_get_db_models)
+            return {
+                "allowed_machine_models": db_models,
+                "total": len(db_models)
+            }
+        except Exception:
+            return {
+                "allowed_machine_models": [],
+                "total": 0
+            }
 
 
 @app.get("/admin/machine_models/selection")
@@ -2972,19 +3010,62 @@ async def get_machine_models_for_selection_endpoint():
     """
     Get machine models that can be selected by customers in the UI.
     Excludes special values like "GENERAL" and "Any".
+    Merges models from config file with models from database.
     """
     try:
-        from .config.machine_models import get_machine_models_for_selection
-        selectable_models = get_machine_models_for_selection()
+        from .config.machine_models import get_machine_models_for_selection, GENERAL_MACHINE, ANY_MACHINE
+        
+        # Get models from config file (already excludes GENERAL and Any)
+        config_models = get_machine_models_for_selection()
+        
+        # Get models from database
+        def _get_db_models():
+            with SessionLocal() as session:
+                db_machines = session.query(MachineModel).order_by(MachineModel.name).all()
+                return [m.name for m in db_machines]
+        
+        db_models = await run_sync(_get_db_models)
+        
+        # Merge: start with config models, then add any database models not in config
+        # Exclude GENERAL and Any from database models too
+        seen_models = {m.upper() for m in config_models}
+        merged_models = config_models.copy()
+        
+        for db_model in db_models:
+            db_model_upper = db_model.upper()
+            # Exclude special values
+            if db_model_upper not in [GENERAL_MACHINE.upper(), ANY_MACHINE.upper()]:
+                if db_model_upper not in seen_models:
+                    merged_models.append(db_model)
+                    seen_models.add(db_model_upper)
+        
+        # Sort the merged list (case-insensitive)
+        merged_models.sort(key=lambda x: x.upper())
+        
         return {
-            "machine_models": selectable_models,
-            "total": len(selectable_models)
+            "machine_models": merged_models,
+            "total": len(merged_models)
         }
     except ImportError:
-        return {
-            "machine_models": [],
-            "total": 0
-        }
+        # Fallback: just return database models (excluding GENERAL and Any) if config import fails
+        def _get_db_models():
+            with SessionLocal() as session:
+                db_machines = session.query(MachineModel).order_by(MachineModel.name).all()
+                return [m.name for m in db_machines]
+        
+        try:
+            db_models = await run_sync(_get_db_models)
+            # Filter out GENERAL and Any
+            selectable = [m for m in db_models if m.upper() not in ["GENERAL", "ANY", "ANY "]]
+            return {
+                "machine_models": selectable,
+                "total": len(selectable)
+            }
+        except Exception:
+            return {
+                "machine_models": [],
+                "total": 0
+            }
 
 
 # TODO: Implement machine models management page endpoint
