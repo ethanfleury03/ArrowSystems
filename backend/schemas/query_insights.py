@@ -62,3 +62,14 @@ class RecentQueryLogItem(BaseModel):
     query_text: str
     machine_name: Optional[str] = None
     conversation_id: str
+
+
+class UserInsight(BaseModel):
+    """User-level insight for bubble chart visualization."""
+    user_id: str
+    email: str
+    name: str
+    role: str  # "CUSTOMER", "TECHNICIAN", etc.
+    total_queries: int
+    queries_7d: int
+    last_query_at: Optional[datetime] = None

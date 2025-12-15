@@ -24,6 +24,7 @@ from ..schemas.query_insights import (
     ConversationDetails,
     ConversationMessage,
     RecentQueryLogItem,
+    UserInsight,
 )
 
 logger = get_logger(__name__)
@@ -1670,6 +1671,74 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to fetch recent queries: {str(e)}"
+            )
+    
+    @router.get("/query-insights/users", response_model=List[UserInsight])
+    async def get_user_insights(
+        _: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+    ):
+        """
+        Return user-level insights for bubble chart visualization.
+        Includes both CUSTOMER and TECHNICIAN users with their query statistics.
+        """
+        def _fetch():
+            with SessionLocal() as session:
+                # Calculate 7 days ago timestamp (timezone-aware UTC)
+                from datetime import timezone
+                seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+                
+                # Get all users (CUSTOMER and TECHNICIAN) with their query stats
+                query = (
+                    select(
+                        User.id,
+                        User.email,
+                        User.name,
+                        User.contact_name,
+                        User.role,
+                        func.count(QueryHistory.id).label('total_queries'),
+                        func.max(QueryHistory.created_at).label('last_query_at'),
+                        func.sum(
+                            case(
+                                (QueryHistory.created_at >= seven_days_ago, 1),
+                                else_=0
+                            )
+                        ).label('queries_7d')
+                    )
+                    .outerjoin(QueryHistory, User.id == QueryHistory.user_id)
+                    .where(User.role.in_(["CUSTOMER", "TECHNICIAN"]))
+                    .group_by(User.id, User.email, User.name, User.contact_name, User.role)
+                    .having(func.count(QueryHistory.id) > 0)  # Only users with queries
+                )
+                
+                results = session.execute(query).all()
+                
+                insights = []
+                for row in results:
+                    user_name = row.contact_name or row.name or row.email or "Unknown"
+                    queries_7d = int(row.queries_7d or 0)
+                    
+                    insights.append({
+                        "user_id": str(row.id),
+                        "email": row.email or "",
+                        "name": user_name,
+                        "role": row.role or "UNKNOWN",
+                        "total_queries": row.total_queries or 0,
+                        "queries_7d": queries_7d,
+                        "last_query_at": row.last_query_at,
+                    })
+                
+                logger.info(f"Query insights: found {len(insights)} users with queries")
+                return insights
+        
+        try:
+            result = await run_sync(_fetch)
+            return result
+        except Exception as e:
+            logger.error(f"Error fetching user insights: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch user insights: {str(e)}"
             )
 
     return router
