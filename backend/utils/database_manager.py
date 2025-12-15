@@ -330,6 +330,12 @@ class DatabaseManager:
                         except Exception:
                             pass
 
+                    # Extract language fields from kwargs if present
+                    detected_language = kwargs.get('detected_language')
+                    language_confidence = kwargs.get('language_confidence')
+                    query_retrieval = kwargs.get('query_retrieval')
+                    translation_provider = kwargs.get('translation_provider')
+                    
                     record = QueryHistory(
                         user_id=user_id,
                         conversation_id=conversation_id,
@@ -343,6 +349,11 @@ class DatabaseManager:
                         token_total=token_total,
                         cost_usd=cost_usd,
                         sources_json=sources_json_str,
+                        # Language metadata
+                        detected_language=detected_language,
+                        language_confidence=language_confidence,
+                        query_retrieval=query_retrieval,
+                        translation_provider=translation_provider,
                     )
                     session.add(record)
                     _retry_on_locked(session.commit)

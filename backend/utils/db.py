@@ -182,6 +182,12 @@ class QueryHistory(Base):
     token_total = Column(Integer, nullable=True)
     cost_usd = Column(Float, nullable=True)
     sources_json = Column(Text, nullable=True)
+    
+    # Language metadata columns
+    detected_language = Column(String(10), nullable=True)  # ISO 639-1 language code (e.g., "en", "es")
+    language_confidence = Column(Float, nullable=True)  # 0.0 to 1.0
+    query_retrieval = Column(Text, nullable=True)  # English query used for retrieval
+    translation_provider = Column(String(50), nullable=True)  # "llm", "none", etc.
 
     user = relationship("User", back_populates="query_history")
     feedback = relationship("Feedback", back_populates="query", cascade="all, delete", passive_deletes=True)
