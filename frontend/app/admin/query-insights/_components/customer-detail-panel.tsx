@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
-import { FilterChip } from "./filter-chip";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { QueryInsightsCustomer, CustomerQuerySummary } from "@/types/queryInsights";
 
@@ -10,8 +9,6 @@ interface CustomerDetailPanelProps {
   customer: QueryInsightsCustomer | null;
   queries: CustomerQuerySummary[] | null;
   isLoading: boolean;
-  roleFilter: "all" | "customer" | "technician";
-  onRoleFilterChange: (value: "all" | "customer" | "technician") => void;
 }
 
 /**
@@ -39,13 +36,11 @@ export function CustomerDetailPanel({
   customer,
   queries,
   isLoading,
-  roleFilter,
-  onRoleFilterChange,
 }: CustomerDetailPanelProps) {
   if (!customer) {
     return (
-      <div className="flex items-center justify-center h-full min-h-[320px] text-muted-foreground">
-        <p className="text-sm">Select a customer to view their queries.</p>
+      <div className="flex items-center justify-center h-full text-muted-foreground">
+        <p className="text-sm">Select a user to view their queries.</p>
       </div>
     );
   }
@@ -57,11 +52,6 @@ export function CustomerDetailPanel({
           <Skeleton className="h-6 w-32" />
           <Skeleton className="h-4 w-24" />
         </div>
-        <div className="flex gap-2">
-          <Skeleton className="h-8 w-16" />
-          <Skeleton className="h-8 w-20" />
-          <Skeleton className="h-8 w-24" />
-        </div>
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-20 w-full" />
@@ -71,17 +61,11 @@ export function CustomerDetailPanel({
     );
   }
 
-  // Filter queries by role
-  const filteredQueries =
-    queries?.filter((q) => {
-      if (roleFilter === "all") return true;
-      if (roleFilter === "customer") return q.user_role === "CUSTOMER";
-      if (roleFilter === "technician") return q.user_role === "TECHNICIAN";
-      return true;
-    }) ?? [];
+  // Show all queries (no role filtering in sidebar)
+  const filteredQueries = queries ?? [];
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col h-full space-y-4">
       <div>
         <h3 className="text-lg font-semibold">{customer.name}</h3>
         <p className="text-sm text-muted-foreground">
@@ -89,31 +73,10 @@ export function CustomerDetailPanel({
         </p>
       </div>
 
-      <div className="flex gap-2 mb-3">
-        <FilterChip
-          label="All"
-          value="all"
-          current={roleFilter}
-          onChange={onRoleFilterChange}
-        />
-        <FilterChip
-          label="Customer"
-          value="customer"
-          current={roleFilter}
-          onChange={onRoleFilterChange}
-        />
-        <FilterChip
-          label="Technician"
-          value="technician"
-          current={roleFilter}
-          onChange={onRoleFilterChange}
-        />
-      </div>
-
-      <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+      <div className="space-y-3 flex-1 min-h-0 overflow-y-auto pr-1">
         {filteredQueries.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No queries match this filter.
+            No queries found.
           </p>
         ) : (
           filteredQueries.map((q) => (
