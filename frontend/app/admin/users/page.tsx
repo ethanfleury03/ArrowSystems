@@ -30,7 +30,6 @@ interface FormState {
   name: string;
   email: string;
   role: string;
-  password: string;
   companyName: string;
   contactName: string;
   companyPhone: string;
@@ -41,7 +40,6 @@ const EMPTY_FORM: FormState = {
   name: "",
   email: "",
   role: "TECHNICIAN",
-  password: "",
   companyName: "",
   contactName: "",
   companyPhone: "",
@@ -411,7 +409,6 @@ export default function AdminUsersPage() {
       name: user.name ?? "",
       email: user.email,
       role: user.role,
-      password: "",
       companyName: user.company_name ?? "",
       contactName: user.contact_name ?? user.name ?? "",
       companyPhone: user.contact_phone ?? "",
@@ -440,7 +437,7 @@ export default function AdminUsersPage() {
       const payload: Record<string, unknown> = {
         email: formState.email,
         role: formState.role,
-        password: formState.password,
+        // Password is not sent - new users will receive an invite email
       };
       
       // Only include machine_models for customers
@@ -497,10 +494,9 @@ export default function AdminUsersPage() {
       const payload: Record<string, unknown> = {
         email: formState.email,
         role: formState.role,
+        // Password is optional - only send if explicitly provided for password reset
+        // For new users, password is omitted to trigger invite flow
       };
-      if (formState.password) {
-        payload.password = formState.password;
-      }
       
       // Only include machine_models for customers
       if (isEditingCustomer) {
@@ -799,19 +795,11 @@ export default function AdminUsersPage() {
               </div>
             )}
 
-            <div className="grid gap-2">
-              <label className="text-sm font-medium text-muted-foreground">
-                Password {isEditModalOpen && <span className="text-xs text-muted-foreground">(leave blank to keep existing)</span>}
-              </label>
-              <input
-                type="password"
-                value={formState.password}
-                onChange={(event) => setFormState((prev) => ({ ...prev, password: event.target.value }))}
-                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-border-primary focus:ring-1 focus:ring-primary"
-                placeholder="••••••••"
-                required={isAddModalOpen}
-              />
-            </div>
+            {isAddModalOpen && (
+              <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+                New users will receive an email with a link to set their password.
+              </div>
+            )}
             
             {isCustomerRole && (
               <div className="grid gap-2">

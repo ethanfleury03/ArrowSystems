@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 warnings.filterwarnings('ignore', message='.*TRANSFORMERS_CACHE.*')
 warnings.filterwarnings('ignore', message='.*HF_HOME.*')
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks, Response, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form, Depends, Body, BackgroundTasks, Response, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field, ValidationError
@@ -39,6 +39,7 @@ from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from .orchestrator import StructuredResponse, QueryIntent
 from .utils.database_manager import DatabaseManager
 from .utils.db import engine, check_database_integrity, DATABASE_URL, SessionLocal, DocumentIngestionMetadata, MachineModel, run_sync
+from sqlalchemy.orm import Session
 from .utils.migration_runner import run_migrations, check_pending_migrations, check_migration_status
 from .utils.query_summarizer import QuerySummarizer
 from .utils.feedback_manager import FeedbackManager
@@ -972,6 +973,20 @@ class LoginResponse(BaseModel):
     message: str
 
 
+class InviteValidateRequest(BaseModel):
+    token: str
+
+
+class InviteValidateResponse(BaseModel):
+    email: str
+    name: Optional[str] = None
+
+
+class InviteAcceptRequest(BaseModel):
+    token: str
+    password: str
+
+
 # Helper function to conditionally apply rate limiting
 def apply_rate_limit(limit_str: str):
     """Conditionally apply rate limit decorator if rate limiting is enabled."""
@@ -1749,6 +1764,137 @@ async def auth_logout(response: Response):
     )
     
     return {"message": "Logged out successfully"}
+
+
+def get_db():
+    """Database session dependency for invite endpoints."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@app.get("/auth/invite/validate", response_model=InviteValidateResponse)
+async def auth_invite_validate(token: str = Query(...), db: Session = Depends(get_db)):
+    """
+    Validate an invite token and return user information.
+    
+    Args:
+        token: Raw invite token from the URL
+        
+    Returns:
+        User email and name if token is valid
+        
+    Raises:
+        400: If token is invalid or expired
+    """
+    from .utils.invite_tokens import validate_invite_token
+    
+    user = validate_invite_token(db, token, purpose="invite")
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired invite token"
+        )
+    
+    return InviteValidateResponse(email=user.email, name=user.name)
+
+
+@app.post("/auth/invite/accept", response_model=LoginResponse)
+async def auth_invite_accept(
+    request: Request,
+    response: Response,
+    payload: InviteAcceptRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Accept an invite token and set the user's password.
+    Automatically logs the user in after password is set.
+    
+    Args:
+        request: FastAPI request object
+        response: FastAPI response object (for setting cookie)
+        payload: Token and password
+        
+    Returns:
+        LoginResponse with user data and JWT cookie set
+        
+    Raises:
+        400: If token is invalid/expired or password is too short
+    """
+    import bcrypt
+    from .utils.invite_tokens import validate_invite_token, mark_invite_token_used
+    
+    # Validate token
+    user = validate_invite_token(db, payload.token, purpose="invite")
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired invite token"
+        )
+    
+    # Validate password
+    if not payload.password or len(payload.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long"
+        )
+    
+    # Set new password hash
+    hashed = bcrypt.hashpw(payload.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    user.password_hash = hashed
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    # Mark token as used
+    mark_invite_token_used(db, payload.token, purpose="invite")
+    
+    # Build user dict for response (mirror /auth/login format)
+    user_dict = {
+        "id": str(user.id),
+        "email": user.email,
+        "name": user.name,
+        "role": user.role or "TECHNICIAN",
+        "company_name": user.company_name,
+        "contact_name": user.contact_name,
+        "contact_phone": user.contact_phone,
+        "machine_models": user.machine_models or [],
+    }
+    
+    # Create JWT token and set cookie (mirror /auth/login behavior)
+    token = create_access_token({"email": user.email, "role": user.role or "TECHNICIAN"})
+    
+    cookie_options = auth_config.get_cookie_options()
+    set_cookie_params = {
+        "key": cookie_options["key"],
+        "value": token,
+        "httponly": cookie_options["httponly"],
+        "secure": cookie_options["secure"],
+        "samesite": cookie_options["samesite"],
+        "path": cookie_options["path"],
+    }
+    
+    if "max_age" in cookie_options:
+        set_cookie_params["max_age"] = cookie_options["max_age"]
+    
+    if "domain" in cookie_options:
+        set_cookie_params["domain"] = cookie_options["domain"]
+    
+    response.set_cookie(**set_cookie_params)
+    
+    # Audit log invite acceptance
+    await audit_log(
+        "user_invite_accepted",
+        level="info",
+        user_id=user.email,
+        role=user.role or "TECHNICIAN",
+        metadata={"user_id": str(user.id)},
+        request=request,
+    )
+    
+    return LoginResponse(user=user_dict, message="Invite accepted and password set")
 
 
 @app.get("/auth/me", response_model=UserResponse)

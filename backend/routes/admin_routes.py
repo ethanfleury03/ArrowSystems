@@ -45,7 +45,7 @@ class AdminUserResponse(BaseModel):
 
 class AdminUserCreateRequest(BaseModel):
     email: str
-    password: str
+    password: Optional[str] = None
     role: str = "TECHNICIAN"
     name: Optional[str] = None
     company_name: Optional[str] = None
@@ -231,6 +231,30 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             contact_phone=payload.contact_phone,
             machine_models=machine_models if role_upper == "CUSTOMER" else None,  # Only set for customers
         )
+        
+        # Generate invite token and send email for new users
+        # Only generate invite if password was not provided (invite-based flow)
+        if not payload.password or not payload.password.strip():
+            import os
+            from ..utils.db import SessionLocal, User
+            from ..utils.invite_tokens import create_invite_token
+            from ..utils.email_utils import send_invite_email
+            
+            FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://example.com")
+            
+            # Open DB session to load User ORM instance and generate invite
+            db = SessionLocal()
+            try:
+                user_obj = db.query(User).filter(User.id == int(created["id"])).first()
+                if user_obj:
+                    raw_token = create_invite_token(db, user_obj, purpose="invite")
+                    invite_link = f"{FRONTEND_BASE_URL.rstrip('/')}/accept-invite?token={raw_token}"
+                    send_invite_email(user_obj.email, invite_link)
+                    logger.info(f"Sent invite email to new user {user_obj.email}")
+            except Exception as e:
+                logger.error(f"Failed to generate invite token or send email for user {payload.email}: {e}", exc_info=True)
+            finally:
+                db.close()
         
         # Audit log user creation
         await audit_log(
