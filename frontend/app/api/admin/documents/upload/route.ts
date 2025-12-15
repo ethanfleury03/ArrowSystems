@@ -73,25 +73,54 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Get headers from FormData (includes Content-Type with boundary)
+    const formDataHeaders = backendFormData.getHeaders();
+    
     // Forward JWT in custom header to backend (X-User-Token)
+    // IMPORTANT: Do NOT override Content-Type - let FormData set it with the correct boundary
     const headers: any = {
-      ...backendFormData.getHeaders(),
+      ...formDataHeaders,
       'X-User-Token': token,
     };
 
+    // Log request config in dev (without the actual file data)
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Upload request config:', {
+        url: `${BACKEND_URL}/admin/documents/upload`,
+        method: 'POST',
+        hasData: !!backendFormData,
+        dataType: backendFormData.constructor.name,
+        contentType: headers['content-type'],
+        hasBody: false, // Confirm we're NOT setting body
+      });
+    }
+
+    // Make request with FormData as data (NOT body)
+    // gaxios will handle the multipart encoding automatically
     const response = await client.request({
       url: `${BACKEND_URL}/admin/documents/upload`,
       method: 'POST',
       headers,
       data: backendFormData,
+      // DO NOT set 'body' property - only use 'data'
     });
 
     return NextResponse.json(response.data);
   } catch (error: any) {
-    console.error('Admin document upload API error:', error);
+    console.error('Admin document upload API error:', {
+      message: error.message,
+      status: error.response?.status || error.status,
+      statusText: error.response?.statusText || error.statusText,
+      detail: error.response?.data?.detail || error.detail,
+      // Don't log the full response data as it might contain file content
+    });
+    
+    const errorDetail = error.response?.data?.detail || error.detail || error.message || 'Internal server error';
+    const errorStatus = error.response?.status || error.status || 500;
+    
     return NextResponse.json(
-      { detail: error.message || 'Internal server error' },
-      { status: error.response?.status || 500 }
+      { detail: errorDetail },
+      { status: errorStatus }
     );
   }
 }
