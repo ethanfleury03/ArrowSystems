@@ -4784,8 +4784,17 @@ async def upload_document(
         
         # Create metadata record with PENDING_INGESTION status
         # Use normalized_machine_model (already normalized above)
-        def _create_metadata():
-            with SessionLocal() as session:
+        # Capture SessionLocal in a default argument to avoid closure scoping issues
+        session_factory = SessionLocal
+        if session_factory is None:
+            logger.error("SessionLocal is not configured")
+            raise HTTPException(
+                status_code=500,
+                detail="Database session factory not available"
+            )
+        
+        def _create_metadata(session_factory=session_factory):
+            with session_factory() as session:
                 metadata = DocumentIngestionMetadata(
                     id=metadata_id,
                     filename=file.filename,
@@ -4811,9 +4820,9 @@ async def upload_document(
         # Update document metadata in database (Phase 1: migrated from document_metadata.json)
         # This ensures the machine_model shows up in the document list immediately
         from .utils.document_metadata import upsert_document
-        from .utils.db import SessionLocal
+        # SessionLocal is already imported at module level, no need to re-import
         try:
-            session = SessionLocal()
+            session = session_factory()
             try:
                 upsert_document(
                     session=session,
