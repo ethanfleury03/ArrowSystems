@@ -1489,10 +1489,10 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         """
         def _fetch():
             with SessionLocal() as session:
-                # Get all queries for this conversation (by sessionId)
-                # Use load_only to exclude updated_at column which may not exist in DB
-                # PostgreSQL JSONB query: metadata_json->>'sessionId'
-                queries = session.query(QueryHistory).options(
+                # Get all queries for this conversation.
+                # Support both legacy conversations identified by metadata_json->>'sessionId'
+                # and new conversations identified by the conversation_id column.
+                base_query = session.query(QueryHistory).options(
                     load_only(
                         QueryHistory.id,
                         QueryHistory.user_id,
@@ -1508,31 +1508,27 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                         QueryHistory.cost_usd,
                         QueryHistory.sources_json
                     )
-                ).filter(
-                    QueryHistory.metadata_json.op('->>')('sessionId') == conversation_id
-                ).order_by(QueryHistory.created_at).all()
+                )
+
+                # First try: JSON sessionId (legacy) OR conversation_id column (new)
+                from sqlalchemy import or_
+                queries = (
+                    base_query
+                    .filter(
+                        or_(
+                            QueryHistory.metadata_json.op('->>')('sessionId') == conversation_id,
+                            QueryHistory.conversation_id == conversation_id,
+                        )
+                    )
+                    .order_by(QueryHistory.created_at)
+                    .all()
+                )
                 
-                # If no results with sessionId, try treating conversation_id as a query ID
+                # If still no results, try treating conversation_id as a query ID (query_123 or raw int)
                 if not queries:
                     try:
                         query_id = int(conversation_id.replace("query_", ""))
-                        queries = session.query(QueryHistory).options(
-                            load_only(
-                                QueryHistory.id,
-                                QueryHistory.user_id,
-                                QueryHistory.query_text,
-                                QueryHistory.answer_text,
-                                QueryHistory.response_time_ms,
-                                QueryHistory.metadata_json,
-                                QueryHistory.created_at,
-                                QueryHistory.machine_name,
-                                QueryHistory.token_input,
-                                QueryHistory.token_output,
-                                QueryHistory.token_total,
-                                QueryHistory.cost_usd,
-                                QueryHistory.sources_json
-                            )
-                        ).filter(
+                        queries = base_query.filter(
                             QueryHistory.id == query_id
                         ).order_by(QueryHistory.created_at).all()
                     except (ValueError, AttributeError):
