@@ -73,15 +73,9 @@ class Settings:
         self.allow_app_ingestion = allow_ingestion_str in {"true", "1", "yes", "on"}
         
         if self.allow_app_ingestion:
-            logger.warning(
-                "ingestion_enabled_from_app",
-                message="⚠️ WARNING: App-based ingestion is ENABLED. This should only be set in dedicated GPU ingestion environments."
-            )
+            logger.warning("⚠️ WARNING: App-based ingestion is ENABLED. This should only be set in dedicated GPU ingestion environments.")
         else:
-            logger.info(
-                "ingestion_disabled_from_app",
-                message="✅ App-based ingestion is DISABLED (default). Ingestion must be triggered via external GPU pipeline."
-            )
+            logger.info("✅ App-based ingestion is DISABLED (default). Ingestion must be triggered via external GPU pipeline.")
     
     def _load_gcs_config(self) -> None:
         """
@@ -103,10 +97,7 @@ class Settings:
                     "Set it to the GCS bucket name where documents should be stored."
                 )
             else:
-                logger.warning(
-                    "gcs_bucket_not_set",
-                    message="⚠️ DOCS_GCS_BUCKET not set. Document uploads will fail unless configured."
-                )
+                logger.warning("⚠️ DOCS_GCS_BUCKET not set. Document uploads will fail unless configured.")
         
         # Optional: GCS prefix (default: "documents/")
         self.DOCS_GCS_PREFIX = os.getenv("DOCS_GCS_PREFIX", "documents/").rstrip("/")
@@ -118,13 +109,7 @@ class Settings:
         self.DOCS_LOCAL_SAVE_ENABLED = local_save_str in {"true", "1", "yes", "on"}
         
         if self.DOCS_GCS_BUCKET:
-            logger.info(
-                "gcs_config_loaded",
-                bucket=self.DOCS_GCS_BUCKET,
-                prefix=self.DOCS_GCS_PREFIX,
-                local_save_enabled=self.DOCS_LOCAL_SAVE_ENABLED,
-                message=f"GCS document storage configured: gs://{self.DOCS_GCS_BUCKET}/{self.DOCS_GCS_PREFIX}"
-            )
+            logger.info(f"GCS document storage configured: gs://{self.DOCS_GCS_BUCKET}/{self.DOCS_GCS_PREFIX} (local_save={self.DOCS_LOCAL_SAVE_ENABLED})")
     
     def _load_anthropic_key(self) -> None:
         """Load Anthropic API key - optional, used for Claude LLM integration."""
