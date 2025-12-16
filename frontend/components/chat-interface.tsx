@@ -10,7 +10,7 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import Image from "next/image"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -129,22 +129,10 @@ export function ChatInterface() {
     return () => {
       stopRagPolling()
     }
-  }, [messages.length]) // Re-check when messages change (e.g., when loading a conversation)
+  }, [messages.length, startRagPolling]) // Re-check when messages change (e.g., when loading a conversation)
   
   // Polling functions for RAG status
-  const startRagPolling = () => {
-    if (ragPollingIntervalRef.current) return // Already polling
-    
-    // Initial check
-    checkRagStatus()
-    
-    // Poll every 15 seconds
-    ragPollingIntervalRef.current = setInterval(() => {
-      checkRagStatus()
-    }, 15000)
-  }
-  
-  const checkRagStatus = async () => {
+  const checkRagStatus = useCallback(async () => {
     try {
       const ragResponse = await fetch('/api/rag/status', {
         credentials: "include"
@@ -180,7 +168,19 @@ export function ChatInterface() {
       console.error("Failed to poll RAG status:", error)
       setCheckingRag(false)
     }
-  }
+  }, [])
+  
+  const startRagPolling = useCallback(() => {
+    if (ragPollingIntervalRef.current) return // Already polling
+    
+    // Initial check
+    checkRagStatus()
+    
+    // Poll every 15 seconds
+    ragPollingIntervalRef.current = setInterval(() => {
+      checkRagStatus()
+    }, 15000)
+  }, [checkRagStatus])
   
   const stopRagPolling = () => {
     if (ragPollingIntervalRef.current) {
@@ -434,8 +434,8 @@ export function ChatInterface() {
       const ragCode = errorData?.code || errorData?.detail?.code
       
       if (ragCode === 'RAG_WARMING') {
-        // Update state to warming and start polling
-        setRagStatus('warming')
+        // Update state to initializing and start polling
+        setRagStatus('initializing')
         setRagLastError(null)
         if (!ragPollingIntervalRef.current) {
           startRagPolling()
@@ -444,7 +444,7 @@ export function ChatInterface() {
         const warmingMessage: Message = {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: "Document search is currently warming up. Please wait a moment and try again.",
+          content: "Assistant is still loading the knowledge base. Please wait a moment and try again.",
           timestamp: new Date(),
         }
         setMessages((prev) => [...prev, warmingMessage])
