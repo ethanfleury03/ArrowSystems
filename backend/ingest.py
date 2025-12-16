@@ -12,6 +12,16 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 warnings.filterwarnings("ignore", message=".*wrong pointing object.*")
 
 import os
+import sys
+from pathlib import Path
+
+# Add parent directory to Python path so we can import 'backend' module
+# This allows the script to be run from any directory
+script_dir = Path(__file__).resolve().parent
+parent_dir = script_dir.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
 # Set ingestion-safe mode by default (disable metadata updates)
 os.environ["DISABLE_METADATA_UPDATE"] = os.environ.get("DISABLE_METADATA_UPDATE", "1")
 
