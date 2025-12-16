@@ -83,3 +83,4 @@ def downgrade() -> None:
         if _column_exists('query_history', 'detected_language'):
             op.drop_column('query_history', 'detected_language')
 
+

@@ -4715,9 +4715,22 @@ async def upload_document(
     from datetime import datetime
     
     # Get user from context
-    from .logging_context import get_user_id, get_user_role
+    from .logging_context import get_user_id, get_user_role, get_request_id
     user_id = get_user_id()
     user_role = get_user_role()
+    request_id = get_request_id()
+    
+    # Log document upload received
+    logger.info(
+        {
+            "event": "document_upload_received",
+            "filename": file.filename,
+            "content_type": file.content_type,
+            "machine_model_name": machine_model,
+            "user_id": user_id,
+            "request_id": request_id,
+        }
+    )
     
     # Validate file
     validate_uploaded_file(file)
@@ -4747,6 +4760,28 @@ async def upload_document(
             status_code=400,
             detail=f"Invalid machine model: {machine_model}"
         )
+    
+    # Get machine model ID for logging
+    from .utils.db import MachineModel
+    machine_model_obj = None
+    try:
+        with SessionLocal() as session:
+            machine_model_obj = session.query(MachineModel).filter(
+                MachineModel.name == normalized_machine_model
+            ).first()
+    except Exception:
+        pass  # Ignore errors, just log what we have
+    
+    # Log machine model validation
+    logger.info(
+        {
+            "event": "document_upload_machine_model_validated",
+            "machine_model_name": machine_model,
+            "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+            "filename": file.filename,
+            "request_id": request_id,
+        }
+    )
     
     # Audit log upload start
     await audit_log(
@@ -4817,6 +4852,18 @@ async def upload_document(
         
         metadata_result = await run_sync(_create_metadata)
         
+        # Log document record created
+        logger.info(
+            {
+                "event": "document_record_created",
+                "document_id": metadata_result["id"],
+                "filename": metadata_result["filename"],
+                "status": metadata_result["status"],
+                "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+                "request_id": request_id,
+            }
+        )
+        
         # Update document metadata in database (Phase 1: migrated from document_metadata.json)
         # This ensures the machine_model shows up in the document list immediately
         from .utils.document_metadata import upsert_document
@@ -4852,26 +4899,44 @@ async def upload_document(
             request=http_request,
         )
         
+        # Log ingestion enqueued
+        logger.info(
+            {
+                "event": "document_ingestion_enqueued",
+                "document_id": metadata_result["id"],
+                "filename": metadata_result["filename"],
+                "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+                "request_id": request_id,
+            }
+        )
+        
         # Trigger background chunking task (Phase 2)
         # After chunking completes, it will trigger embedding (Phase 3)
         from backend.utils.chunking_runner import run_chunking
         from backend.utils.embedding_runner import run_embedding
         
-        def chunking_with_embedding_trigger(meta_id: str):
+        def chunking_with_embedding_trigger(meta_id: str, req_id: Optional[str] = None):
             """Run chunking, then trigger embedding if successful."""
             try:
                 # Run chunking (returns metadata_id if successful)
-                result = run_chunking(meta_id)
+                result = run_chunking(meta_id, request_id=req_id)
                 # If chunking succeeded, trigger embedding
                 if result:
                     # Schedule embedding as a background task
                     # Note: We can't use background_tasks here since we're already in a background task
                     # So we'll call it directly, but it's async-safe
-                    run_embedding(meta_id)
+                    run_embedding(meta_id, request_id=req_id)
             except Exception as e:
-                logger.error(f"chunking_or_embedding_failed", metadata_id=meta_id, error=str(e))
+                logger.exception(
+                    {
+                        "event": "chunking_or_embedding_failed",
+                        "metadata_id": meta_id,
+                        "request_id": req_id,
+                        "error": str(e),
+                    }
+                )
         
-        background_tasks.add_task(chunking_with_embedding_trigger, metadata_id)
+        background_tasks.add_task(chunking_with_embedding_trigger, metadata_id, request_id)
         logger.info(f"chunking_task_queued", metadata_id=metadata_id, filename=file.filename)
         
         return {
@@ -4885,7 +4950,14 @@ async def upload_document(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error uploading document: {e}", exc_info=True)
+        logger.exception(
+            {
+                "event": "document_upload_failed",
+                "filename": file.filename if file else None,
+                "document_id": metadata_result.get("id") if 'metadata_result' in locals() else None,
+                "request_id": request_id,
+            }
+        )
         raise HTTPException(
             status_code=500,
             detail=get_error_detail(e, "An internal error occurred while uploading document")
