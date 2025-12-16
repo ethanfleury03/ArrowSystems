@@ -4894,25 +4894,74 @@ async def upload_document(
         # Generate unique ID for metadata record
         metadata_id = str(uuid.uuid4())
         
-        # Save file to data/original_pdfs/ directory (or test directory if in test mode)
-        from backend.utils.test_mode import get_original_pdfs_dir
-        original_pdfs_dir = get_original_pdfs_dir()
-        os.makedirs(original_pdfs_dir, exist_ok=True)
+        # Sanitize filename for GCS (remove path separators, special chars)
+        import re
+        sanitized_filename = re.sub(r'[^\w\s.-]', '_', file.filename)
+        sanitized_filename = sanitized_filename.replace(' ', '_')
         
-        # Use original filename but ensure uniqueness if file exists
-        original_path = os.path.join(original_pdfs_dir, file.filename)
-        if os.path.exists(original_path):
-            # Add timestamp to filename to avoid conflicts
-            name, ext = os.path.splitext(file.filename)
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            original_path = os.path.join(original_pdfs_dir, f"{name}_{timestamp}{ext}")
-            file.filename = os.path.basename(original_path)
+        # Determine GCS object name: {prefix}{metadata_id}/{sanitized_filename}
+        gcs_object_name = f"{settings.DOCS_GCS_PREFIX}{metadata_id}/{sanitized_filename}"
         
-        # Save file
-        with open(original_path, "wb") as f:
-            f.write(content)
+        # Upload to GCS (primary storage)
+        gcs_path = None
+        if settings.DOCS_GCS_BUCKET:
+            from backend.utils.gcs_client import upload_bytes
+            gcs_path = upload_bytes(
+                bucket_name=settings.DOCS_GCS_BUCKET,
+                object_name=gcs_object_name,
+                content=content,
+                content_type=file.content_type or "application/pdf"
+            )
+            
+            if not gcs_path:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to upload file to GCS bucket {settings.DOCS_GCS_BUCKET}"
+                )
+            
+            logger.info(
+                {
+                    "event": "document_uploaded_to_gcs",
+                    "filename": file.filename,
+                    "size_bytes": file_size,
+                    "gcs_path": gcs_path,
+                    "request_id": request_id,
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="DOCS_GCS_BUCKET not configured. GCS upload is required."
+            )
         
-        logger.info("document_uploaded", filename=file.filename, size_bytes=file_size, path=original_path)
+        # Optionally save to local disk (for dev/backward compatibility)
+        original_path = None
+        if settings.DOCS_LOCAL_SAVE_ENABLED:
+            from backend.utils.test_mode import get_original_pdfs_dir
+            original_pdfs_dir = get_original_pdfs_dir()
+            os.makedirs(original_pdfs_dir, exist_ok=True)
+            
+            # Use original filename but ensure uniqueness if file exists
+            original_path = os.path.join(original_pdfs_dir, file.filename)
+            if os.path.exists(original_path):
+                # Add timestamp to filename to avoid conflicts
+                name, ext = os.path.splitext(file.filename)
+                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                original_path = os.path.join(original_pdfs_dir, f"{name}_{timestamp}{ext}")
+                file.filename = os.path.basename(original_path)
+            
+            # Save file locally
+            with open(original_path, "wb") as f:
+                f.write(content)
+            
+            logger.info(
+                {
+                    "event": "document_uploaded_locally",
+                    "filename": file.filename,
+                    "path": original_path,
+                    "request_id": request_id,
+                }
+            )
         
         # Create metadata record with PENDING_INGESTION status
         # Use normalized_machine_model (already normalized above)
@@ -4933,7 +4982,7 @@ async def upload_document(
                     machine_model=normalized_machine_model,
                     status="PENDING_INGESTION",
                     description=description,
-                    file_path=original_path,
+                    file_path=original_path if settings.DOCS_LOCAL_SAVE_ENABLED else None,  # Only set if local save enabled
                     file_size_bytes=file_size,
                 )
                 session.add(metadata)
@@ -4971,15 +5020,32 @@ async def upload_document(
                 upsert_document(
                     session=session,
                     file_name=file.filename,
+                    gcs_path=gcs_path,  # Store GCS path in Document table
                     machine_model=[normalized_machine_model],  # Use normalized version
-                    requires_admin_review=False  # Clear review flag since we have a valid machine model
+                    requires_admin_review=False,  # Clear review flag since we have a valid machine model
+                    file_size_bytes=file_size,
                 )
-                logger.info(f"Updated document metadata in database for {file.filename} with machine_model={machine_model}")
+                logger.info(
+                    {
+                        "event": "document_metadata_updated",
+                        "filename": file.filename,
+                        "gcs_path": gcs_path,
+                        "machine_model": normalized_machine_model,
+                        "request_id": request_id,
+                    }
+                )
             finally:
                 session.close()
         except Exception as e:
             # Don't fail the upload if metadata update fails - log and continue
-            logger.warning(f"Failed to update document metadata in database for {file.filename}: {e}")
+            logger.warning(
+                {
+                    "event": "document_metadata_update_failed",
+                    "filename": file.filename,
+                    "error": str(e),
+                    "request_id": request_id,
+                }
+            )
         
         # Audit log metadata created
         await audit_log(

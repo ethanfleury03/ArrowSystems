@@ -58,6 +58,9 @@ class Settings:
         
         # Ingestion Safety Flag - prevents automatic ingestion from web app
         self._load_ingestion_config()
+        
+        # GCS Document Storage Configuration
+        self._load_gcs_config()
     
     def _load_ingestion_config(self) -> None:
         """
@@ -82,6 +85,49 @@ class Settings:
             logger.info(
                 "ingestion_disabled_from_app",
                 message="✅ App-based ingestion is DISABLED (default). Ingestion must be triggered via external GPU pipeline."
+            )
+    
+    def _load_gcs_config(self) -> None:
+        """
+        Load Google Cloud Storage configuration for document storage.
+        
+        Required:
+        - DOCS_GCS_BUCKET: GCS bucket name for storing documents
+        
+        Optional:
+        - DOCS_GCS_PREFIX: Prefix/path within bucket (default: "documents/")
+        - DOCS_LOCAL_SAVE_ENABLED: Whether to also save files locally (default: false)
+        """
+        # Required: GCS bucket name
+        self.DOCS_GCS_BUCKET = os.getenv("DOCS_GCS_BUCKET")
+        if not self.DOCS_GCS_BUCKET:
+            if self.is_prod:
+                raise RuntimeError(
+                    "DOCS_GCS_BUCKET environment variable is REQUIRED in production. "
+                    "Set it to the GCS bucket name where documents should be stored."
+                )
+            else:
+                logger.warning(
+                    "gcs_bucket_not_set",
+                    message="⚠️ DOCS_GCS_BUCKET not set. Document uploads will fail unless configured."
+                )
+        
+        # Optional: GCS prefix (default: "documents/")
+        self.DOCS_GCS_PREFIX = os.getenv("DOCS_GCS_PREFIX", "documents/").rstrip("/")
+        if not self.DOCS_GCS_PREFIX.endswith("/"):
+            self.DOCS_GCS_PREFIX += "/"
+        
+        # Optional: Local save fallback (default: false)
+        local_save_str = os.getenv("DOCS_LOCAL_SAVE_ENABLED", "false").lower()
+        self.DOCS_LOCAL_SAVE_ENABLED = local_save_str in {"true", "1", "yes", "on"}
+        
+        if self.DOCS_GCS_BUCKET:
+            logger.info(
+                "gcs_config_loaded",
+                bucket=self.DOCS_GCS_BUCKET,
+                prefix=self.DOCS_GCS_PREFIX,
+                local_save_enabled=self.DOCS_LOCAL_SAVE_ENABLED,
+                message=f"GCS document storage configured: gs://{self.DOCS_GCS_BUCKET}/{self.DOCS_GCS_PREFIX}"
             )
     
     def _load_anthropic_key(self) -> None:
