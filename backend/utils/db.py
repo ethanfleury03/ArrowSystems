@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -24,6 +25,7 @@ from sqlalchemy import (
     func,
     inspect,
     text,
+    CheckConstraint,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, declarative_base, relationship, scoped_session, sessionmaker
@@ -257,14 +259,29 @@ class AuditLog(Base):
     request_id = Column(String(255), nullable=True)  # Request ID from context
 
 
+class MachineKind(str, Enum):
+    """Machine kind enumeration."""
+    PRINT_ENGINE = "Print Engine"
+    BLADE_CUTTER = "Blade Cutter"
+    LASER_CUTTER = "Laser Cutter"
+
+
 class MachineModel(Base):
     """Machine model registry table."""
     __tablename__ = "machine_models"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), unique=True, nullable=False, index=True)
+    machine_kind = Column(String(50), nullable=False, default=MachineKind.PRINT_ENGINE.value)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    __table_args__ = (
+        CheckConstraint(
+            "machine_kind IN ('Print Engine', 'Blade Cutter', 'Laser Cutter')",
+            name='check_machine_kind'
+        ),
+    )
 
 
 class DocumentIngestionMetadata(Base):

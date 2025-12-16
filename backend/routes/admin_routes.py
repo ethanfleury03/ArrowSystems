@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, load_only
 
 from ..security import decode_access_token
 from ..utils.database_manager import DatabaseManager
-from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, MachineModel, DocumentIngestionMetadata, run_sync
+from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, MachineModel, DocumentIngestionMetadata, run_sync, MachineKind
 from ..utils.audit_log import audit_log
 from ..logging_config import get_logger
 from ..schemas.query_insights import (
@@ -71,6 +71,7 @@ class MachineListResponse(BaseModel):
 class MachineModelResponse(BaseModel):
     id: int
     name: str
+    machine_kind: str
     document_count: int
     created_at: str
 
@@ -84,6 +85,12 @@ class MachineModelsListResponse(BaseModel):
 
 class MachineCreateRequest(BaseModel):
     name: str
+    machine_kind: str
+
+
+class MachineUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    machine_kind: Optional[str] = None
 
 
 def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager]]) -> APIRouter:
@@ -1082,6 +1089,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                     session.query(
                         MachineModel.id,
                         MachineModel.name,
+                        MachineModel.machine_kind,
                         MachineModel.created_at,
                         func.count(DocumentIngestionMetadata.id).label('document_count')
                     )
@@ -1089,7 +1097,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                         DocumentIngestionMetadata,
                         func.upper(MachineModel.name) == func.upper(DocumentIngestionMetadata.machine_model)
                     )
-                    .group_by(MachineModel.id, MachineModel.name, MachineModel.created_at)
+                    .group_by(MachineModel.id, MachineModel.name, MachineModel.machine_kind, MachineModel.created_at)
                     .order_by(MachineModel.name)
                 )
                 
@@ -1098,6 +1106,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                     {
                         "id": row.id,
                         "name": row.name,
+                        "machine_kind": row.machine_kind or MachineKind.PRINT_ENGINE.value,
                         "document_count": row.document_count or 0,
                         "created_at": row.created_at.isoformat() if row.created_at else "",
                     }
@@ -1182,6 +1191,15 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         # Normalize: uppercase, remove extra spaces
         name = " ".join(name.upper().split())
         
+        # Validate machine_kind
+        valid_kinds = [MachineKind.PRINT_ENGINE.value, MachineKind.BLADE_CUTTER.value, MachineKind.LASER_CUTTER.value]
+        machine_kind = request.machine_kind.strip()
+        if machine_kind not in valid_kinds:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid machine_kind '{machine_kind}'. Must be one of: {', '.join(valid_kinds)}"
+            )
+        
         def _create():
             with SessionLocal() as session:
                 # Check for duplicates (case-insensitive)
@@ -1193,11 +1211,11 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                     raise HTTPException(status_code=400, detail=f"Machine model '{name}' already exists")
                 
                 # Create new machine model
-                machine = MachineModel(name=name)
+                machine = MachineModel(name=name, machine_kind=machine_kind)
                 session.add(machine)
                 session.commit()
                 session.refresh(machine)
-                return {"name": machine.name, "id": machine.id}
+                return {"name": machine.name, "id": machine.id, "machine_kind": machine.machine_kind}
         
         try:
             result = await run_sync(_create)
@@ -1208,7 +1226,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 level="info",
                 user_id=admin.get("email"),
                 role=admin.get("role"),
-                metadata={"machine_name": result["name"]},
+                metadata={"machine_name": result["name"], "machine_kind": result["machine_kind"]},
                 request=http_request,
             )
             
@@ -1218,6 +1236,88 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         except Exception as e:
             logger.error(f"Error creating machine model: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to create machine model: {str(e)}")
+
+    @router.put("/machines/{machine_id}")
+    async def update_machine(
+        machine_id: int,
+        request: MachineUpdateRequest,
+        admin: Dict[str, str] = Depends(get_current_admin),
+        manager: DatabaseManager = Depends(get_db_manager),
+        http_request: Request = None,
+    ):
+        """Update a machine model (name and/or machine_kind)."""
+        # Validate that at least one field is provided
+        if request.name is None and request.machine_kind is None:
+            raise HTTPException(status_code=400, detail="At least one field (name or machine_kind) must be provided")
+        
+        # Validate machine_kind if provided
+        valid_kinds = [MachineKind.PRINT_ENGINE.value, MachineKind.BLADE_CUTTER.value, MachineKind.LASER_CUTTER.value]
+        if request.machine_kind is not None:
+            machine_kind = request.machine_kind.strip()
+            if machine_kind not in valid_kinds:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid machine_kind '{machine_kind}'. Must be one of: {', '.join(valid_kinds)}"
+                )
+        else:
+            machine_kind = None
+        
+        # Normalize name if provided
+        name = None
+        if request.name is not None:
+            name = request.name.strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="Machine name cannot be empty")
+            # Normalize: uppercase, remove extra spaces
+            name = " ".join(name.upper().split())
+        
+        def _update():
+            with SessionLocal() as session:
+                # Check if machine exists
+                machine = session.query(MachineModel).filter(MachineModel.id == machine_id).first()
+                if not machine:
+                    raise HTTPException(status_code=404, detail="Machine model not found")
+                
+                # Check for name duplicates if name is being changed (case-insensitive)
+                if name is not None and name.upper() != machine.name.upper():
+                    existing = session.query(MachineModel).filter(
+                        func.upper(MachineModel.name) == name.upper()
+                    ).first()
+                    if existing:
+                        raise HTTPException(status_code=400, detail=f"Machine model '{name}' already exists")
+                    machine.name = name
+                
+                # Update machine_kind if provided
+                if machine_kind is not None:
+                    machine.machine_kind = machine_kind
+                
+                session.commit()
+                session.refresh(machine)
+                return {
+                    "id": machine.id,
+                    "name": machine.name,
+                    "machine_kind": machine.machine_kind,
+                }
+        
+        try:
+            result = await run_sync(_update)
+            
+            # Audit log
+            await audit_log(
+                "machine_model_updated",
+                level="info",
+                user_id=admin.get("email"),
+                role=admin.get("role"),
+                metadata={"machine_id": machine_id, "machine_name": result["name"], "machine_kind": result["machine_kind"]},
+                request=http_request,
+            )
+            
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating machine model: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to update machine model: {str(e)}")
 
     @router.delete("/machines/{machine_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_machine(

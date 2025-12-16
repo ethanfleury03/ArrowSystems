@@ -37,16 +37,17 @@ const formatFileSize = (bytes: number): string => {
 
 // Helper function to get status label
 const getStatusLabel = (status: string | null | undefined, chunkCount?: number): string => {
-  if (!status) {
-    // When ingestion is disabled and status is null, show "Managed externally"
-    // Otherwise show empty (for documents not yet in ingestion pipeline)
-    if (!ALLOW_APP_INGESTION) {
-      return chunkCount !== undefined && chunkCount > 0 
-        ? 'Managed externally' 
-        : 'Index status unknown';
-    }
-    return '';
+  // When ingestion is disabled, always show "Managed externally" regardless of status
+  // This prevents showing misleading "Rebuilding index..." messages
+  if (!ALLOW_APP_INGESTION) {
+    return 'Managed externally';
   }
+  
+  // When ingestion is enabled, show actual status
+  if (!status) {
+    return chunkCount !== undefined && chunkCount > 0 ? 'Complete' : '';
+  }
+  
   switch (status) {
     case 'PENDING_INGESTION':
       return 'Pending';
@@ -70,6 +71,9 @@ const getStatusLabel = (status: string | null | undefined, chunkCount?: number):
 };
 
 export default function AdminDocumentsPage() {
+  // Log ingestion configuration for debugging
+  console.log('[Admin Documents] ALLOW_APP_INGESTION:', ALLOW_APP_INGESTION);
+  
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loadingTable, setLoadingTable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -187,7 +191,18 @@ export default function AdminDocumentsPage() {
           throw new Error(`Failed to load documents (${response.status})`);
         }
         const data = await response.json();
-        setDocuments(Array.isArray(data.documents) ? data.documents : []);
+        const docs = Array.isArray(data.documents) ? data.documents : [];
+        setDocuments(docs);
+        
+        // Log sample document status for debugging
+        if (docs.length > 0 && !ALLOW_APP_INGESTION) {
+          const sampleDoc = docs[0];
+          console.log('[Admin Documents] Sample document status:', {
+            filename: sampleDoc.filename,
+            ingestion_status: sampleDoc.ingestion_status,
+            chunk_count: sampleDoc.chunk_count,
+          });
+        }
         
         // Also extract allowed_machine_models from response if available
         // Filter out "Any" as it's only for user machine access, not document machine models
@@ -212,8 +227,13 @@ export default function AdminDocumentsPage() {
     fetchAllowedMachineModels();
   }, [fetchDocuments, fetchAllowedMachineModels]);
 
-  // Poll for documents with active ingestion status (only when page is visible)
+  // Poll for documents with active ingestion status (only when ingestion is enabled and page is visible)
   useEffect(() => {
+    // When ingestion is disabled, don't poll at all
+    if (!ALLOW_APP_INGESTION) {
+      return;
+    }
+    
     const activeStatuses = ['PENDING_INGESTION', 'CHUNKING', 'READY_FOR_EMBEDDING', 'EMBEDDING', 'DELETING', 'REBUILDING_INDEX'];
     
     // Check if there are any active ingestions
@@ -230,7 +250,7 @@ export default function AdminDocumentsPage() {
       return;
     }
 
-    // Poll every 5 seconds (reduced frequency to be less annoying)
+    // Poll every 5 seconds when ingestion is enabled and there are active ingestions
     const interval = setInterval(() => {
       // Only poll if page is visible
       if (document.hidden) {
@@ -239,7 +259,7 @@ export default function AdminDocumentsPage() {
       
       // Fetch documents - the effect will re-run and check if polling should continue
       fetchDocuments();
-    }, 5000); // Increased to 5 seconds
+    }, 5000);
 
     return () => clearInterval(interval);
   }, [documents, fetchDocuments]);
@@ -683,30 +703,36 @@ export default function AdminDocumentsPage() {
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{doc.page_count}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm">
-                      {doc.ingestion_status || (!ALLOW_APP_INGESTION && doc.chunk_count !== undefined) ? (
-                        <div className="flex flex-col gap-1">
-                          <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
-                            doc.ingestion_status === 'FAILED'
-                              ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400'
-                              : doc.ingestion_status === 'PENDING_INGESTION'
-                              ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
-                              : doc.ingestion_status === 'COMPLETE'
-                              ? 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-400'
-                              : !doc.ingestion_status && !ALLOW_APP_INGESTION
-                              ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
-                              : 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400'
-                          }`}>
-                            {getStatusLabel(doc.ingestion_status, doc.chunk_count)}
-                          </span>
-                          {doc.ingestion_error && (
-                            <span className="text-xs text-red-600 dark:text-red-400 truncate max-w-xs" title={doc.ingestion_error}>
-                              {doc.ingestion_error.substring(0, 40)}...
+                      {(() => {
+                        const statusLabel = getStatusLabel(doc.ingestion_status, doc.chunk_count);
+                        if (!statusLabel) {
+                          return <span className="text-muted-foreground text-xs">—</span>;
+                        }
+                        
+                        // When ingestion is disabled, always use neutral outline style
+                        const badgeClass = !ALLOW_APP_INGESTION
+                          ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
+                          : doc.ingestion_status === 'FAILED'
+                          ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400'
+                          : doc.ingestion_status === 'PENDING_INGESTION'
+                          ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
+                          : doc.ingestion_status === 'COMPLETE'
+                          ? 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-400'
+                          : 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400';
+                        
+                        return (
+                          <div className="flex flex-col gap-1">
+                            <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeClass}`}>
+                              {statusLabel}
                             </span>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">—</span>
-                      )}
+                            {doc.ingestion_error && ALLOW_APP_INGESTION && (
+                              <span className="text-xs text-red-600 dark:text-red-400 truncate max-w-xs" title={doc.ingestion_error}>
+                                {doc.ingestion_error.substring(0, 40)}...
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm">
                       <div className="flex items-center gap-2">

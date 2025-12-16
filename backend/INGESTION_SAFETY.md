@@ -134,3 +134,21 @@ A: Yes! Document upload works for metadata. Only the chunking/embedding step is 
 **Q: How do I manually trigger ingestion?**
 A: Use external scripts or GPU workers that have `ARROW_ALLOW_APP_INGESTION=true` set. These should call the same ingestion functions (`run_chunking`, `run_embedding`) but from a controlled environment.
 
+## Fixing Stuck Ingestion Statuses
+
+If you have documents with stuck "in progress" ingestion statuses (e.g., `REBUILDING_INDEX`, `PENDING_INGESTION`) from previous runs when ingestion was enabled, you can normalize them using the fix script:
+
+```bash
+python backend/scripts/fix_ingestion_status.py
+```
+
+**⚠️ IMPORTANT:** Only run this script when you know the index is already built externally by the GPU ingestion pipeline. This script assumes that all documents with "in progress" statuses are actually complete and managed by the external pipeline.
+
+The script will:
+- Find all documents with in-progress statuses (`REBUILDING_INDEX`, `PENDING_INGESTION`, `CHUNKING`, `EMBEDDING`, etc.)
+- Update them to `COMPLETE` status
+- Clear any error messages
+- Show a summary of changes before committing
+
+This is a one-time maintenance operation to clean up stale status values.
+
