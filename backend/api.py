@@ -4367,12 +4367,18 @@ async def delete_document_by_metadata_id(
             request=http_request,
         )
         
-        return {
-            "status": "success",
-            "message": f"Document {filename} deleted successfully. Index rebuild must be handled via external pipeline if needed.",
-            "metadata_id": metadata_id,
-            "filename": filename,
-        }
+        # Return 204 No Content with optional warning header if ingestion disabled
+        from fastapi.responses import Response
+        
+        # Add warning header if ingestion is disabled (non-blocking)
+        headers = {}
+        if not settings.allow_app_ingestion:
+            headers["X-Index-Warning"] = "Search index may be stale until next rebuild via external pipeline"
+        
+        return Response(
+            status_code=204,
+            headers=headers
+        )
     except Exception as e:
         logger.error(f"Error deleting document {metadata_id}: {e}", exc_info=True)
         raise HTTPException(

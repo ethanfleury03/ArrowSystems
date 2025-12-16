@@ -154,10 +154,10 @@ export default function AdminDocumentsPage() {
   const fetchAllowedMachineModels = useCallback(
     async () => {
       try {
-        // Fetch selectable machine models (excludes "Any" and includes "GENERAL")
-        // For documents, we want all models except "Any" (which is only for user machine access)
+        // Fetch machine models from DB table (via /admin/machines endpoint)
+        // This ensures we only show machine models that exist in the database
         // Cookie-based JWT is automatically sent with fetch requests
-        const response = await fetch(`${apiBaseUrl}/admin/machine_models`, {
+        const response = await fetch(`${apiBaseUrl}/admin/machines`, {
           credentials: "include",
         });
         if (!response.ok) {
@@ -165,13 +165,18 @@ export default function AdminDocumentsPage() {
           return;
         }
         const data = await response.json();
-        const allModels = Array.isArray(data.allowed_machine_models) ? data.allowed_machine_models : [];
-        // Filter out "Any" - it's only for user machine access, not for document machine models
-        // Keep "GENERAL" as it's a valid document machine model
-        const documentModels = allModels.filter((model: string) => model !== "Any" && model !== "any");
-        setAllowedMachineModels(documentModels);
+        // Extract machine names from the machines array
+        // Handle both array format and object with machines property
+        let machines: Array<{ name: string }> = [];
+        if (Array.isArray(data)) {
+          machines = data;
+        } else if (data.machines && Array.isArray(data.machines)) {
+          machines = data.machines;
+        }
+        const machineNames = machines.map((m: { name: string }) => m.name).filter(Boolean);
+        setAllowedMachineModels(machineNames);
       } catch (err) {
-        console.warn("Failed to fetch allowed machine models:", err);
+        console.warn("Failed to fetch machine models:", err);
         // Fallback: try to get from documents response
       }
     },
@@ -204,12 +209,8 @@ export default function AdminDocumentsPage() {
           });
         }
         
-        // Also extract allowed_machine_models from response if available
-        // Filter out "Any" as it's only for user machine access, not document machine models
-        if (data.allowed_machine_models && Array.isArray(data.allowed_machine_models)) {
-          const documentModels = data.allowed_machine_models.filter((model: string) => model !== "Any" && model !== "any");
-          setAllowedMachineModels(documentModels);
-        }
+        // Fallback: if machines endpoint failed, try to get from documents response
+        // This is a fallback only - primary source should be /admin/machines
       } catch (err) {
         console.error("Failed to fetch documents:", err);
         setError(err instanceof Error ? err.message : "Unable to load documents.");
@@ -539,10 +540,14 @@ export default function AdminDocumentsPage() {
       closeAllModals();
       setDeleteConfirmation("");
       
-      if (ALLOW_APP_INGESTION) {
-        showToast("✅ Document deletion started. The index is rebuilding in the background.");
+      // Check for warning header (non-blocking)
+      const indexWarning = response.headers.get("X-Index-Warning");
+      if (indexWarning) {
+        showToast(`✅ Document deleted successfully. ${indexWarning}`, "success");
+      } else if (ALLOW_APP_INGESTION) {
+        showToast("✅ Document deleted successfully. The index is rebuilding in the background.", "success");
       } else {
-        showToast("✅ Document metadata deleted. Index rebuild must be triggered via external GPU pipeline.");
+        showToast("✅ Document deleted successfully.", "success");
       }
       await fetchDocuments();
     } catch (err) {

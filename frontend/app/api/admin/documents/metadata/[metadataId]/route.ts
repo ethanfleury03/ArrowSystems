@@ -26,14 +26,26 @@ export async function DELETE(
     );
 
     if (!response.ok) {
-      const error = await response.json();
+      const error = await response.json().catch(() => ({}));
       return NextResponse.json(
-        { detail: error.detail || 'Failed to delete document' },
+        { detail: (error as any)?.detail || 'Failed to delete document' },
         { status: response.status }
       );
     }
 
-    const data = await response.json();
+    // Handle 204 No Content (no body)
+    if (response.status === 204) {
+      // Pass through warning header if present
+      const headers: Record<string, string> = {};
+      const indexWarning = response.headers.get("X-Index-Warning");
+      if (indexWarning) {
+        headers["X-Index-Warning"] = indexWarning;
+      }
+      return new NextResponse(null, { status: 204, headers });
+    }
+
+    // For other success statuses, return JSON
+    const data = await response.json().catch(() => ({}));
     return NextResponse.json(data);
   } catch (error) {
     console.error('Admin document delete API error:', error);
