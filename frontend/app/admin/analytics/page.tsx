@@ -149,7 +149,7 @@ export default function AdminAnalyticsPage() {
     } finally {
       setIsLoadingAnalytics(false);
     }
-  }, [apiBaseUrl, getDateRange, selectedUserId, selectedMachine]);
+  }, [getDateRange, selectedUserId, selectedMachine]);
 
   // Fetch on mount and when filters change
   useEffect(() => {
