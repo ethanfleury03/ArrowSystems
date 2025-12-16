@@ -34,12 +34,8 @@ class Settings:
         self.is_prod = self.ENV in {"prod", "production", "cloud"}
         
         # Log the effective ENV value for debugging
-        logger.info("env_runtime_value", 
-                   env=self.ENV,
-                   env_var_value=os.getenv("ENV"),
-                   is_prod=self.is_prod,
-                   is_dev=self.is_dev,
-                   message=f"Runtime environment detected: {self.ENV} (is_prod={self.is_prod}, is_dev={self.is_dev})")
+        # Use standard logger format since structlog may not be configured yet
+        logger.info(f"Runtime environment detected: {self.ENV} (is_prod={self.is_prod}, is_dev={self.is_dev}, env_var={os.getenv('ENV')})")
         
         # Secret Configuration - REQUIRED in production
         self._load_secrets()
