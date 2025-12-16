@@ -33,6 +33,10 @@ def download_index_from_gcs() -> bool:
     """
     Downloads all RAG index files from GCS into /app/latest_model.
     
+    NOTE: This function only READS from GCS and writes to local filesystem.
+    It does NOT modify the embedding index or trigger ingestion.
+    This is safe to run in production without allow_app_ingestion flag.
+    
     Downloads from: gs://arrow-rag-support-prod-rag/latest_model/
     Stores to: /app/latest_model/
     

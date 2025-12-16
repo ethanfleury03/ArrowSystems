@@ -34,7 +34,13 @@ def ingest_single_file(
     enable_rewriting: bool = False
 ) -> Dict[str, Any]:
     """
+    INDEX-WRITE PATH: creates/updates embeddings
+    
     Ingest a single file into the existing RAG index.
+    
+    NOTE: This function is intended for use by external GPU ingestion scripts,
+    not from the web app. It does not check allow_app_ingestion flag because
+    it's meant to be called directly from ingestion workers.
     
     Args:
         file_path: Path to the file to ingest (PDF, DOCX, or Markdown)

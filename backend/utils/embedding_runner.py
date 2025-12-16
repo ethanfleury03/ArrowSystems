@@ -32,6 +32,8 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
     """
     Run embedding for a document ingestion metadata record.
     
+    INDEX-WRITE PATH: creates/updates embeddings and writes to vector index
+    
     This function:
     1. Sets status to EMBEDDING
     2. Loads chunks from JSON file
@@ -47,6 +49,21 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
         metadata_id: The ID of the DocumentIngestionMetadata record
         request_id: Optional request ID for tracing
     """
+    # Check if app-based ingestion is allowed
+    from backend.config.env import settings
+    if not settings.allow_app_ingestion:
+        logger.warning(
+            {
+                "event": "ingestion_blocked_from_app",
+                "metadata_id": metadata_id,
+                "request_id": request_id,
+                "function": "run_embedding",
+            }
+        )
+        raise RuntimeError(
+            "Ingestion is disabled in this environment. Embedding must be triggered via external GPU pipeline."
+        )
+    
     session: Optional[Session] = None
     document = None
     try:

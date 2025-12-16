@@ -53,6 +53,34 @@ class Settings:
         
         # Anthropic API Key (optional - for Claude LLM integration)
         self._load_anthropic_key()
+        
+        # Ingestion Safety Flag - prevents automatic ingestion from web app
+        self._load_ingestion_config()
+    
+    def _load_ingestion_config(self) -> None:
+        """
+        Load ingestion configuration flag.
+        
+        IMPORTANT: This flag controls whether the web app/API can trigger
+        document ingestion (chunking, embedding, index writes).
+        
+        Default: False (ingestion disabled from app)
+        Set ARROW_ALLOW_APP_INGESTION=true ONLY in dedicated GPU ingestion environments,
+        NOT in the main production frontend/backend.
+        """
+        allow_ingestion_str = os.getenv("ARROW_ALLOW_APP_INGESTION", "false").lower()
+        self.allow_app_ingestion = allow_ingestion_str in {"true", "1", "yes", "on"}
+        
+        if self.allow_app_ingestion:
+            logger.warning(
+                "ingestion_enabled_from_app",
+                message="⚠️ WARNING: App-based ingestion is ENABLED. This should only be set in dedicated GPU ingestion environments."
+            )
+        else:
+            logger.info(
+                "ingestion_disabled_from_app",
+                message="✅ App-based ingestion is DISABLED (default). Ingestion must be triggered via external GPU pipeline."
+            )
     
     def _load_anthropic_key(self) -> None:
         """Load Anthropic API key - optional, used for Claude LLM integration."""

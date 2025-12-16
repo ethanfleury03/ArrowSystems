@@ -3649,7 +3649,9 @@ async def get_all_documents(request: Request):
                         # Document not in index - log for debugging
                         logger.debug(f"Document {filename} not in index (in_corpus={is_in_corpus}, in_docstore={is_in_docstore}, has_chunks={has_chunks}, chunk_count={chunk_count})")
                 
-                # Use metadata status (now guaranteed to exist if document is in index)
+                # Use metadata status from database (read-only, never infer from chunk_count)
+                # If status is missing, return None rather than inferring from chunk_count
+                # This ensures status is only set by actual ingestion operations, not by index state
                 final_status = ingestion_info.get("ingestion_status") if ingestion_info else None
                 
                 documents.append({
@@ -4262,6 +4264,22 @@ async def delete_document_by_metadata_id(
             return None
     
     filename = await run_sync(_set_deleting_status)
+    
+    # INDEX-WRITE PATH: rebuilds index after deletion
+    # Check if app-based ingestion is allowed
+    if not settings.allow_app_ingestion:
+        logger.warning(
+            {
+                "event": "ingestion_blocked_from_app",
+                "filename": filename,
+                "metadata_id": metadata_id,
+                "path": http_request.url.path if hasattr(http_request, "url") else None,
+            }
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Index rebuild is disabled in this environment. Document deletion will remove metadata only. Index must be rebuilt via external GPU pipeline."
+        )
     
     # Trigger background delete and reindex task
     from backend.utils.delete_runner import run_delete_and_reindex
@@ -4899,6 +4917,23 @@ async def upload_document(
             request=http_request,
         )
         
+        # INDEX-WRITE PATH: creates/updates embeddings
+        # Check if app-based ingestion is allowed
+        if not settings.allow_app_ingestion:
+            logger.warning(
+                {
+                    "event": "ingestion_blocked_from_app",
+                    "filename": file.filename,
+                    "document_id": metadata_result["id"],
+                    "request_id": request_id,
+                    "path": http_request.url.path if hasattr(http_request, "url") else None,
+                }
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Ingestion is disabled in this environment. Documents can be uploaded for metadata, but ingestion must be triggered via external GPU pipeline."
+            )
+        
         # Log ingestion enqueued
         logger.info(
             {
@@ -4966,7 +5001,26 @@ async def upload_document(
 
 @app.post("/admin/chunks/{chunk_id}/regenerate-summary")
 async def regenerate_chunk_summary(http_request: Request, chunk_id: str):
-    """Regenerate summary for a specific chunk."""
+    """
+    Regenerate summary for a specific chunk.
+    
+    NOTE: This endpoint does not write to the embedding index, only updates summaries in memory.
+    However, we gate it behind allow_app_ingestion for consistency.
+    """
+    # Check if app-based ingestion is allowed (for consistency, even though this doesn't write embeddings)
+    if not settings.allow_app_ingestion:
+        logger.warning(
+            {
+                "event": "ingestion_blocked_from_app",
+                "chunk_id": chunk_id,
+                "path": http_request.url.path if hasattr(http_request, "url") else None,
+            }
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Summary regeneration is disabled in this environment."
+        )
+    
     global rag_pipeline, query_summarizer
     
     if not query_summarizer:
