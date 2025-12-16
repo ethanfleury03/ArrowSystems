@@ -311,18 +311,27 @@ export function DocumentsTab() {
       });
       
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'Failed to delete document');
+        const error = await response.json().catch(() => ({}));
+        throw new Error((error as any)?.detail || 'Failed to delete document');
       }
       
-      toast({
-        title: 'Deletion started',
-        description: 'Document deletion started. The index is rebuilding in the background.',
-      });
+      // Check for warning header (non-blocking)
+      const indexWarning = response.headers.get("X-Index-Warning");
+      if (indexWarning) {
+        toast({
+          title: 'Document deleted',
+          description: `Document deleted successfully. ${indexWarning}`,
+        });
+      } else {
+        toast({
+          title: 'Document deleted',
+          description: 'Document deleted successfully.',
+        });
+      }
       
       setDeleteDialogOpen(false);
       setSelectedDoc(null);
-      // Refresh to show DELETING status
+      // Refresh documents list
       fetchDocuments();
     } catch (error: any) {
       toast({
