@@ -28,7 +28,7 @@ from backend.utils.test_mode import get_chunks_dir, get_index_dir
 logger = get_logger(__name__)
 
 
-def run_embedding(metadata_id: str) -> None:
+def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
     """
     Run embedding for a document ingestion metadata record.
     
@@ -45,8 +45,10 @@ def run_embedding(metadata_id: str) -> None:
     
     Args:
         metadata_id: The ID of the DocumentIngestionMetadata record
+        request_id: Optional request ID for tracing
     """
     session: Optional[Session] = None
+    document = None
     try:
         # Load metadata record
         session = SessionLocal()
@@ -55,13 +57,20 @@ def run_embedding(metadata_id: str) -> None:
         ).first()
         
         if not metadata:
-            logger.error(f"embedding_metadata_not_found", metadata_id=metadata_id)
+            logger.error(
+                {
+                    "event": "embedding_metadata_not_found",
+                    "metadata_id": metadata_id,
+                    "request_id": request_id,
+                }
+            )
             return
+        
+        document = metadata  # Store for error handling
         
         # Update status to EMBEDDING
         metadata.status = "EMBEDDING"
         session.commit()
-        logger.info(f"embedding_started", metadata_id=metadata_id, filename=metadata.filename)
         
         # Load chunks from JSON file
         chunks_file = Path(get_chunks_dir()) / f"{metadata_id}.json"
@@ -75,7 +84,16 @@ def run_embedding(metadata_id: str) -> None:
         if not chunks:
             raise ValueError("No chunks found in chunks file")
         
-        logger.info(f"embedding_chunks_loaded", metadata_id=metadata_id, chunk_count=len(chunks))
+        # Update the embedding_started log with chunk count
+        logger.info(
+            {
+                "event": "document_embedding_started",
+                "document_id": metadata_id,
+                "filename": metadata.filename,
+                "num_chunks": len(chunks),
+                "request_id": request_id,
+            }
+        )
         
         # Initialize summarizer (same as used in ingestion pipeline)
         query_summarizer = QuerySummarizer(
@@ -192,56 +210,114 @@ def run_embedding(metadata_id: str) -> None:
             logger.info(f"embedding_index_created_new", metadata_id=metadata_id, storage_dir=storage_dir)
         
         # Insert nodes into index (embeddings generated automatically)
-        logger.info(f"embedding_inserting_nodes", metadata_id=metadata_id, node_count=len(nodes))
         batch_size = 50
         successful_inserts = 0
         failed_inserts = 0
         
         for i in range(0, len(nodes), batch_size):
             batch = nodes[i:i + batch_size]
+            batch_index = i // batch_size
             try:
                 index.insert_nodes(batch)
                 successful_inserts += len(batch)
+                # Log batch progress at DEBUG level
+                logger.debug(
+                    {
+                        "event": "document_embedding_batch",
+                        "document_id": metadata_id,
+                        "batch_index": batch_index,
+                        "batch_size": len(batch),
+                        "request_id": request_id,
+                    }
+                )
             except Exception as e:
-                logger.warning(f"embedding_batch_insert_failed", metadata_id=metadata_id, batch_start=i, error=str(e))
+                logger.warning(
+                    {
+                        "event": "embedding_batch_insert_failed",
+                        "metadata_id": metadata_id,
+                        "batch_start": i,
+                        "error": str(e),
+                        "request_id": request_id,
+                    }
+                )
                 # Try inserting nodes one by one
                 for node in batch:
                     try:
                         index.insert_nodes([node])
                         successful_inserts += 1
                     except Exception as node_error:
-                        logger.warning(f"embedding_node_insert_failed", metadata_id=metadata_id, node_idx=i, error=str(node_error))
+                        logger.warning(
+                            {
+                                "event": "embedding_node_insert_failed",
+                                "metadata_id": metadata_id,
+                                "node_idx": i,
+                                "error": str(node_error),
+                                "request_id": request_id,
+                            }
+                        )
                         failed_inserts += 1
         
         if successful_inserts == 0:
             raise ValueError("All node insertions failed")
         
+        # Log embedding completed
         logger.info(
-            f"embedding_insertion_complete",
-            metadata_id=metadata_id,
-            successful=successful_inserts,
-            failed=failed_inserts,
-            total=len(nodes)
+            {
+                "event": "document_embedding_completed",
+                "document_id": metadata_id,
+                "filename": metadata.filename,
+                "num_chunks": len(nodes),
+                "successful_inserts": successful_inserts,
+                "failed_inserts": failed_inserts,
+                "request_id": request_id,
+            }
         )
         
         # Persist the index
-        logger.info(f"embedding_persisting_index", metadata_id=metadata_id, storage_dir=storage_dir)
+        logger.info(
+            {
+                "event": "embedding_persisting_index",
+                "metadata_id": metadata_id,
+                "storage_dir": storage_dir,
+                "request_id": request_id,
+            }
+        )
         index.storage_context.persist(persist_dir=storage_dir)
-        logger.info(f"embedding_index_persisted", metadata_id=metadata_id, storage_dir=storage_dir)
+        logger.info(
+            {
+                "event": "embedding_index_persisted",
+                "metadata_id": metadata_id,
+                "storage_dir": storage_dir,
+                "request_id": request_id,
+            }
+        )
         
         # Update status to COMPLETE
         metadata.status = "COMPLETE"
         session.commit()
+        
+        # Log ingestion completed
         logger.info(
-            f"embedding_success",
-            metadata_id=metadata_id,
-            filename=metadata.filename,
-            nodes_inserted=successful_inserts
+            {
+                "event": "document_ingestion_completed",
+                "document_id": metadata_id,
+                "filename": metadata.filename,
+                "final_status": metadata.status,
+                "request_id": request_id,
+            }
         )
         
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"embedding_failed", metadata_id=metadata_id, error=error_msg, exc_info=True)
+        logger.exception(
+            {
+                "event": "document_ingestion_failed",
+                "document_id": metadata_id,
+                "filename": getattr(document, "filename", None) if document else None,
+                "request_id": request_id,
+                "error": error_msg,
+            }
+        )
         
         # Update status to FAILED
         if session:
@@ -254,7 +330,14 @@ def run_embedding(metadata_id: str) -> None:
                     metadata.error_message = error_msg
                     session.commit()
             except Exception as commit_error:
-                logger.error(f"embedding_failed_to_update_status", metadata_id=metadata_id, error=str(commit_error))
+                logger.error(
+                    {
+                        "event": "embedding_failed_to_update_status",
+                        "metadata_id": metadata_id,
+                        "error": str(commit_error),
+                        "request_id": request_id,
+                    }
+                )
     finally:
         if session:
             session.close()

@@ -27,7 +27,7 @@ from backend.utils.test_mode import get_chunks_dir
 logger = get_logger(__name__)
 
 
-def run_chunking(metadata_id: str) -> Optional[str]:
+def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional[str]:
     """
     Run chunking for a document ingestion metadata record.
     
@@ -42,11 +42,13 @@ def run_chunking(metadata_id: str) -> Optional[str]:
     
     Args:
         metadata_id: The ID of the DocumentIngestionMetadata record
+        request_id: Optional request ID for tracing
     
     Returns:
         metadata_id if successful, None on failure
     """
     session: Optional[Session] = None
+    document = None
     try:
         # Load metadata record
         session = SessionLocal()
@@ -55,8 +57,26 @@ def run_chunking(metadata_id: str) -> Optional[str]:
         ).first()
         
         if not metadata:
-            logger.error(f"chunking_metadata_not_found", metadata_id=metadata_id)
+            logger.error(
+                {
+                    "event": "chunking_metadata_not_found",
+                    "metadata_id": metadata_id,
+                    "request_id": request_id,
+                }
+            )
             return None
+        
+        document = metadata  # Store for error handling
+        
+        # Log ingestion started
+        logger.info(
+            {
+                "event": "document_ingestion_started",
+                "document_id": metadata_id,
+                "filename": metadata.filename,
+                "request_id": request_id,
+            }
+        )
         
         # Update status to CHUNKING
         metadata.status = "CHUNKING"
@@ -69,6 +89,20 @@ def run_chunking(metadata_id: str) -> Optional[str]:
         
         file_path = Path(metadata.file_path)
         file_ext = file_path.suffix.lower()
+        
+        # Get file size for logging
+        file_size = os.path.getsize(metadata.file_path) if os.path.exists(metadata.file_path) else 0
+        
+        # Log file loaded
+        logger.debug(
+            {
+                "event": "document_file_loaded",
+                "document_id": metadata_id,
+                "filename": metadata.filename,
+                "file_size_bytes": file_size,
+                "request_id": request_id,
+            }
+        )
         
         # Load document using existing DocumentLoader
         loader = DocumentLoader(str(file_path.parent))
@@ -153,7 +187,16 @@ def run_chunking(metadata_id: str) -> Optional[str]:
                 node.metadata['ingestion_metadata_id'] = metadata_id
                 filtered_nodes.append(node)
         
-        logger.info(f"chunking_complete", metadata_id=metadata_id, chunk_count=len(filtered_nodes))
+        # Log chunking completed
+        logger.info(
+            {
+                "event": "document_chunking_completed",
+                "document_id": metadata_id,
+                "filename": metadata.filename,
+                "num_chunks": len(filtered_nodes),
+                "request_id": request_id,
+            }
+        )
         
         # Check if we have any chunks - if not, fail the ingestion
         if len(filtered_nodes) == 0:
@@ -204,7 +247,15 @@ def run_chunking(metadata_id: str) -> Optional[str]:
         
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"chunking_failed", metadata_id=metadata_id, error=error_msg, exc_info=True)
+        logger.exception(
+            {
+                "event": "document_ingestion_failed",
+                "document_id": metadata_id,
+                "filename": getattr(document, "filename", None) if document else None,
+                "request_id": request_id,
+                "error": error_msg,
+            }
+        )
         
         # Update status to FAILED
         if session:
@@ -217,7 +268,14 @@ def run_chunking(metadata_id: str) -> Optional[str]:
                     metadata.error_message = error_msg
                     session.commit()
             except Exception as commit_error:
-                logger.error(f"chunking_failed_to_update_status", metadata_id=metadata_id, error=str(commit_error))
+                logger.error(
+                    {
+                        "event": "chunking_failed_to_update_status",
+                        "metadata_id": metadata_id,
+                        "error": str(commit_error),
+                        "request_id": request_id,
+                    }
+                )
         return None
     finally:
         if session:
