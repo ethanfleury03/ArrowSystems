@@ -67,12 +67,14 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 # Copy sharp for image optimization in standalone mode
 # Sharp needs its native bindings which aren't included in standalone by default
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/sharp ./node_modules/sharp
+# Copy @img packages (optional dependencies for sharp native binaries)
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@img ./node_modules/@img
 
 USER nextjs
 
-# Cloud Run sets PORT automatically (typically 8080)
+# Cloud Run sets PORT automatically (typically 3000)
 # EXPOSE is informational - actual port comes from $PORT env var
-EXPOSE 8080
+EXPOSE 3000
 
 # Use node directly to run the standalone server (faster than npm start)
 # The standalone server.js respects PORT env var automatically
