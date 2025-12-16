@@ -4369,6 +4369,7 @@ async def delete_document_by_metadata_id(
         
         # Return 204 No Content with optional warning header if ingestion disabled
         from fastapi.responses import Response
+        from backend.config.env import settings
         
         # Add warning header if ingestion is disabled (non-blocking)
         headers = {}
