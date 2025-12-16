@@ -52,7 +52,7 @@ export function ChatInterface() {
   const [selectedMachine, setSelectedMachine] = useState<string | null>(null)
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null)
   const [ragEnabled, setRagEnabled] = useState<boolean | null>(null) // null = checking, true/false = known
-  const [ragStatus, setRagStatus] = useState<'unknown' | 'ready' | 'warming' | 'disabled'>('unknown')
+  const [ragStatus, setRagStatus] = useState<'initializing' | 'ready' | 'error'>('initializing')
   const [ragLastError, setRagLastError] = useState<string | null>(null)
   const [checkingRag, setCheckingRag] = useState<boolean>(true)
   const [conversationId, setConversationId] = useState<string | null>(null) // Track current conversation
@@ -86,55 +86,8 @@ export function ChatInterface() {
         const user = await getCurrentUser()
         setUserInfo(user)
         
-        // Check RAG status - use Next.js API route to avoid CORS preflight issues
-        const checkRagStatus = async () => {
-          try {
-            // Call Next.js API route instead of backend directly
-            // This avoids CORS preflight (OPTIONS) requests that fail with Cloud Run IAM auth
-            const ragResponse = await fetch('/api/rag/status', {
-              credentials: "include"
-            })
-            if (ragResponse.ok) {
-              const ragData = await ragResponse.json()
-              // Prefer rag_pipeline_initialized if present, fallback to initialized
-              const initialized =
-                ragData.rag_pipeline_initialized === true ||
-                ragData.initialized === true
-              const initializing = ragData.initializing === true
-              const status = ragData.status || (initialized ? 'ready' : (initializing ? 'warming' : 'disabled'))
-              
-              setRagEnabled(initialized)
-              setRagStatus(status as 'ready' | 'warming' | 'disabled')
-              setRagLastError(ragData.last_error || null)
-              setCheckingRag(false)
-              
-              // If warming, start polling
-              if (status === 'warming' && !ragPollingIntervalRef.current) {
-                startRagPolling()
-              } else if (status === 'ready' && ragPollingIntervalRef.current) {
-                // Stop polling when ready
-                stopRagPolling()
-              }
-            } else if (ragResponse.status === 401 || ragResponse.status === 403) {
-              // Authentication error - log but don't disable RAG (might be a temporary issue)
-              console.warn("RAG status check returned auth error:", ragResponse.status)
-              // Don't disable RAG on auth errors - backend might still be working
-              setCheckingRag(false)
-            } else {
-              // Other errors - backend might be down or RAG truly disabled
-              console.error("RAG status check failed:", ragResponse.status)
-              setRagEnabled(false)
-              setRagStatus('disabled')
-              setCheckingRag(false)
-            }
-          } catch (error) {
-            console.error("Failed to fetch RAG status:", error)
-            // On network errors, don't assume RAG is disabled - might be temporary
-            setCheckingRag(false)
-          }
-        }
-        
-        checkRagStatus()
+        // Start RAG status polling (non-blocking, happens in background)
+        startRagPolling()
         
         // Only show onboarding for customers and if not already shown and no messages
         if (user.role?.toUpperCase() === "CUSTOMER" && !onboardingShownRef.current && messages.length === 0) {
@@ -182,35 +135,51 @@ export function ChatInterface() {
   const startRagPolling = () => {
     if (ragPollingIntervalRef.current) return // Already polling
     
-    ragPollingIntervalRef.current = setInterval(async () => {
-      try {
-        // Call Next.js API route instead of backend directly
-        // This avoids CORS preflight (OPTIONS) requests that fail with Cloud Run IAM auth
-        const ragResponse = await fetch('/api/rag/status', {
-          credentials: "include"
-        })
-        if (ragResponse.ok) {
-          const ragData = await ragResponse.json()
-          // Prefer rag_pipeline_initialized if present, fallback to initialized
-          const initialized =
-            ragData.rag_pipeline_initialized === true ||
-            ragData.initialized === true
-          const initializing = ragData.initializing === true
-          const status = ragData.status || (initialized ? 'ready' : (initializing ? 'warming' : 'disabled'))
-          
-          setRagEnabled(initialized)
-          setRagStatus(status as 'ready' | 'warming' | 'disabled')
-          setRagLastError(ragData.last_error || null)
-          
-          // Stop polling when ready or disabled
-          if (status === 'ready' || status === 'disabled') {
-            stopRagPolling()
+    // Initial check
+    checkRagStatus()
+    
+    // Poll every 15 seconds
+    ragPollingIntervalRef.current = setInterval(() => {
+      checkRagStatus()
+    }, 15000)
+  }
+  
+  const checkRagStatus = async () => {
+    try {
+      const ragResponse = await fetch('/api/rag/status', {
+        credentials: "include"
+      })
+      if (ragResponse.ok) {
+        const ragData = await ragResponse.json()
+        // Use new status format: "initializing" | "ready" | "error"
+        const status = ragData.status || (ragData.initialized ? 'ready' : 'initializing')
+        const initialized = status === 'ready'
+        
+        setRagEnabled(initialized)
+        setRagStatus(status as 'initializing' | 'ready' | 'error')
+        setRagLastError(ragData.last_error || null)
+        setCheckingRag(false)
+        
+        console.log(`[RAG STATUS] Status changed to: ${status}`, ragData)
+        
+        // Stop polling when ready or error (but keep checking periodically for errors)
+        if (status === 'ready') {
+          // Continue polling but less frequently to catch errors
+          if (ragPollingIntervalRef.current) {
+            clearInterval(ragPollingIntervalRef.current)
+            ragPollingIntervalRef.current = setInterval(() => {
+              checkRagStatus()
+            }, 30000) // Poll every 30 seconds when ready
           }
         }
-      } catch (error) {
-        console.error("Failed to poll RAG status:", error)
+      } else {
+        console.warn("RAG status check returned non-OK:", ragResponse.status)
+        setCheckingRag(false)
       }
-    }, 5000) // Poll every 5 seconds
+    } catch (error) {
+      console.error("Failed to poll RAG status:", error)
+      setCheckingRag(false)
+    }
   }
   
   const stopRagPolling = () => {
@@ -235,17 +204,17 @@ export function ChatInterface() {
     e.preventDefault()
     if (!input.trim() || isLoading) return
     
-    // Don't allow queries if RAG is not ready
+    // Block queries if RAG is not ready
     if (ragStatus !== 'ready') {
-      let message = "Document search is currently unavailable. Please contact your administrator."
-      if (ragStatus === 'warming') {
-        message = "Document search is currently warming up. Please wait a moment and try again."
-        // Start polling if not already polling
-        if (!ragPollingIntervalRef.current) {
-          startRagPolling()
-        }
-      } else if (ragStatus === 'disabled' && ragLastError) {
-        message = `Document search is unavailable: ${ragLastError}. Please contact your administrator.`
+      let message = "Assistant is still loading the knowledge base. Please try again in a moment."
+      if (ragStatus === 'initializing') {
+        message = "Assistant is still loading the knowledge base. Please try again in a moment."
+        console.log("[RAG] Query blocked - RAG is initializing")
+      } else if (ragStatus === 'error') {
+        message = ragLastError 
+          ? `Assistant failed to start: ${ragLastError}. Please contact support.`
+          : "Assistant failed to start. Please contact support."
+        console.error("[RAG] Query blocked - RAG error:", ragLastError)
       }
       
       const errorMessage: Message = {
@@ -592,6 +561,17 @@ export function ChatInterface() {
               <h1 className="text-lg font-semibold">Arrow Systems Support</h1>
             </div>
             <div className="flex items-center gap-2">
+              {/* RAG Status Indicator */}
+              {ragStatus === 'initializing' && (
+                <span className="text-xs text-muted-foreground hidden sm:inline">
+                  Assistant starting up...
+                </span>
+              )}
+              {ragStatus === 'error' && (
+                <span className="text-xs text-destructive hidden sm:inline">
+                  Assistant unavailable
+                </span>
+              )}
               {userInfo && (
                 <span className="text-sm text-muted-foreground hidden sm:inline">
                   {userInfo.email}
@@ -605,22 +585,22 @@ export function ChatInterface() {
         </header>
 
         {/* RAG Status Banner */}
-        {ragStatus === 'warming' && (
+        {ragStatus === 'initializing' && (
           <div className="bg-yellow-500/10 border-b border-yellow-500/20 px-4 py-3">
             <div className="mx-auto max-w-4xl flex items-center gap-2 text-sm text-yellow-700 dark:text-yellow-400">
               <AlertCircle className="h-4 w-4 flex-shrink-0 animate-pulse" />
-              <span>Preparing document search. This may take ~20–40 seconds on first use.</span>
+              <span>Assistant starting up, answers may be delayed.</span>
             </div>
           </div>
         )}
-        {ragStatus === 'disabled' && (
+        {ragStatus === 'error' && (
           <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-3">
             <div className="mx-auto max-w-4xl flex items-center gap-2 text-sm text-destructive">
               <AlertCircle className="h-4 w-4 flex-shrink-0" />
               <span>
                 {ragLastError 
-                  ? `Document search is unavailable: ${ragLastError}. Please contact your administrator.`
-                  : 'Document search is currently unavailable because the RAG index is not loaded. Please contact your administrator.'}
+                  ? `Assistant failed to start: ${ragLastError}. Please contact support.`
+                  : 'Assistant failed to start. Please contact support.'}
               </span>
             </div>
           </div>

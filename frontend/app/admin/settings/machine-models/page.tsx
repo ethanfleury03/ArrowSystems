@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, Loader2 } from "lucide-react";
+import { Trash2, Loader2, Edit2 } from "lucide-react";
 
 interface MachineModel {
   id: number;
   name: string;
+  machine_kind: string;
   document_count: number;
   created_at: string;
 }
@@ -55,9 +56,15 @@ export default function MachineModelsPage() {
   const [unmatchedDocuments, setUnmatchedDocuments] = useState<number>(0);
   const [unmatchedMachineModels, setUnmatchedMachineModels] = useState<string[]>([]);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingMachine, setEditingMachine] = useState<MachineModel | null>(null);
   const [newMachineName, setNewMachineName] = useState("");
+  const [newMachineKind, setNewMachineKind] = useState("Print Engine");
+  const [editingMachineKind, setEditingMachineKind] = useState("Print Engine");
   const [submitting, setSubmitting] = useState(false);
   const { toast } = useToast();
+
+  const MACHINE_KINDS = ["Print Engine", "Blade Cutter", "Laser Cutter"] as const;
 
   const fetchMachines = useCallback(async () => {
     setLoading(true);
@@ -148,6 +155,15 @@ export default function MachineModelsPage() {
       return;
     }
 
+    if (!newMachineKind) {
+      toast({
+        title: "Validation Error",
+        description: "Machine kind is required",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setSubmitting(true);
 
     try {
@@ -158,7 +174,10 @@ export default function MachineModelsPage() {
           "Content-Type": "application/json",
         },
         credentials: "include",
-        body: JSON.stringify({ name: newMachineName.trim() }),
+        body: JSON.stringify({ 
+          name: newMachineName.trim(),
+          machine_kind: newMachineKind,
+        }),
       });
 
       if (!response.ok) {
@@ -173,9 +192,67 @@ export default function MachineModelsPage() {
 
       setIsAddModalOpen(false);
       setNewMachineName("");
+      setNewMachineKind("Print Engine");
       fetchMachines();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Failed to create machine model";
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleEditMachine = (machine: MachineModel) => {
+    setEditingMachine(machine);
+    setEditingMachineKind(machine.machine_kind || "Print Engine");
+    setIsEditModalOpen(true);
+  };
+
+  const handleUpdateMachine = async () => {
+    if (!editingMachine) return;
+
+    if (!editingMachineKind) {
+      toast({
+        title: "Validation Error",
+        description: "Machine kind is required",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSubmitting(true);
+
+    try {
+      const response = await fetch(`/api/admin/machines/${editingMachine.id}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({ 
+          machine_kind: editingMachineKind,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "Failed to update machine model");
+      }
+
+      toast({
+        title: "Success",
+        description: "Machine model updated successfully",
+      });
+
+      setIsEditModalOpen(false);
+      setEditingMachine(null);
+      fetchMachines();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to update machine model";
       toast({
         title: "Error",
         description: errorMessage,
@@ -268,6 +345,9 @@ export default function MachineModelsPage() {
                     Machine Name
                   </th>
                   <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
+                    Machine Kind
+                  </th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
                     Documents
                   </th>
                   <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
@@ -282,6 +362,11 @@ export default function MachineModelsPage() {
                 {Array.isArray(machines) && machines.map((machine) => (
                   <tr key={machine.id} className="border-b border-border last:border-b-0">
                     <td className="px-4 py-3 text-sm font-medium">{machine.name}</td>
+                    <td className="px-4 py-3 text-sm">
+                      <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-primary/10 text-primary">
+                        {machine.machine_kind || "Print Engine"}
+                      </span>
+                    </td>
                     <td className="px-4 py-3 text-sm text-muted-foreground">
                       {machine.document_count}
                     </td>
@@ -289,15 +374,26 @@ export default function MachineModelsPage() {
                       {formatDate(machine.created_at)}
                     </td>
                     <td className="px-4 py-3 text-sm">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled
-                        className="text-muted-foreground"
-                        title="Deletion will be available in a future update."
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleEditMachine(machine)}
+                          className="text-muted-foreground hover:text-foreground"
+                          title="Edit machine model"
+                        >
+                          <Edit2 className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled
+                          className="text-muted-foreground"
+                          title="Deletion will be available in a future update."
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -312,7 +408,9 @@ export default function MachineModelsPage() {
         <Modal title="Create New Machine Model" onClose={() => setIsAddModalOpen(false)}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-2">Machine Name</label>
+              <label className="block text-sm font-medium mb-2">
+                Machine Name <span className="text-red-500">*</span>
+              </label>
               <input
                 type="text"
                 value={newMachineName}
@@ -327,13 +425,85 @@ export default function MachineModelsPage() {
                 autoFocus
               />
             </div>
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Machine Kind <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={newMachineKind}
+                onChange={(e) => setNewMachineKind(e.target.value)}
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                disabled={submitting}
+              >
+                {MACHINE_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {kind}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
           <div className="mt-6 flex justify-end gap-3">
             <Button variant="outline" onClick={() => setIsAddModalOpen(false)} disabled={submitting}>
               Cancel
             </Button>
-            <Button onClick={handleAddMachine} disabled={submitting || !newMachineName.trim()}>
+            <Button onClick={handleAddMachine} disabled={submitting || !newMachineName.trim() || !newMachineKind}>
               {submitting ? "Adding..." : "Add"}
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Edit Machine Modal */}
+      {isEditModalOpen && editingMachine && (
+        <Modal title="Edit Machine Model" onClose={() => {
+          setIsEditModalOpen(false);
+          setEditingMachine(null);
+        }}>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">Machine Name</label>
+              <input
+                type="text"
+                value={editingMachine.name}
+                disabled
+                className="w-full rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                Machine name cannot be changed
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Machine Kind <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={editingMachineKind}
+                onChange={(e) => setEditingMachineKind(e.target.value)}
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                disabled={submitting}
+              >
+                {MACHINE_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {kind}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="mt-6 flex justify-end gap-3">
+            <Button 
+              variant="outline" 
+              onClick={() => {
+                setIsEditModalOpen(false);
+                setEditingMachine(null);
+              }} 
+              disabled={submitting}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleUpdateMachine} disabled={submitting || !editingMachineKind}>
+              {submitting ? "Saving..." : "Save"}
             </Button>
           </div>
         </Modal>

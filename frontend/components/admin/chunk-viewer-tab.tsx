@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
+import { ALLOW_APP_INGESTION } from '@/config/api';
 import {
   Table,
   TableBody,
@@ -178,15 +179,17 @@ export function ChunkViewerTab() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleRegenerateSummary(chunk.chunk_id)}
-                          disabled={regenerating === chunk.chunk_id}
-                          title="Regenerate Summary"
-                        >
-                          <RefreshCw className={`h-4 w-4 ${regenerating === chunk.chunk_id ? 'animate-spin' : ''}`} />
-                        </Button>
+                        {ALLOW_APP_INGESTION && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleRegenerateSummary(chunk.chunk_id)}
+                            disabled={regenerating === chunk.chunk_id}
+                            title="Regenerate Summary"
+                          >
+                            <RefreshCw className={`h-4 w-4 ${regenerating === chunk.chunk_id ? 'animate-spin' : ''}`} />
+                          </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="icon"

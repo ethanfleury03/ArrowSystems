@@ -137,6 +137,12 @@ async def run_blocking_rag_operation(func, *args, **kwargs):
 rag_pipeline = None
 db_manager = None
 query_summarizer = None  # Query summarization utility
+
+# Global RAG state for non-blocking initialization
+rag_state = {
+    "status": "initializing",  # "initializing" | "ready" | "error"
+    "last_error": None,
+}
 feedback_manager = None  # Local JSON feedback store
 saved_response_manager = None  # Local saved response store
 
@@ -417,6 +423,75 @@ app.add_middleware(LoggingMiddleware)
 app.include_router(create_admin_router(get_db_manager_instance))
 
 
+async def start_rag_init_if_needed():
+    """
+    Start RAG initialization in background if not already started.
+    This function is non-blocking and safe to call from any endpoint.
+    """
+    global rag_pipeline, rag_state, app, db_manager
+    
+    # If already initializing or ready, return immediately
+    if rag_state["status"] in ("initializing", "ready"):
+        return
+    
+    # Set status to initializing
+    rag_state["status"] = "initializing"
+    rag_state["last_error"] = None
+    
+    # Get storage path
+    storage_path = getattr(app.state, "rag_storage_path", None) or "/app/latest_model"
+    
+    # Start background task
+    async def _init_rag_background():
+        """Background task to initialize RAG pipeline."""
+        global rag_pipeline, rag_state, db_manager
+        
+        try:
+            logger.info("rag_background_init_starting", storage_path=storage_path)
+            print(f"[RAG] Starting background initialization from {storage_path}", flush=True)
+            
+            # Ensure pipeline instance exists
+            if rag_pipeline is None:
+                cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+                rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
+            
+            # Initialize (this is the heavy blocking operation)
+            initialized = rag_pipeline.initialize(storage_path)
+            
+            if initialized:
+                rag_state["status"] = "ready"
+                rag_state["last_error"] = None
+                app.state.rag_enabled = True
+                logger.info("rag_background_init_success", storage_path=storage_path)
+                print(f"[RAG] ✅ Background initialization completed successfully", flush=True)
+            else:
+                # Check if it's still initializing (another thread might be doing it)
+                if rag_pipeline.is_initializing():
+                    # Keep status as "initializing" - will be updated when it finishes
+                    logger.info("rag_background_init_in_progress", storage_path=storage_path)
+                    print(f"[RAG] ⏳ Initialization in progress (another thread)", flush=True)
+                else:
+                    # Failed
+                    debug_status = rag_pipeline.debug_status()
+                    error_msg = debug_status.get("last_error", "Unknown error")
+                    rag_state["status"] = "error"
+                    rag_state["last_error"] = error_msg
+                    app.state.rag_enabled = False
+                    logger.error("rag_background_init_failed", storage_path=storage_path, error=error_msg)
+                    print(f"[RAG] ❌ Background initialization failed: {error_msg}", flush=True)
+                    
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            rag_state["status"] = "error"
+            rag_state["last_error"] = error_msg
+            app.state.rag_enabled = False
+            logger.error("rag_background_init_exception", error=error_msg, exc_info=True)
+            print(f"[RAG] ❌ Background initialization exception: {error_msg}", flush=True)
+    
+    # Spawn background task (non-blocking)
+    asyncio.create_task(_init_rag_background())
+
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -424,7 +499,7 @@ async def startup_event():
     Handles application initialization including GCS index download and RAG pipeline initialization.
     Wrapped in try/except to prevent unhandled exceptions from killing the worker.
     """
-    global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager
+    global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager, rag_state
     
     print("[DEBUG] FastAPI startup_event running", flush=True)
     
@@ -603,13 +678,13 @@ async def startup_event():
             # Store storage path in app state
             app.state.rag_storage_path = storage_path
             
-            # Now attempt to initialize the RAG pipeline from the local path
+            # Initialize RAG state
+            rag_state["status"] = "initializing"
+            rag_state["last_error"] = None
+            
+            # Verify required index files exist before attempting initialization
             if storage_path:
-                print("[RAG] Initializing RAG pipeline from local index...", flush=True)
-                print(f"[RAG] Storage path: {storage_path}", flush=True)
-                print(f"[RAG] Checking if index files exist...", flush=True)
-                
-                # Verify required index files exist before attempting initialization
+                print("[RAG] Checking if index files exist...", flush=True)
                 required_files = ["docstore.json", "index_store.json", "default__vector_store.json"]
                 index_files_exist = all(
                     os.path.exists(os.path.join(storage_path, filename))
@@ -623,69 +698,13 @@ async def startup_event():
                                 storage_path=storage_path,
                                 missing_files=missing,
                                 message="Required index files missing after GCS download")
+                    rag_state["status"] = "error"
+                    rag_state["last_error"] = f"Missing required files: {missing}"
                     app.state.rag_enabled = False
                 else:
-                    print(f"[RAG] ✅ All required files present, initializing pipeline...", flush=True)
-                    try:
-                        initialized = rag_pipeline.ensure_initialized(storage_path)
-                        
-                        if not initialized:
-                            # Wait while initialization is in progress, with timeout
-                            # Use asyncio.sleep() to avoid blocking the event loop
-                            import asyncio
-                            
-                            max_wait = 30  # seconds
-                            wait_interval = 1
-                            waited = 0
-                            
-                            while waited < max_wait and rag_pipeline.is_initializing():
-                                print(f"[RAG] ⏳ Pipeline initializing, waiting... ({waited}s)", flush=True)
-                                await asyncio.sleep(wait_interval)
-                                waited += wait_interval
-                                if rag_pipeline.is_initialized():
-                                    initialized = True
-                                    break
-                            
-                            # Final check
-                            if not initialized:
-                                debug_status = rag_pipeline.debug_status()
-                                error_msg = debug_status.get("last_error", "Unknown error")
-                                print(f"[RAG] ❌ Pipeline initialization failed after wait: {error_msg}", flush=True)
-                                logger.error(
-                                    "rag_pipeline_init_failed_after_wait",
-                                    storage_path=storage_path,
-                                    last_error=error_msg,
-                                    debug_status=debug_status,
-                                    message="RAG pipeline initialization failed after waiting",
-                                )
-                                app.state.rag_enabled = False
-                        
-                        # If we reached here and initialized is True:
-                        if initialized:
-                            print("[RAG] ✅ RAG pipeline initialized successfully", flush=True)
-                            logger.info(
-                                "rag_pipeline_initialized",
-                                storage_path=storage_path,
-                                message="RAG pipeline initialized successfully during startup",
-                            )
-                            app.state.rag_enabled = True
-                        else:
-                            # Should not reach here if we handled it above, but safety check
-                            app.state.rag_enabled = False
-                            
-                    except Exception as e:
-                        print(f"[RAG] ❌ RAG pipeline init exception: {type(e).__name__}: {e}", flush=True)
-                        import traceback
-                        traceback.print_exc()
-                        logger.error(
-                            "rag_pipeline_init_exception",
-                            storage_path=storage_path,
-                            error=str(e),
-                            error_type=type(e).__name__,
-                            exc_info=True,
-                            message="Exception during RAG pipeline initialization",
-                        )
-                        app.state.rag_enabled = False
+                    print(f"[RAG] ✅ All required files present, starting background initialization...", flush=True)
+                    # Trigger background initialization (non-blocking)
+                    await start_rag_init_if_needed()
             else:
                 print("[RAG] ⚠️ No storage path available - RAG will be disabled", flush=True)
                 logger.warning(
@@ -695,6 +714,8 @@ async def startup_event():
                         "Non-RAG endpoints (e.g., /auth/login, /health) will work normally."
                     ),
                 )
+                rag_state["status"] = "error"
+                rag_state["last_error"] = "No storage path available"
                 app.state.rag_enabled = False
                 
         except Exception as e:
@@ -1113,78 +1134,61 @@ async def rag_status_options():
 @app.get("/rag/status", include_in_schema=False)
 async def rag_status_public():
     """
-    Simplified RAG status endpoint.
-
-    In production (Cloud Run), we assume the RAG index is prebuilt and loaded.
-    If the container is running, we report RAG as ready so the frontend can use document search.
-
-    If RAG actually fails, that will surface via /rag/self-test or /rag/query errors,
-    not via this status flag.
+    Non-blocking RAG status endpoint.
+    Returns current status immediately without waiting for initialization.
+    Triggers background initialization if not already started.
     """
     import os
     
-    global rag_pipeline, app
+    global rag_pipeline, app, rag_state
     
-    # Determine if we're in prod
-    is_prod_env = getattr(settings, "is_prod", False) or os.getenv("ENV") == "prod"
+    # Trigger background initialization if needed (non-blocking)
+    await start_rag_init_if_needed()
     
-    # Storage path we expect the index to be in (keep consistent with your current config)
+    # Get current status from rag_state
+    status = rag_state["status"]
+    last_error = rag_state["last_error"]
+    
+    # Storage path we expect the index to be in
     storage_path = getattr(app.state, "rag_storage_path", None) or "/app/latest_model"
-    
-    if is_prod_env:
-        # Log for debugging
-        print(
-            "[RAG STATUS] Returning forced-ready status from backend /rag/status (prod)",
-            flush=True,
-        )
-        return {
-            "rag_enabled": True,
-            "initialized": True,
-            "rag_pipeline_initialized": True,
-            "index_dir_exists": True,
-            "storage_dir": str(storage_path),
-            "initializing": False,
-            "last_error": None,
-            "details": "RAG forced ready in Cloud Run (prod).",
-        }
-    
-    # --- Non-prod behavior (dev/local) ---
-    
     index_dir_exists = bool(storage_path and os.path.exists(storage_path))
-    if rag_pipeline is None:
-        initialized = False
-        debug_status = {"initializing": False, "last_error": "RAG pipeline not initialized"}
-        rag_enabled = False
-        details = "RAG pipeline is not initialized yet (non-prod)."
-    else:
-        initialized = bool(rag_pipeline.is_initialized())
-        debug_status = rag_pipeline.debug_status()
-        rag_enabled = initialized and index_dir_exists
-        if initialized:
-            details = "RAG pipeline initialized and ready (non-prod)."
-        else:
-            if debug_status.get("initializing"):
-                details = "RAG pipeline is still initializing (non-prod)."
-            else:
-                details = "RAG pipeline is not initialized (non-prod)."
     
+    # Map rag_state status to response format
+    if status == "ready":
+        initialized = True
+        rag_enabled = True
+        initializing = False
+        details = "RAG pipeline is ready."
+    elif status == "initializing":
+        initialized = False
+        rag_enabled = False
+        initializing = True
+        details = "RAG pipeline is initializing in the background."
+    else:  # error
+        initialized = False
+        rag_enabled = False
+        initializing = False
+        details = f"RAG pipeline initialization failed: {last_error or 'Unknown error'}"
+    
+    logger.info("rag_status_endpoint_called", 
+                status=status, 
+                initialized=initialized,
+                initializing=initializing,
+                message=f"RAG status endpoint called, returning status: {status}")
     print(
-        "[RAG STATUS] Non-prod /rag/status",
-        "initialized=", initialized,
-        "index_dir_exists=", index_dir_exists,
-        "rag_enabled=", rag_enabled,
-        "details=", details,
+        f"[RAG STATUS] Returning status: {status}, initialized={initialized}, initializing={initializing}",
         flush=True,
     )
     
     return {
+        "status": status,  # "initializing" | "ready" | "error"
         "rag_enabled": rag_enabled,
         "initialized": initialized,
         "rag_pipeline_initialized": initialized,
         "index_dir_exists": index_dir_exists,
         "storage_dir": str(storage_path) if storage_path else None,
-        "initializing": debug_status.get("initializing", False),
-        "last_error": debug_status.get("last_error"),
+        "initializing": initializing,
+        "last_error": last_error,
         "details": details,
     }
 
@@ -3245,7 +3249,24 @@ async def get_all_documents(request: Request):
       metadata tables directly.
     - RAG pipeline readiness is enforced separately on query/ingestion
       endpoints (e.g. /query, /admin/documents/upload processing, etc.).
+    - When allow_app_ingestion is False, ingestion statuses are treated as
+      read-only and "in progress" statuses are normalized to "COMPLETE" since
+      ingestion is managed externally.
     """
+    # Log ingestion safety configuration once at startup (first call)
+    if not hasattr(get_all_documents, '_logged_ingestion_config'):
+        logger.info(
+            "admin_documents_ingestion_config",
+            allow_app_ingestion=settings.allow_app_ingestion,
+            message=f"Admin documents endpoint: allow_app_ingestion={settings.allow_app_ingestion}"
+        )
+        if not settings.allow_app_ingestion:
+            logger.info(
+                "admin_documents_ingestion_readonly",
+                message="App-based ingestion is disabled. All ingestion statuses are treated as read-only/externally managed."
+            )
+        get_all_documents._logged_ingestion_config = True
+    
     try:
         # NOTE: This admin listing endpoint should be available even when the
         # RAG pipeline is not initialized. We only use the pipeline for
@@ -3572,6 +3593,17 @@ async def get_all_documents(request: Request):
                 # Get ingestion status if available
                 ingestion_info = ingestion_metadata_map.get(filename, {})
                 
+                # Log sample status for debugging (first document only)
+                if not hasattr(get_all_documents, '_logged_sample_status') and ingestion_info:
+                    logger.info(
+                        "admin_documents_sample_status",
+                        filename=filename,
+                        raw_status=ingestion_info.get("ingestion_status"),
+                        allow_app_ingestion=settings.allow_app_ingestion,
+                        message=f"Sample document status: {ingestion_info.get('ingestion_status')}"
+                    )
+                    get_all_documents._logged_sample_status = True
+                
                 # Backfill metadata for legacy documents (exist in index but no metadata entry)
                 # This ensures all documents have proper status tracking
                 # Check if document is in index by checking multiple sources:
@@ -3652,7 +3684,31 @@ async def get_all_documents(request: Request):
                 # Use metadata status from database (read-only, never infer from chunk_count)
                 # If status is missing, return None rather than inferring from chunk_count
                 # This ensures status is only set by actual ingestion operations, not by index state
-                final_status = ingestion_info.get("ingestion_status") if ingestion_info else None
+                raw_status = ingestion_info.get("ingestion_status") if ingestion_info else None
+                
+                # Normalize status when app ingestion is disabled
+                # In app environments, treat "in progress" statuses as externally managed
+                if not settings.allow_app_ingestion:
+                    # Define statuses that indicate "in progress" ingestion
+                    PROGRESS_STATUSES = {
+                        "PENDING_INGESTION",
+                        "CHUNKING",
+                        "READY_FOR_EMBEDDING",
+                        "EMBEDDING",
+                        "REBUILDING_INDEX",
+                        "DELETING",
+                    }
+                    
+                    if raw_status in PROGRESS_STATUSES:
+                        # In app environments, we treat these as externally managed
+                        # The index is built by external GPU pipeline, so these statuses
+                        # are stale and should be normalized to COMPLETE
+                        final_status = "COMPLETE"
+                    else:
+                        final_status = raw_status
+                else:
+                    # When ingestion is enabled, return status as-is
+                    final_status = raw_status
                 
                 documents.append({
                     "filename": filename,
@@ -3681,6 +3737,25 @@ async def get_all_documents(request: Request):
             # Check if this document is already in the list
             if not any(doc['filename'] == filename for doc in documents):
                 # Document is in ingestion pipeline but not in index yet
+                raw_status = ingestion_info.get("ingestion_status")
+                
+                # Normalize status when app ingestion is disabled
+                if not settings.allow_app_ingestion:
+                    PROGRESS_STATUSES = {
+                        "PENDING_INGESTION",
+                        "CHUNKING",
+                        "READY_FOR_EMBEDDING",
+                        "EMBEDDING",
+                        "REBUILDING_INDEX",
+                        "DELETING",
+                    }
+                    if raw_status in PROGRESS_STATUSES:
+                        final_status = "COMPLETE"
+                    else:
+                        final_status = raw_status
+                else:
+                    final_status = raw_status
+                
                 documents.append({
                     "filename": filename,
                     "size_bytes": None,
@@ -3695,7 +3770,7 @@ async def get_all_documents(request: Request):
                     "requires_admin_review": False,
                     "category": None,
                     "product_family": None,
-                    "ingestion_status": ingestion_info.get("ingestion_status"),
+                    "ingestion_status": final_status,
                     "ingestion_metadata_id": ingestion_info.get("ingestion_metadata_id"),
                     "ingestion_error": ingestion_info.get("ingestion_error"),
                 })
@@ -4225,6 +4300,8 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
         raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while updating metadata"))
 
 
+# INDEX-WRITE PATH (gated): requires settings.allow_app_ingestion=True
+# This endpoint triggers index rebuild which writes to the vector index.
 @app.delete("/admin/documents/metadata/{metadata_id}")
 async def delete_document_by_metadata_id(
     http_request: Request,
@@ -4716,6 +4793,8 @@ def check_machine_model_exists(normalized_machine_model: str) -> bool:
         return machine is not None
 
 
+# INDEX-WRITE PATH (gated): requires settings.allow_app_ingestion=True
+# This endpoint triggers chunking and embedding which write to the vector index.
 @app.post("/admin/documents/upload")
 async def upload_document(
     http_request: Request,
@@ -4999,6 +5078,8 @@ async def upload_document(
         )
 
 
+# INDEX-WRITE PATH (gated): requires settings.allow_app_ingestion=True
+# This endpoint regenerates chunk summaries (read-only operation, but gated for consistency).
 @app.post("/admin/chunks/{chunk_id}/regenerate-summary")
 async def regenerate_chunk_summary(http_request: Request, chunk_id: str):
     """
