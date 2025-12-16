@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, load_only
 
 from ..security import decode_access_token
 from ..utils.database_manager import DatabaseManager
-from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, MachineModel, DocumentIngestionMetadata, run_sync, MachineKind
+from ..utils.db import SessionLocal, QueryHistory, User, AuditLog, MachineModel, DocumentIngestionMetadata, Document, run_sync, MachineKind
 from ..utils.audit_log import audit_log
 from ..logging_config import get_logger
 from ..schemas.query_insights import (
@@ -1326,7 +1326,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         manager: DatabaseManager = Depends(get_db_manager),
         http_request: Request = None,
     ):
-        """Delete a machine model (only if it has no associated documents)."""
+        """Delete a machine model and clear its references from documents (set to NULL/empty)."""
         def _delete():
             with SessionLocal() as session:
                 # Check if machine exists
@@ -1334,18 +1334,77 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
                 if not machine:
                     raise HTTPException(status_code=404, detail="Machine model not found")
                 
-                # Check if machine has any associated documents (case-insensitive)
-                doc_count = session.query(func.count(DocumentIngestionMetadata.id)).filter(
-                    func.upper(DocumentIngestionMetadata.machine_model) == func.upper(machine.name)
-                ).scalar() or 0
+                machine_name = machine.name
+                machine_name_upper = machine_name.upper()
                 
-                if doc_count > 0:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot delete machine model '{machine.name}' because it has {doc_count} associated document(s). Remove all documents first."
-                    )
+                # Clear DocumentIngestionMetadata references (set to NULL)
+                session.query(DocumentIngestionMetadata).filter(
+                    func.upper(DocumentIngestionMetadata.machine_model) == machine_name_upper
+                ).update({DocumentIngestionMetadata.machine_model: None}, synchronize_session=False)
                 
-                # Delete the machine
+                # Clear Document table references
+                # machine_model can be JSON array or single string
+                all_documents = session.query(Document).filter(
+                    Document.machine_model.isnot(None),
+                    Document.machine_model != ""
+                ).all()
+                for doc in all_documents:
+                    if not doc.machine_model:
+                        continue
+                    try:
+                        # Try parsing as JSON array
+                        if doc.machine_model.strip().startswith('['):
+                            machine_models = json.loads(doc.machine_model)
+                            if isinstance(machine_models, list):
+                                # Remove the machine model from the array
+                                filtered_models = [m for m in machine_models if m and m.upper() != machine_name_upper]
+                                if len(filtered_models) == 0:
+                                    doc.machine_model = None  # Set to NULL if array becomes empty
+                                else:
+                                    doc.machine_model = json.dumps(filtered_models)
+                            else:
+                                # Not a list, treat as single string
+                                if doc.machine_model.upper() == machine_name_upper:
+                                    doc.machine_model = None
+                        else:
+                            # Single string value
+                            if doc.machine_model.upper() == machine_name_upper:
+                                doc.machine_model = None
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        # If parsing fails, treat as single string
+                        if doc.machine_model.upper() == machine_name_upper:
+                            doc.machine_model = None
+                
+                # Clear User table references (remove from machine_models JSON array)
+                all_users = session.query(User).filter(
+                    User.machine_models.isnot(None)
+                ).all()
+                for user in all_users:
+                    if not user.machine_models:
+                        continue
+                    try:
+                        # machine_models is stored as JSON array
+                        if isinstance(user.machine_models, str):
+                            user_machines = json.loads(user.machine_models)
+                        else:
+                            user_machines = user.machine_models
+                        
+                        if isinstance(user_machines, list):
+                            # Remove the machine model from the array
+                            filtered_models = [m for m in user_machines if m and m.upper() != machine_name_upper]
+                            if len(filtered_models) == 0:
+                                user.machine_models = None  # Set to NULL if array becomes empty
+                            else:
+                                user.machine_models = json.dumps(filtered_models)
+                        elif isinstance(user.machine_models, str) and user.machine_models.upper() == machine_name_upper:
+                            # Single string value matching
+                            user.machine_models = None
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        # If parsing fails and it's a string match, clear it
+                        if isinstance(user.machine_models, str) and user.machine_models.upper() == machine_name_upper:
+                            user.machine_models = None
+                
+                # Delete the machine model
                 session.delete(machine)
                 session.commit()
                 return None
