@@ -60,8 +60,12 @@ export default function MachineModelsPage() {
   const [editingMachine, setEditingMachine] = useState<MachineModel | null>(null);
   const [newMachineName, setNewMachineName] = useState("");
   const [newMachineKind, setNewMachineKind] = useState("Print Engine");
+  const [editingMachineName, setEditingMachineName] = useState("");
   const [editingMachineKind, setEditingMachineKind] = useState("Print Engine");
   const [submitting, setSubmitting] = useState(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [machineToDelete, setMachineToDelete] = useState<MachineModel | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const { toast } = useToast();
 
   const MACHINE_KINDS = ["Print Engine", "Blade Cutter", "Laser Cutter"] as const;
@@ -208,12 +212,23 @@ export default function MachineModelsPage() {
 
   const handleEditMachine = (machine: MachineModel) => {
     setEditingMachine(machine);
+    setEditingMachineName(machine.name);
     setEditingMachineKind(machine.machine_kind || "Print Engine");
     setIsEditModalOpen(true);
   };
 
   const handleUpdateMachine = async () => {
     if (!editingMachine) return;
+
+    const trimmedName = editingMachineName.trim();
+    if (!trimmedName) {
+      toast({
+        title: "Validation Error",
+        description: "Machine name cannot be empty",
+        variant: "destructive",
+      });
+      return;
+    }
 
     if (!editingMachineKind) {
       toast({
@@ -234,6 +249,7 @@ export default function MachineModelsPage() {
         },
         credentials: "include",
         body: JSON.stringify({ 
+          name: trimmedName,
           machine_kind: editingMachineKind,
         }),
       });
@@ -260,6 +276,60 @@ export default function MachineModelsPage() {
       });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleDeleteClick = (machine: MachineModel) => {
+    setMachineToDelete(machine);
+    setIsDeleteModalOpen(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!machineToDelete) return;
+
+    setDeleting(true);
+
+    try {
+      const response = await fetch(`/api/admin/machines/${machineToDelete.id}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorCode = response.headers.get("X-Error-Code");
+        
+        // Handle 409 Conflict (machine model in use)
+        if (response.status === 409 || errorCode === "MACHINE_MODEL_IN_USE") {
+          throw new Error(
+            errorData.detail || 
+            "This machine model is in use and can't be deleted. Remove it from any machines/documents first."
+          );
+        }
+        
+        throw new Error(errorData.detail || "Failed to delete machine model");
+      }
+
+      toast({
+        title: "Success",
+        description: "Machine model deleted successfully. Associated documents have been set to NO MODEL.",
+      });
+
+      setIsDeleteModalOpen(false);
+      setMachineToDelete(null);
+      fetchMachines();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to delete machine model";
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -387,9 +457,9 @@ export default function MachineModelsPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          disabled
-                          className="text-muted-foreground"
-                          title="Deletion will be available in a future update."
+                          onClick={() => handleDeleteClick(machine)}
+                          className="text-muted-foreground hover:text-destructive"
+                          title="Delete machine model"
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -462,16 +532,23 @@ export default function MachineModelsPage() {
         }}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-2">Machine Name</label>
+              <label className="block text-sm font-medium mb-2">
+                Machine Name <span className="text-red-500">*</span>
+              </label>
               <input
                 type="text"
-                value={editingMachine.name}
-                disabled
-                className="w-full rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
+                value={editingMachineName}
+                onChange={(e) => setEditingMachineName(e.target.value)}
+                placeholder="Enter machine model name"
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                disabled={submitting}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !submitting && editingMachineName.trim() && editingMachineKind) {
+                    handleUpdateMachine();
+                  }
+                }}
+                autoFocus
               />
-              <p className="mt-1 text-xs text-muted-foreground">
-                Machine name cannot be changed
-              </p>
             </div>
             <div>
               <label className="block text-sm font-medium mb-2">
@@ -502,8 +579,45 @@ export default function MachineModelsPage() {
             >
               Cancel
             </Button>
-            <Button onClick={handleUpdateMachine} disabled={submitting || !editingMachineKind}>
+            <Button onClick={handleUpdateMachine} disabled={submitting || !editingMachineName.trim() || !editingMachineKind}>
               {submitting ? "Saving..." : "Save"}
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {isDeleteModalOpen && machineToDelete && (
+        <Modal title="Delete Machine Model" onClose={() => {
+          setIsDeleteModalOpen(false);
+          setMachineToDelete(null);
+        }}>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Are you sure you want to delete the machine model <strong>&quot;{machineToDelete.name}&quot;</strong>?
+            </p>
+            <p className="text-sm text-muted-foreground">
+              This will remove the machine model and set any associated documents to NO MODEL. 
+              You can create a new machine model and reassign documents afterward.
+            </p>
+          </div>
+          <div className="mt-6 flex justify-end gap-3">
+            <Button 
+              variant="outline" 
+              onClick={() => {
+                setIsDeleteModalOpen(false);
+                setMachineToDelete(null);
+              }} 
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button 
+              variant="destructive"
+              onClick={handleDeleteConfirm} 
+              disabled={deleting}
+            >
+              {deleting ? "Deleting..." : "Delete"}
             </Button>
           </div>
         </Modal>

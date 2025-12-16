@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { iamBackendGet, iamBackendPost, iamBackendPut } from '@/lib/iam-backend';
+import { iamBackendGet, iamBackendPost } from '@/lib/iam-backend';
 import { extractJwtFromCookie } from '@/lib/authClient';
 
 export async function GET(_request: NextRequest) {
