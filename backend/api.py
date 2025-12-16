@@ -4300,8 +4300,6 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
         raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while updating metadata"))
 
 
-# INDEX-WRITE PATH (gated): requires settings.allow_app_ingestion=True
-# This endpoint triggers index rebuild which writes to the vector index.
 @app.delete("/admin/documents/metadata/{metadata_id}")
 async def delete_document_by_metadata_id(
     http_request: Request,
@@ -4309,8 +4307,16 @@ async def delete_document_by_metadata_id(
     metadata_id: str
 ):
     """
-    Delete a document by metadata_id (Phase 4).
-    This triggers safe deletion with full index rebuild in the background.
+    Delete a document by metadata_id.
+    
+    Always works regardless of ingestion toggle. Deletes:
+    - DocumentIngestionMetadata row
+    - Document row (if exists)
+    - Chunks JSON file
+    - GCS file (best-effort)
+    - Local files (if exist)
+    
+    Does NOT trigger index rebuild. Index must be rebuilt via external pipeline if needed.
     """
     from .logging_context import get_user_id, get_user_role
     user_id = get_user_id()
@@ -4328,60 +4334,51 @@ async def delete_document_by_metadata_id(
     if not metadata_exists:
         raise HTTPException(status_code=404, detail=f"Document metadata not found: {metadata_id}")
     
-    # Set status to DELETING
-    def _set_deleting_status():
-        with SessionLocal() as session:
-            metadata = session.query(DocumentIngestionMetadata).filter(
-                DocumentIngestionMetadata.id == metadata_id
-            ).first()
-            if metadata:
-                metadata.status = "DELETING"
-                session.commit()
-                return metadata.filename
-            return None
+    # Delete document using simple delete (no index rebuild)
+    from backend.utils.simple_delete import delete_document_metadata_simple
     
-    filename = await run_sync(_set_deleting_status)
-    
-    # INDEX-WRITE PATH: rebuilds index after deletion
-    # Check if app-based ingestion is allowed
-    if not settings.allow_app_ingestion:
-        logger.warning(
+    try:
+        delete_result = await run_sync(delete_document_metadata_simple, metadata_id)
+        filename = delete_result.get("filename", "unknown")
+        
+        logger.info(
             {
-                "event": "ingestion_blocked_from_app",
-                "filename": filename,
+                "event": "document_deleted_simple",
                 "metadata_id": metadata_id,
-                "path": http_request.url.path if hasattr(http_request, "url") else None,
+                "filename": filename,
+                "deleted_metadata": delete_result.get("deleted_metadata"),
+                "deleted_document": delete_result.get("deleted_document"),
+                "deleted_chunks_file": delete_result.get("deleted_chunks_file"),
+                "deleted_gcs": delete_result.get("deleted_gcs"),
+                "deleted_local": delete_result.get("deleted_local"),
             }
         )
-        raise HTTPException(
-            status_code=403,
-            detail="Index rebuild is disabled in this environment. Document deletion will remove metadata only. Index must be rebuilt via external GPU pipeline."
+        
+        # Audit log
+        await audit_log(
+            "document_deleted",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "metadata_id": metadata_id,
+                "filename": filename,
+            },
+            request=http_request,
         )
-    
-    # Trigger background delete and reindex task
-    from backend.utils.delete_runner import run_delete_and_reindex
-    background_tasks.add_task(run_delete_and_reindex, metadata_id)
-    logger.info(f"delete_task_queued", metadata_id=metadata_id, filename=filename)
-    
-    # Audit log
-    await audit_log(
-        "document_deletion_started",
-        level="info",
-        user_id=user_id,
-        role=user_role,
-        metadata={
+        
+        return {
+            "status": "success",
+            "message": f"Document {filename} deleted successfully. Index rebuild must be handled via external pipeline if needed.",
             "metadata_id": metadata_id,
             "filename": filename,
-        },
-        request=http_request,
-    )
-    
-    return {
-        "status": "success",
-        "message": f"Document deletion started. Index rebuild in progress.",
-        "metadata_id": metadata_id,
-        "filename": filename,
-    }
+        }
+    except Exception as e:
+        logger.error(f"Error deleting document {metadata_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete document: {str(e)}"
+        )
 
 
 @app.post("/admin/test/clear-test-mode")
@@ -5062,70 +5059,76 @@ async def upload_document(
             request=http_request,
         )
         
-        # INDEX-WRITE PATH: creates/updates embeddings
-        # Check if app-based ingestion is allowed
-        if not settings.allow_app_ingestion:
-            logger.warning(
+        # INDEX-WRITE PATH: ingestion is optional and gated by allow_app_ingestion
+        # Document row and file upload are always completed above
+        # Only trigger ingestion if app-based ingestion is allowed
+        if settings.allow_app_ingestion:
+            # Log ingestion enqueued
+            logger.info(
                 {
-                    "event": "ingestion_blocked_from_app",
+                    "event": "document_ingestion_enqueued",
+                    "document_id": metadata_result["id"],
+                    "filename": metadata_result["filename"],
+                    "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+                    "request_id": request_id,
+                }
+            )
+            
+            # Trigger background chunking task (Phase 2)
+            # After chunking completes, it will trigger embedding (Phase 3)
+            from backend.utils.chunking_runner import run_chunking
+            from backend.utils.embedding_runner import run_embedding
+            
+            def chunking_with_embedding_trigger(meta_id: str, req_id: Optional[str] = None):
+                """Run chunking, then trigger embedding if successful."""
+                try:
+                    # Run chunking (returns metadata_id if successful)
+                    result = run_chunking(meta_id, request_id=req_id)
+                    # If chunking succeeded, trigger embedding
+                    if result:
+                        # Schedule embedding as a background task
+                        # Note: We can't use background_tasks here since we're already in a background task
+                        # So we'll call it directly, but it's async-safe
+                        run_embedding(meta_id, request_id=req_id)
+                except Exception as e:
+                    logger.exception(
+                        {
+                            "event": "chunking_or_embedding_failed",
+                            "metadata_id": meta_id,
+                            "request_id": req_id,
+                            "error": str(e),
+                        }
+                    )
+            
+            background_tasks.add_task(chunking_with_embedding_trigger, metadata_id, request_id)
+            logger.info(f"chunking_task_queued", metadata_id=metadata_id, filename=file.filename)
+            
+            return {
+                "status": "success",
+                "message": f"File {file.filename} uploaded successfully. Chunking started in background.",
+                "metadata": metadata_result,
+                "file_path": original_path,
+                "size_bytes": file_size,
+            }
+        else:
+            # Ingestion disabled - document uploaded but not ingested
+            logger.info(
+                {
+                    "event": "document_uploaded_no_ingestion",
                     "filename": file.filename,
                     "document_id": metadata_result["id"],
                     "request_id": request_id,
-                    "path": http_request.url.path if hasattr(http_request, "url") else None,
+                    "message": "Document uploaded successfully. Ingestion disabled - ingestion must be triggered via external GPU pipeline.",
                 }
             )
-            raise HTTPException(
-                status_code=403,
-                detail="Ingestion is disabled in this environment. Documents can be uploaded for metadata, but ingestion must be triggered via external GPU pipeline."
-            )
-        
-        # Log ingestion enqueued
-        logger.info(
-            {
-                "event": "document_ingestion_enqueued",
-                "document_id": metadata_result["id"],
-                "filename": metadata_result["filename"],
-                "machine_model_id": machine_model_obj.id if machine_model_obj else None,
-                "request_id": request_id,
+            
+            return {
+                "status": "success",
+                "message": f"File {file.filename} uploaded successfully. Document metadata created with PENDING_INGESTION status. Ingestion must be triggered via external GPU pipeline.",
+                "metadata": metadata_result,
+                "file_path": original_path,
+                "size_bytes": file_size,
             }
-        )
-        
-        # Trigger background chunking task (Phase 2)
-        # After chunking completes, it will trigger embedding (Phase 3)
-        from backend.utils.chunking_runner import run_chunking
-        from backend.utils.embedding_runner import run_embedding
-        
-        def chunking_with_embedding_trigger(meta_id: str, req_id: Optional[str] = None):
-            """Run chunking, then trigger embedding if successful."""
-            try:
-                # Run chunking (returns metadata_id if successful)
-                result = run_chunking(meta_id, request_id=req_id)
-                # If chunking succeeded, trigger embedding
-                if result:
-                    # Schedule embedding as a background task
-                    # Note: We can't use background_tasks here since we're already in a background task
-                    # So we'll call it directly, but it's async-safe
-                    run_embedding(meta_id, request_id=req_id)
-            except Exception as e:
-                logger.exception(
-                    {
-                        "event": "chunking_or_embedding_failed",
-                        "metadata_id": meta_id,
-                        "request_id": req_id,
-                        "error": str(e),
-                    }
-                )
-        
-        background_tasks.add_task(chunking_with_embedding_trigger, metadata_id, request_id)
-        logger.info(f"chunking_task_queued", metadata_id=metadata_id, filename=file.filename)
-        
-        return {
-            "status": "success",
-            "message": f"File {file.filename} uploaded successfully. Chunking started in background.",
-            "metadata": metadata_result,
-            "file_path": original_path,
-            "size_bytes": file_size,
-        }
         
     except HTTPException:
         raise

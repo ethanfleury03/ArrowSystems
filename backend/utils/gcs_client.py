@@ -318,6 +318,39 @@ def download_to_file(gcs_uri: str, dest_path: str) -> bool:
         return False
 
 
+def delete_object(gcs_path: str) -> bool:
+    """
+    Delete an object from GCS (best-effort, logs warning on failure).
+    
+    Args:
+        gcs_path: Full GCS path (gs://bucket/path) or bucket/path
+    
+    Returns:
+        True if successful, False if error (but does not raise exception)
+    """
+    bucket_name, blob_name = parse_gcs_path(gcs_path)
+    
+    if not bucket_name or not blob_name:
+        logger.warning(f"Invalid GCS path for deletion: {gcs_path}")
+        return False
+    
+    client = get_gcs_client()
+    if not client:
+        logger.warning("GCS client not available for deletion")
+        return False
+    
+    try:
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.delete()
+        logger.info(f"Successfully deleted GCS object: {gcs_path}")
+        return True
+    except Exception as e:
+        # Log warning but don't fail - deletion is best-effort
+        logger.warning(f"Failed to delete GCS object {gcs_path}: {e}")
+        return False
+
+
 
 
 
