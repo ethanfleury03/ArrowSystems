@@ -1065,21 +1065,146 @@ class DocumentLoader:
         self.supported_extensions = {'.pdf', '.docx', '.md', '.markdown'}
         self.temp_files = []  # Track temp files for cleanup
     
-    def load_documents(self) -> List[Document]:
+    def load_documents(self, use_database: bool = True) -> List[Document]:
         """
-        Load all supported documents from data directory or GCS bucket.
+        Load all supported documents from database (preferred), GCS bucket, or local directory.
         Returns list of Document objects with proper metadata.
+        
+        Args:
+            use_database: If True, load documents from database (DocumentIngestionMetadata with gcs_path).
+                         Only processes documents that exist in the database.
         """
         documents = []
         
-        # If GCS is configured, load from GCS
+        # Priority 1: Load from database (if enabled and GCS is configured)
+        if use_database:
+            try:
+                documents = self._load_from_database()
+                if documents:
+                    logger.info(f"Loaded {len(documents)} documents from database")
+                    return documents
+                else:
+                    logger.warning("No documents found in database, falling back to GCS/local")
+            except Exception as e:
+                logger.warning(f"Failed to load from database: {e}, falling back to GCS/local", exc_info=True)
+        
+        # Priority 2: Load from GCS bucket (if configured)
         if self.gcs_bucket:
             documents = self._load_from_gcs()
-        # Otherwise, load from local directory
+        # Priority 3: Load from local directory
         elif self.data_dir:
             documents = self._load_from_local()
         else:
-            raise ValueError("Either data_dir or gcs_bucket must be provided")
+            raise ValueError("Either data_dir or gcs_bucket must be provided, or use_database=True with database records")
+        
+        return documents
+    
+    def _load_from_database(self) -> List[Document]:
+        """
+        Load documents from database (DocumentIngestionMetadata table).
+        Only processes documents that have gcs_path set in the database.
+        """
+        from backend.utils.db import SessionLocal, DocumentIngestionMetadata, Document as DBDocument
+        from backend.utils.gcs_client import download_to_file
+        import tempfile
+        
+        session = SessionLocal()
+        documents = []
+        temp_dir = tempfile.mkdtemp(prefix="ingest_db_")
+        self.temp_files.append(temp_dir)  # Track for cleanup
+        
+        try:
+            # Query all DocumentIngestionMetadata records that have gcs_path
+            # Join with Document table to get gcs_path
+            # Only process documents that are active and have GCS paths
+            from sqlalchemy import or_
+            
+            metadata_records = (
+                session.query(DocumentIngestionMetadata, DBDocument)
+                .outerjoin(DBDocument, DocumentIngestionMetadata.filename == DBDocument.file_name)
+                .filter(
+                    # Must have gcs_path (either from Document or from metadata file_path)
+                    or_(
+                        DBDocument.gcs_path.isnot(None),
+                        (DocumentIngestionMetadata.file_path.isnot(None) & 
+                         DocumentIngestionMetadata.file_path.like('gs://%'))
+                    )
+                )
+                .filter(
+                    # Only process active documents (if Document record exists)
+                    or_(
+                        DBDocument.is_active.is_(True),
+                        DBDocument.id.is_(None)  # No Document record yet, process anyway
+                    )
+                )
+                .all()
+            )
+            
+            logger.info(f"Found {len(metadata_records)} documents in database with GCS paths")
+            
+            for metadata, db_doc in tqdm(metadata_records, desc="Loading documents from database"):
+                try:
+                    # Prefer gcs_path from Document table, fallback to file_path from metadata
+                    gcs_path = None
+                    if db_doc and db_doc.gcs_path:
+                        gcs_path = db_doc.gcs_path
+                    elif metadata.file_path and metadata.file_path.startswith('gs://'):
+                        gcs_path = metadata.file_path
+                    
+                    if not gcs_path:
+                        logger.warning(f"Skipping {metadata.filename}: no GCS path found")
+                        continue
+                    
+                    filename = metadata.filename
+                    file_ext = os.path.splitext(filename)[1].lower()
+                    
+                    # Only process supported file types
+                    if file_ext not in self.supported_extensions:
+                        logger.debug(f"Skipping {filename}: unsupported file type {file_ext}")
+                        continue
+                    
+                    # Download from GCS to temporary file
+                    temp_file_path = os.path.join(temp_dir, filename)
+                    
+                    logger.debug(f"Downloading {gcs_path} to {temp_file_path}")
+                    if not download_to_file(gcs_path, temp_file_path):
+                        logger.error(f"Failed to download {gcs_path}")
+                        continue
+                    
+                    self.temp_files.append(temp_file_path)  # Track for cleanup
+                    
+                    # Load document based on file type
+                    file_path = Path(temp_file_path)
+                    
+                    if file_ext == '.pdf':
+                        pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
+                        for doc in pdf_docs:
+                            doc.metadata['file_name'] = filename
+                            doc.metadata['file_type'] = 'pdf'
+                            doc.metadata['gcs_path'] = gcs_path
+                            doc.metadata['metadata_id'] = metadata.id
+                        documents.extend(pdf_docs)
+                    elif file_ext == '.docx' and DOCX_AVAILABLE:
+                        docx_docs = self._load_docx(file_path)
+                        for doc in docx_docs:
+                            doc.metadata['gcs_path'] = gcs_path
+                            doc.metadata['metadata_id'] = metadata.id
+                        documents.extend(docx_docs)
+                    elif file_ext in {'.md', '.markdown'}:
+                        md_docs = self._load_markdown(file_path)
+                        for doc in md_docs:
+                            doc.metadata['gcs_path'] = gcs_path
+                            doc.metadata['metadata_id'] = metadata.id
+                        documents.extend(md_docs)
+                    
+                except Exception as e:
+                    logger.error(f"Error loading {metadata.filename} from database: {e}", exc_info=True)
+                    continue
+            
+            logger.info(f"Loaded {len(documents)} document sections from database")
+            
+        finally:
+            session.close()
         
         return documents
     
@@ -1729,24 +1854,25 @@ class TechnicalRAGPipeline:
         from backend.config.env import settings
         use_gcs = bool(settings.DOCS_GCS_BUCKET)
         
+        # Always try to load from database first (only processes documents in DB)
+        # Falls back to GCS/local if database loading fails or returns no documents
+        loader = None
         if use_gcs:
-            print(f"   📦 Loading from GCS: gs://{settings.DOCS_GCS_BUCKET}/{settings.DOCS_GCS_PREFIX}")
+            print(f"   📦 Loading from database (documents with GCS paths)...")
             loader = DocumentLoader(
                 gcs_bucket=settings.DOCS_GCS_BUCKET,
                 gcs_prefix=settings.DOCS_GCS_PREFIX
             )
         else:
-            print(f"   📁 Loading from local directory: {data_dir}")
+            print(f"   📁 Loading from database (documents with GCS paths)...")
             loader = DocumentLoader(data_dir=data_dir)
         
-        documents = loader.load_documents()
+        # Load from database (preferred) - only processes documents in database
+        # This ensures we only ingest documents that are tracked in the database
+        documents = loader.load_documents(use_database=True)
         
-        # Sync GCS documents to database
-        if use_gcs:
-            try:
-                _sync_gcs_documents_to_db(documents, loader)
-            except Exception as e:
-                logger.warning(f"Failed to sync GCS documents to database: {e}", exc_info=True)
+        # Note: No need to sync to database since we're loading FROM database
+        # Documents are already tracked in DocumentIngestionMetadata and Document tables
         
         # Count by file type
         file_types = {}
@@ -2217,8 +2343,53 @@ def main():
     if use_qdrant:
         print("🗄️ Index saved to: Qdrant")
     else:
-        print("📁 Index saved to: storage/")
-    print("🔍 Use query.py to search the documents")
+        print("📁 Index saved to: latest_model/")
+        
+        # Automatically upload index to GCS after ingestion
+        print("\n" + "="*60)
+        print("📤 UPLOADING INDEX TO GCS...")
+        print("="*60)
+        try:
+            # Import upload function directly
+            import importlib.util
+            from pathlib import Path
+            
+            # Load the upload script as a module
+            script_path = Path(__file__).parent.parent / "scripts" / "upload_index_to_gcs.py"
+            if script_path.exists():
+                spec = importlib.util.spec_from_file_location("upload_index_to_gcs", script_path)
+                upload_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(upload_module)
+                upload_directory_to_gcs = upload_module.upload_directory_to_gcs
+                
+                # Get bucket name from environment or use default
+                index_bucket = os.getenv("RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
+                index_prefix = os.getenv("RAG_INDEX_GCS_PREFIX", "")  # Empty = bucket root
+                
+                storage_dir = "latest_model"
+                if os.path.exists(storage_dir):
+                    print(f"   Uploading {storage_dir}/ to gs://{index_bucket}/{index_prefix}")
+                    upload_directory_to_gcs(
+                        local_dir=storage_dir,
+                        bucket_name=index_bucket,
+                        gcs_prefix=index_prefix,
+                        overwrite=True
+                    )
+                    print("\n" + "="*60)
+                    print("✅ INDEX UPLOADED TO GCS SUCCESSFULLY")
+                    print(f"   📦 Bucket: gs://{index_bucket}/{index_prefix}")
+                    print("   🔄 Cloud Run will download the new index on next restart")
+                    print("="*60)
+                else:
+                    print(f"   ⚠️  Warning: Index directory {storage_dir} not found, skipping upload")
+            else:
+                print(f"   ⚠️  Warning: Upload script not found at {script_path}")
+        except Exception as e:
+            logger.error(f"Failed to upload index to GCS: {e}", exc_info=True)
+            print(f"\n   ⚠️  Warning: Failed to upload index to GCS: {e}")
+            print("   You can manually upload using: python backend/scripts/upload_index_to_gcs.py")
+    
+    print("\n🔍 Use query.py to search the documents")
     print("📊 Non-text content extracted to: extracted_content/")
     print("="*60)
 
