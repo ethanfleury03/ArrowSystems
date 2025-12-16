@@ -2365,7 +2365,7 @@ def main():
             from pathlib import Path
             
             # Load the upload script as a module
-            script_path = Path(__file__).parent.parent / "scripts" / "upload_index_to_gcs.py"
+            script_path = Path(__file__).parent / "scripts" / "upload_index_to_gcs.py"
             if script_path.exists():
                 spec = importlib.util.spec_from_file_location("upload_index_to_gcs", script_path)
                 upload_module = importlib.util.module_from_spec(spec)
