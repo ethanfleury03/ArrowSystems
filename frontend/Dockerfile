@@ -49,7 +49,7 @@ FROM node:20-alpine AS production
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV PORT=3000
+# PORT is set by Cloud Run automatically - don't override it
 ENV HOSTNAME="0.0.0.0"
 
 # Create non-root user for security
@@ -70,8 +70,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/node_modules/sharp ./node_modules
 
 USER nextjs
 
-EXPOSE 3000
+# Cloud Run sets PORT automatically (typically 8080)
+# EXPOSE is informational - actual port comes from $PORT env var
+EXPOSE 8080
 
 # Use node directly to run the standalone server (faster than npm start)
+# The standalone server.js respects PORT env var automatically
 CMD ["node", "server.js"]
 
