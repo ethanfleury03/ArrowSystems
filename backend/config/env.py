@@ -6,7 +6,11 @@ and configuration values that differ between development and production.
 """
 
 import os
+import logging
 from typing import List, Optional
+
+# Module-level logger - must be defined before Settings() instantiation
+logger = logging.getLogger(__name__)
 
 
 class Settings:
@@ -30,8 +34,6 @@ class Settings:
         self.is_prod = self.ENV in {"prod", "production", "cloud"}
         
         # Log the effective ENV value for debugging
-        import logging
-        logger = logging.getLogger(__name__)
         logger.info("env_runtime_value", 
                    env=self.ENV,
                    env_var_value=os.getenv("ENV"),

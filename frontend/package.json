@@ -6,7 +6,7 @@
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
     "postbuild": "next-sitemap",
-    "start": "next start --hostname 0.0.0.0",
+    "start": "next start --hostname 0.0.0.0 --port ${PORT:-8080}",
     "lint": "next lint",
     "backup:db": "powershell -ExecutionPolicy Bypass -File scripts/backup-db.ps1",
     "restore:db": "powershell -ExecutionPolicy Bypass -File scripts/restore-db.ps1"
