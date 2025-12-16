@@ -6,7 +6,7 @@ Provides helper functions for accessing files from Cloud Storage buckets.
 
 import os
 import logging
-from typing import Optional, BinaryIO
+from typing import Optional, BinaryIO, List
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -187,6 +187,135 @@ def generate_signed_url(bucket_name: str, blob_name: str, expiration_minutes: in
     except Exception as e:
         logger.error(f"Failed to generate signed URL for {blob_name} in {bucket_name}: {e}")
         return None
+
+
+def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_type: str = "application/pdf") -> Optional[str]:
+    """
+    Upload bytes content to GCS bucket.
+    
+    Args:
+        bucket_name: GCS bucket name
+        object_name: Object name/path within bucket
+        content: File content as bytes
+        content_type: MIME type (default: application/pdf)
+    
+    Returns:
+        GCS URI string (gs://bucket/object) if successful, None if error
+    """
+    client = get_gcs_client()
+    if not client:
+        logger.error("GCS client not available for upload")
+        return None
+    
+    try:
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        blob.upload_from_string(content, content_type=content_type)
+        gcs_uri = f"gs://{bucket_name}/{object_name}"
+        logger.info(f"Successfully uploaded to GCS: {gcs_uri}")
+        return gcs_uri
+    except Exception as e:
+        logger.error(f"Failed to upload {object_name} to {bucket_name}: {e}", exc_info=True)
+        return None
+
+
+def upload_file(bucket_name: str, object_name: str, local_path: str, content_type: str = "application/pdf") -> Optional[str]:
+    """
+    Upload a local file to GCS bucket.
+    
+    Args:
+        bucket_name: GCS bucket name
+        object_name: Object name/path within bucket
+        local_path: Path to local file
+        content_type: MIME type (default: application/pdf)
+    
+    Returns:
+        GCS URI string (gs://bucket/object) if successful, None if error
+    """
+    if not os.path.exists(local_path):
+        logger.error(f"Local file not found: {local_path}")
+        return None
+    
+    client = get_gcs_client()
+    if not client:
+        logger.error("GCS client not available for upload")
+        return None
+    
+    try:
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        blob.upload_from_filename(local_path, content_type=content_type)
+        gcs_uri = f"gs://{bucket_name}/{object_name}"
+        logger.info(f"Successfully uploaded file to GCS: {gcs_uri}")
+        return gcs_uri
+    except Exception as e:
+        logger.error(f"Failed to upload file {local_path} to {bucket_name}/{object_name}: {e}", exc_info=True)
+        return None
+
+
+def list_objects(bucket_name: str, prefix: str = "") -> List[str]:
+    """
+    List all objects in a GCS bucket with the given prefix.
+    
+    Args:
+        bucket_name: GCS bucket name
+        prefix: Object name prefix to filter (default: empty string for all objects)
+    
+    Returns:
+        List of object names (full paths within bucket)
+    """
+    client = get_gcs_client()
+    if not client:
+        logger.error("GCS client not available for listing")
+        return []
+    
+    try:
+        bucket = client.bucket(bucket_name)
+        blobs = bucket.list_blobs(prefix=prefix)
+        object_names = [blob.name for blob in blobs]
+        logger.debug(f"Listed {len(object_names)} objects from {bucket_name} with prefix '{prefix}'")
+        return object_names
+    except Exception as e:
+        logger.error(f"Failed to list objects from {bucket_name} with prefix '{prefix}': {e}", exc_info=True)
+        return []
+
+
+def download_to_file(gcs_uri: str, dest_path: str) -> bool:
+    """
+    Download a GCS object to a local file.
+    
+    Args:
+        gcs_uri: Full GCS URI (gs://bucket/object) or bucket/object path
+        dest_path: Local file path to save to
+    
+    Returns:
+        True if successful, False if error
+    """
+    bucket_name, blob_name = parse_gcs_path(gcs_uri)
+    
+    if not bucket_name or not blob_name:
+        logger.error(f"Invalid GCS URI: {gcs_uri}")
+        return False
+    
+    client = get_gcs_client()
+    if not client:
+        logger.error("GCS client not available for download")
+        return False
+    
+    try:
+        # Ensure destination directory exists
+        dest_dir = os.path.dirname(dest_path)
+        if dest_dir:
+            os.makedirs(dest_dir, exist_ok=True)
+        
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.download_to_filename(dest_path)
+        logger.info(f"Successfully downloaded {gcs_uri} to {dest_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download {gcs_uri} to {dest_path}: {e}", exc_info=True)
+        return False
 
 
 

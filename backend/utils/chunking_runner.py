@@ -100,23 +100,85 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
         session.commit()
         logger.info(f"chunking_started", metadata_id=metadata_id, filename=metadata.filename)
         
-        # Validate file path exists
-        if not metadata.file_path or not os.path.exists(metadata.file_path):
-            raise FileNotFoundError(f"File not found: {metadata.file_path}")
+        # Determine file source: prefer GCS path, fall back to local file_path
+        # First, try to get GCS path from Document table
+        from backend.utils.db import Document
+        doc_record = session.query(Document).filter(Document.file_name == metadata.filename).first()
+        gcs_path = doc_record.gcs_path if doc_record else None
         
-        file_path = Path(metadata.file_path)
-        file_ext = file_path.suffix.lower()
+        # If no GCS path in Document table, check if we have a local file_path
+        local_file_path = metadata.file_path if metadata.file_path and os.path.exists(metadata.file_path) else None
         
-        # Get file size for logging
-        file_size = os.path.getsize(metadata.file_path) if os.path.exists(metadata.file_path) else 0
+        # Download from GCS if gcs_path is available
+        temp_file_path = None
+        file_path = None
+        file_ext = None
         
-        # Log file loaded
+        if gcs_path:
+            # Download from GCS to temporary file
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            temp_file_path = os.path.join(temp_dir, f"ingest_{metadata_id}_{metadata.filename}")
+            
+            from backend.utils.gcs_client import download_to_file
+            logger.info(
+                {
+                    "event": "document_downloading_from_gcs",
+                    "document_id": metadata_id,
+                    "filename": metadata.filename,
+                    "gcs_path": gcs_path,
+                    "request_id": request_id,
+                }
+            )
+            
+            if not download_to_file(gcs_path, temp_file_path):
+                raise FileNotFoundError(f"Failed to download file from GCS: {gcs_path}")
+            
+            file_path = Path(temp_file_path)
+            file_ext = file_path.suffix.lower()
+            file_size = os.path.getsize(temp_file_path)
+            
+            logger.info(
+                {
+                    "event": "document_file_loaded_from_gcs",
+                    "document_id": metadata_id,
+                    "filename": metadata.filename,
+                    "gcs_path": gcs_path,
+                    "temp_path": temp_file_path,
+                    "file_size_bytes": file_size,
+                    "request_id": request_id,
+                }
+            )
+        elif local_file_path:
+            # Use local file path (fallback for backward compatibility)
+            file_path = Path(local_file_path)
+            file_ext = file_path.suffix.lower()
+            file_size = os.path.getsize(local_file_path)
+            
+            logger.info(
+                {
+                    "event": "document_file_loaded_from_local",
+                    "document_id": metadata_id,
+                    "filename": metadata.filename,
+                    "file_path": local_file_path,
+                    "file_size_bytes": file_size,
+                    "request_id": request_id,
+                }
+            )
+        else:
+            raise FileNotFoundError(
+                f"File not found for document {metadata_id} ({metadata.filename}). "
+                f"Neither GCS path nor local file_path available."
+            )
+        
+        # Log file loaded (for backward compatibility with existing logging)
         logger.debug(
             {
                 "event": "document_file_loaded",
                 "document_id": metadata_id,
                 "filename": metadata.filename,
                 "file_size_bytes": file_size,
+                "source": "gcs" if gcs_path else "local",
                 "request_id": request_id,
             }
         )
@@ -295,6 +357,26 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
                 )
         return None
     finally:
+        # Clean up temporary file if downloaded from GCS
+        if 'temp_file_path' in locals() and temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                logger.debug(
+                    {
+                        "event": "temp_file_cleaned_up",
+                        "document_id": metadata_id,
+                        "temp_path": temp_file_path,
+                    }
+                )
+            except Exception as cleanup_error:
+                logger.warning(
+                    {
+                        "event": "temp_file_cleanup_failed",
+                        "document_id": metadata_id,
+                        "temp_path": temp_file_path,
+                        "error": str(cleanup_error),
+                    }
+                )
         if session:
             session.close()
 

@@ -1055,17 +1055,102 @@ class DocumentLoader:
     """
     Custom document loader that supports PDF, DOCX, and Markdown files.
     Preserves document provenance with file_name and page_label/section metadata.
+    Can load from local directory or GCS bucket.
     """
     
-    def __init__(self, data_dir: str):
-        self.data_dir = Path(data_dir)
+    def __init__(self, data_dir: str = None, gcs_bucket: str = None, gcs_prefix: str = None):
+        self.data_dir = Path(data_dir) if data_dir else None
+        self.gcs_bucket = gcs_bucket
+        self.gcs_prefix = gcs_prefix or ""
         self.supported_extensions = {'.pdf', '.docx', '.md', '.markdown'}
+        self.temp_files = []  # Track temp files for cleanup
     
     def load_documents(self) -> List[Document]:
         """
-        Load all supported documents from data directory.
+        Load all supported documents from data directory or GCS bucket.
         Returns list of Document objects with proper metadata.
         """
+        documents = []
+        
+        # If GCS is configured, load from GCS
+        if self.gcs_bucket:
+            documents = self._load_from_gcs()
+        # Otherwise, load from local directory
+        elif self.data_dir:
+            documents = self._load_from_local()
+        else:
+            raise ValueError("Either data_dir or gcs_bucket must be provided")
+        
+        return documents
+    
+    def _load_from_gcs(self) -> List[Document]:
+        """Load documents from GCS bucket."""
+        from backend.utils.gcs_client import list_objects, download_to_file
+        import tempfile
+        
+        logger.info(f"Loading documents from GCS bucket: {self.gcs_bucket}, prefix: {self.gcs_prefix}")
+        
+        # List all objects in GCS bucket with prefix
+        object_names = list_objects(self.gcs_bucket, self.gcs_prefix)
+        
+        # Filter to PDFs (case-insensitive)
+        pdf_objects = [
+            obj for obj in object_names
+            if obj.lower().endswith('.pdf')
+        ]
+        
+        logger.info(f"Found {len(pdf_objects)} PDF files in GCS bucket")
+        
+        documents = []
+        temp_dir = tempfile.mkdtemp(prefix="ingest_gcs_")
+        self.temp_files.append(temp_dir)  # Track for cleanup
+        
+        for obj_name in tqdm(pdf_objects, desc="Loading documents from GCS"):
+            try:
+                # Download to temporary file
+                filename = os.path.basename(obj_name)
+                temp_file_path = os.path.join(temp_dir, filename)
+                
+                gcs_uri = f"gs://{self.gcs_bucket}/{obj_name}"
+                logger.debug(f"Downloading {gcs_uri} to {temp_file_path}")
+                
+                if not download_to_file(gcs_uri, temp_file_path):
+                    logger.error(f"Failed to download {gcs_uri}")
+                    continue
+                
+                self.temp_files.append(temp_file_path)  # Track for cleanup
+                
+                # Load document using existing logic
+                file_path = Path(temp_file_path)
+                file_ext = file_path.suffix.lower()
+                
+                if file_ext == '.pdf':
+                    pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
+                    for doc in pdf_docs:
+                        doc.metadata['file_name'] = filename
+                        doc.metadata['file_type'] = 'pdf'
+                        doc.metadata['gcs_path'] = gcs_uri  # Store GCS path in metadata
+                    documents.extend(pdf_docs)
+                elif file_ext == '.docx' and DOCX_AVAILABLE:
+                    docx_docs = self._load_docx(file_path)
+                    for doc in docx_docs:
+                        doc.metadata['gcs_path'] = gcs_uri
+                    documents.extend(docx_docs)
+                elif file_ext in {'.md', '.markdown'}:
+                    md_docs = self._load_markdown(file_path)
+                    for doc in md_docs:
+                        doc.metadata['gcs_path'] = gcs_uri
+                    documents.extend(md_docs)
+                    
+            except Exception as e:
+                logger.error(f"Error loading {obj_name} from GCS: {e}", exc_info=True)
+                continue
+        
+        logger.info(f"Loaded {len(documents)} document sections from GCS")
+        return documents
+    
+    def _load_from_local(self) -> List[Document]:
+        """Load documents from local directory (original behavior)."""
         documents = []
         
         # Get all supported files
@@ -1098,6 +1183,18 @@ class DocumentLoader:
                 continue
         
         return documents
+    
+    def cleanup_temp_files(self):
+        """Clean up temporary files created during GCS downloads."""
+        import shutil
+        for temp_path in self.temp_files:
+            try:
+                if os.path.isdir(temp_path):
+                    shutil.rmtree(temp_path)
+                elif os.path.isfile(temp_path):
+                    os.remove(temp_path)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp file {temp_path}: {e}")
     
     def _load_docx(self, file_path: Path) -> List[Document]:
         """
@@ -1627,8 +1724,29 @@ class TechnicalRAGPipeline:
         
         # Step 1: Load Documents (PDF, DOCX, Markdown)
         print("\n[Step 1/7] 📄 Loading documents (PDF, DOCX, Markdown)...")
-        loader = DocumentLoader(data_dir)
+        
+        # Check if GCS is configured for document storage
+        from backend.config.env import settings
+        use_gcs = bool(settings.DOCS_GCS_BUCKET)
+        
+        if use_gcs:
+            print(f"   📦 Loading from GCS: gs://{settings.DOCS_GCS_BUCKET}/{settings.DOCS_GCS_PREFIX}")
+            loader = DocumentLoader(
+                gcs_bucket=settings.DOCS_GCS_BUCKET,
+                gcs_prefix=settings.DOCS_GCS_PREFIX
+            )
+        else:
+            print(f"   📁 Loading from local directory: {data_dir}")
+            loader = DocumentLoader(data_dir=data_dir)
+        
         documents = loader.load_documents()
+        
+        # Sync GCS documents to database
+        if use_gcs:
+            try:
+                _sync_gcs_documents_to_db(documents, loader)
+            except Exception as e:
+                logger.warning(f"Failed to sync GCS documents to database: {e}", exc_info=True)
         
         # Count by file type
         file_types = {}
@@ -1639,6 +1757,13 @@ class TechnicalRAGPipeline:
         type_summary = ", ".join([f"{count} {ftype.upper()}" for ftype, count in file_types.items()])
         print(f"   ✅ Loaded {len(documents)} document sections ({type_summary})")
         logger.info(f"Loaded {len(documents)} documents: {type_summary}")
+        
+        # Cleanup temp files if loaded from GCS
+        if use_gcs:
+            try:
+                loader.cleanup_temp_files()
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp files: {e}")
         
         # Step 2: Enhanced AI-Powered Preprocessing
         print("\n[Step 2/7] 🧹 Enhanced preprocessing (TOC removal, artifact fixing, normalization)...")
@@ -1960,6 +2085,120 @@ class TechnicalRAGPipeline:
         except Exception as e:
             logger.error(f"Failed to restore backup: {e}")
             return False
+
+
+def _sync_gcs_documents_to_db(documents: List[Document], loader: DocumentLoader):
+    """
+    Sync GCS documents to database.
+    Creates/updates Document and DocumentIngestionMetadata records.
+    """
+    from backend.utils.db import SessionLocal, Document as DBDocument, DocumentIngestionMetadata
+    from backend.utils.gcs_client import parse_gcs_path
+    import uuid
+    from datetime import datetime
+    
+    session = SessionLocal()
+    try:
+        # Group documents by filename (from GCS path)
+        documents_by_filename = {}
+        for doc in documents:
+            gcs_path = doc.metadata.get('gcs_path')
+            if not gcs_path:
+                continue
+            
+            filename = doc.metadata.get('file_name')
+            if not filename:
+                # Extract filename from GCS path
+                _, blob_name = parse_gcs_path(gcs_path)
+                filename = os.path.basename(blob_name) if blob_name else None
+            
+            if filename:
+                if filename not in documents_by_filename:
+                    documents_by_filename[filename] = {
+                        'gcs_path': gcs_path,
+                        'documents': []
+                    }
+                documents_by_filename[filename]['documents'].append(doc)
+        
+        logger.info(f"Syncing {len(documents_by_filename)} documents to database...")
+        
+        for filename, doc_info in documents_by_filename.items():
+            try:
+                gcs_path = doc_info['gcs_path']
+                
+                # Parse document_id from GCS path if it matches convention: {prefix}{document_id}/{filename}
+                # Example: documents/abc-123-def/filename.pdf -> document_id = abc-123-def
+                document_id = None
+                bucket_name, blob_name = parse_gcs_path(gcs_path)
+                if blob_name:
+                    parts = blob_name.split('/')
+                    if len(parts) >= 2:
+                        # Check if first part looks like a UUID/metadata_id
+                        potential_id = parts[0]
+                        if len(potential_id) > 10:  # Likely a UUID or similar ID
+                            document_id = potential_id
+                
+                # Check if Document exists
+                db_doc = session.query(DBDocument).filter(DBDocument.file_name == filename).first()
+                
+                if not db_doc:
+                    # Create new Document record
+                    db_doc = DBDocument(
+                        file_name=filename,
+                        gcs_path=gcs_path,
+                        display_name=filename,
+                        is_active=True,
+                        requires_admin_review=False,
+                    )
+                    session.add(db_doc)
+                    session.flush()  # Get the ID
+                    logger.info(f"Created Document record for {filename}")
+                else:
+                    # Update GCS path if not set
+                    if not db_doc.gcs_path:
+                        db_doc.gcs_path = gcs_path
+                        logger.info(f"Updated Document record with GCS path for {filename}")
+                
+                # Ensure DocumentIngestionMetadata exists
+                if document_id:
+                    # Try to find by ID
+                    metadata = session.query(DocumentIngestionMetadata).filter(
+                        DocumentIngestionMetadata.id == document_id
+                    ).first()
+                else:
+                    # Try to find by filename
+                    metadata = session.query(DocumentIngestionMetadata).filter(
+                        DocumentIngestionMetadata.filename == filename
+                    ).first()
+                
+                if not metadata:
+                    # Create new metadata record
+                    metadata_id = document_id or str(uuid.uuid4())
+                    metadata = DocumentIngestionMetadata(
+                        id=metadata_id,
+                        filename=filename,
+                        machine_model="GENERAL",  # Default, can be updated later
+                        status="COMPLETE",  # Assume complete if in GCS
+                        file_size_bytes=None,  # Could extract from GCS blob if needed
+                    )
+                    session.add(metadata)
+                    logger.info(f"Created DocumentIngestionMetadata for {filename}")
+                else:
+                    # Update status if needed
+                    if metadata.status not in ("COMPLETE", "READY"):
+                        metadata.status = "COMPLETE"
+                    logger.debug(f"DocumentIngestionMetadata already exists for {filename}")
+                
+            except Exception as e:
+                logger.error(f"Failed to sync {filename} to database: {e}", exc_info=True)
+                session.rollback()
+                continue
+        
+        session.commit()
+        logger.info(f"✅ Synced {len(documents_by_filename)} documents to database")
+        
+    finally:
+        session.close()
 
 
 def main():
