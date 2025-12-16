@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { resolveApiBaseUrl } from "@/config/api";
+import { resolveApiBaseUrl, ALLOW_APP_INGESTION } from "@/config/api";
 import { Upload, FileText, Trash2, Edit, Eye, EyeOff, X, Check, ExternalLink } from "lucide-react";
 
 interface Document {
@@ -36,8 +36,17 @@ const formatFileSize = (bytes: number): string => {
 };
 
 // Helper function to get status label
-const getStatusLabel = (status: string | null | undefined): string => {
-  if (!status) return '';
+const getStatusLabel = (status: string | null | undefined, chunkCount?: number): string => {
+  if (!status) {
+    // When ingestion is disabled and status is null, show "Managed externally"
+    // Otherwise show empty (for documents not yet in ingestion pipeline)
+    if (!ALLOW_APP_INGESTION) {
+      return chunkCount !== undefined && chunkCount > 0 
+        ? 'Managed externally' 
+        : 'Index status unknown';
+    }
+    return '';
+  }
   switch (status) {
     case 'PENDING_INGESTION':
       return 'Pending';
@@ -385,14 +394,22 @@ export default function AdminDocumentsPage() {
         throw new Error(extractApiError(detail) || "Failed to upload document");
       }
 
-      setUploadProgress("Ingesting document into index (this may take a moment)...");
+      if (ALLOW_APP_INGESTION) {
+        setUploadProgress("Ingesting document into index (this may take a moment)...");
+      } else {
+        setUploadProgress("Saving document metadata...");
+      }
       const result = await response.json();
       
-      setUploadProgress(
-        `✅ Complete! Processed ${result.page_count || 0} pages. Reloading index...`
-      );
-      
-      showToast(`✅ Document uploaded and ingested successfully`);
+      if (ALLOW_APP_INGESTION) {
+        setUploadProgress(
+          `✅ Complete! Processed ${result.page_count || 0} pages. Reloading index...`
+        );
+        showToast(`✅ Document uploaded and ingested successfully`);
+      } else {
+        setUploadProgress(`✅ Document uploaded. Metadata saved. Ingestion must be triggered via external GPU pipeline.`);
+        showToast(`✅ Document uploaded. Ingestion will be handled externally.`);
+      }
       await fetchDocuments();
       
       // Small delay to show completion message
@@ -502,7 +519,11 @@ export default function AdminDocumentsPage() {
       closeAllModals();
       setDeleteConfirmation("");
       
-      showToast("✅ Document deletion started. The index is rebuilding in the background.");
+      if (ALLOW_APP_INGESTION) {
+        showToast("✅ Document deletion started. The index is rebuilding in the background.");
+      } else {
+        showToast("✅ Document metadata deleted. Index rebuild must be triggered via external GPU pipeline.");
+      }
       await fetchDocuments();
     } catch (err) {
       console.error("Delete document failed:", err);
@@ -662,7 +683,7 @@ export default function AdminDocumentsPage() {
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{doc.page_count}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm">
-                      {doc.ingestion_status ? (
+                      {doc.ingestion_status || (!ALLOW_APP_INGESTION && doc.chunk_count !== undefined) ? (
                         <div className="flex flex-col gap-1">
                           <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
                             doc.ingestion_status === 'FAILED'
@@ -671,9 +692,11 @@ export default function AdminDocumentsPage() {
                               ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
                               : doc.ingestion_status === 'COMPLETE'
                               ? 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-400'
+                              : !doc.ingestion_status && !ALLOW_APP_INGESTION
+                              ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
                               : 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400'
                           }`}>
-                            {getStatusLabel(doc.ingestion_status)}
+                            {getStatusLabel(doc.ingestion_status, doc.chunk_count)}
                           </span>
                           {doc.ingestion_error && (
                             <span className="text-xs text-red-600 dark:text-red-400 truncate max-w-xs" title={doc.ingestion_error}>
@@ -750,7 +773,9 @@ export default function AdminDocumentsPage() {
                   disabled={actionSubmitting}
                 />
                 <p className="mt-1 text-xs text-muted-foreground">
-                  The document will be automatically ingested into the index after upload.
+                  {ALLOW_APP_INGESTION 
+                    ? "The document will be automatically ingested into the index after upload."
+                    : "The document will be saved for metadata. Ingestion must be triggered via external GPU pipeline."}
                 </p>
               </div>
               <div>

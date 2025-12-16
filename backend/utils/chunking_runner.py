@@ -31,6 +31,8 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
     """
     Run chunking for a document ingestion metadata record.
     
+    INDEX-WRITE PATH: creates chunks for embedding
+    
     This function:
     1. Loads the DocumentIngestionMetadata record
     2. Sets status to CHUNKING
@@ -47,6 +49,21 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
     Returns:
         metadata_id if successful, None on failure
     """
+    # Check if app-based ingestion is allowed
+    from backend.config.env import settings
+    if not settings.allow_app_ingestion:
+        logger.warning(
+            {
+                "event": "ingestion_blocked_from_app",
+                "metadata_id": metadata_id,
+                "request_id": request_id,
+                "function": "run_chunking",
+            }
+        )
+        raise RuntimeError(
+            "Ingestion is disabled in this environment. Chunking must be triggered via external GPU pipeline."
+        )
+    
     session: Optional[Session] = None
     document = None
     try:

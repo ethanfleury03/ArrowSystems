@@ -22,6 +22,18 @@ import type { NextRequest } from 'next/server';
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   
+  // Early bypass for static assets and ACME challenge paths
+  // These must NEVER be redirected for TLS provisioning and SEO
+  if (
+    pathname.startsWith('/.well-known/') ||
+    pathname === '/robots.txt' ||
+    pathname === '/sitemap.xml' ||
+    pathname === '/favicon.ico' ||
+    pathname.startsWith('/_next/')
+  ) {
+    return NextResponse.next();
+  }
+  
   // Public routes that don't require authentication
   const publicRoutes = [
     '/login',
@@ -67,9 +79,12 @@ export const config = {
      * Match all request paths except for the ones starting with:
      * - _next/static (static files)
      * - _next/image (image optimization files)
+     * - _next/ (all Next.js internal routes)
+     * - .well-known/ (ACME challenges, security.txt, etc.)
      * - favicon.ico (favicon file)
-     * - public files (public folder)
+     * - robots.txt, sitemap.xml (SEO files)
+     * - public files (public folder - images, etc.)
      */
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    '/((?!_next/|\\.well-known/|favicon\\.ico|robots\\.txt|sitemap\\.xml|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 };

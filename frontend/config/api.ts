@@ -1,5 +1,10 @@
 import { isDev, isProd } from '@/lib/env';
 
+// Ingestion safety flag - controls whether ingestion actions are available in the UI
+// This should ONLY be true in dedicated GPU ingestion environments, NOT in production
+export const ALLOW_APP_INGESTION =
+  process.env.NEXT_PUBLIC_ALLOW_APP_INGESTION === "true";
+
 // With IAM proxy architecture, all requests go through Next.js /api routes
 // The /api routes handle IAM authentication to the Cloud Run backend
 const API_BASE_URL = '/api';
