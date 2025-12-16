@@ -79,6 +79,64 @@ export function ChatInterface() {
     scrollToBottom()
   }, [messages])
 
+  // Polling functions for RAG status (defined before useEffect that uses them)
+  const checkRagStatus = useCallback(async () => {
+    try {
+      const ragResponse = await fetch('/api/rag/status', {
+        credentials: "include"
+      })
+      if (ragResponse.ok) {
+        const ragData = await ragResponse.json()
+        // Use new status format: "initializing" | "ready" | "error"
+        const status = ragData.status || (ragData.initialized ? 'ready' : 'initializing')
+        const initialized = status === 'ready'
+        
+        setRagEnabled(initialized)
+        setRagStatus(status as 'initializing' | 'ready' | 'error')
+        setRagLastError(ragData.last_error || null)
+        setCheckingRag(false)
+        
+        console.log(`[RAG STATUS] Status changed to: ${status}`, ragData)
+        
+        // Stop polling when ready or error (but keep checking periodically for errors)
+        if (status === 'ready') {
+          // Continue polling but less frequently to catch errors
+          if (ragPollingIntervalRef.current) {
+            clearInterval(ragPollingIntervalRef.current)
+            ragPollingIntervalRef.current = setInterval(() => {
+              checkRagStatus()
+            }, 30000) // Poll every 30 seconds when ready
+          }
+        }
+      } else {
+        console.warn("RAG status check returned non-OK:", ragResponse.status)
+        setCheckingRag(false)
+      }
+    } catch (error) {
+      console.error("Failed to poll RAG status:", error)
+      setCheckingRag(false)
+    }
+  }, [])
+  
+  const startRagPolling = useCallback(() => {
+    if (ragPollingIntervalRef.current) return // Already polling
+    
+    // Initial check
+    checkRagStatus()
+    
+    // Poll every 15 seconds
+    ragPollingIntervalRef.current = setInterval(() => {
+      checkRagStatus()
+    }, 15000)
+  }, [checkRagStatus])
+
+  const stopRagPolling = () => {
+    if (ragPollingIntervalRef.current) {
+      clearInterval(ragPollingIntervalRef.current)
+      ragPollingIntervalRef.current = null
+    }
+  }
+
   // Fetch user info and RAG status, show onboarding message on mount
   useEffect(() => {
     const fetchUserAndShowOnboarding = async () => {
@@ -130,64 +188,6 @@ export function ChatInterface() {
       stopRagPolling()
     }
   }, [messages.length, startRagPolling]) // Re-check when messages change (e.g., when loading a conversation)
-  
-  // Polling functions for RAG status
-  const checkRagStatus = useCallback(async () => {
-    try {
-      const ragResponse = await fetch('/api/rag/status', {
-        credentials: "include"
-      })
-      if (ragResponse.ok) {
-        const ragData = await ragResponse.json()
-        // Use new status format: "initializing" | "ready" | "error"
-        const status = ragData.status || (ragData.initialized ? 'ready' : 'initializing')
-        const initialized = status === 'ready'
-        
-        setRagEnabled(initialized)
-        setRagStatus(status as 'initializing' | 'ready' | 'error')
-        setRagLastError(ragData.last_error || null)
-        setCheckingRag(false)
-        
-        console.log(`[RAG STATUS] Status changed to: ${status}`, ragData)
-        
-        // Stop polling when ready or error (but keep checking periodically for errors)
-        if (status === 'ready') {
-          // Continue polling but less frequently to catch errors
-          if (ragPollingIntervalRef.current) {
-            clearInterval(ragPollingIntervalRef.current)
-            ragPollingIntervalRef.current = setInterval(() => {
-              checkRagStatus()
-            }, 30000) // Poll every 30 seconds when ready
-          }
-        }
-      } else {
-        console.warn("RAG status check returned non-OK:", ragResponse.status)
-        setCheckingRag(false)
-      }
-    } catch (error) {
-      console.error("Failed to poll RAG status:", error)
-      setCheckingRag(false)
-    }
-  }, [])
-  
-  const startRagPolling = useCallback(() => {
-    if (ragPollingIntervalRef.current) return // Already polling
-    
-    // Initial check
-    checkRagStatus()
-    
-    // Poll every 15 seconds
-    ragPollingIntervalRef.current = setInterval(() => {
-      checkRagStatus()
-    }, 15000)
-  }, [checkRagStatus])
-  
-  const stopRagPolling = () => {
-    if (ragPollingIntervalRef.current) {
-      clearInterval(ragPollingIntervalRef.current)
-      ragPollingIntervalRef.current = null
-    }
-  }
 
   const handleLogout = async () => {
     try {
