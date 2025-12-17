@@ -89,8 +89,9 @@ def delete_document_metadata_simple(metadata_id: str) -> dict:
         if doc_record and doc_record.gcs_path:
             gcs_path = doc_record.gcs_path
         
-        # Delete chunks from vector index BEFORE deleting database records
-        # This way we can still access the metadata if needed for logging
+        # Delete chunks from vector index (best-effort, never blocks deletion)
+        # This happens BEFORE deleting database records so we can still access metadata for logging
+        # If index cleanup fails, we continue with DB deletion anyway
         try:
             # Import here to avoid circular dependencies
             from backend.rag_pipeline import rag_pipeline
@@ -197,8 +198,11 @@ def delete_document_metadata_simple(metadata_id: str) -> dict:
                             f"from index for metadata_id {metadata_id}"
                         )
         except Exception as e:
-            # Don't fail the entire deletion if index deletion fails
-            logger.warning(f"Failed to delete chunks from vector index (index may not be available): {e}")
+            # Never fail the entire deletion if index deletion fails - this is best-effort only
+            logger.warning(
+                f"Failed to delete chunks from vector index (index may not be available, continuing with DB deletion): {e}",
+                exc_info=True
+            )
         
         # Delete Document row (if exists)
         if doc_record:
@@ -223,13 +227,38 @@ def delete_document_metadata_simple(metadata_id: str) -> dict:
             except Exception as e:
                 logger.warning(f"Failed to delete chunks file {chunks_file}: {e}")
         
-        # Delete GCS file (best-effort)
+        # Delete GCS file (best-effort, never blocks deletion)
+        # Handle 404 gracefully - object may already be deleted or never existed (orphaned record)
         if gcs_path:
             try:
                 if delete_object(gcs_path):
                     result["deleted_gcs"] = True
+                    logger.info(f"Deleted GCS file: {gcs_path}")
+                else:
+                    # delete_object returns False on error, but 404 is handled as success
+                    logger.debug(f"GCS file deletion returned False (may not exist): {gcs_path}")
             except Exception as e:
-                logger.warning(f"Failed to delete GCS file {gcs_path}: {e}")
+                # Never fail deletion due to GCS errors - log and continue
+                error_str = str(e)
+                if "404" in error_str or "NotFound" in str(type(e).__name__):
+                    logger.debug(f"GCS object not found (already deleted or orphaned): {gcs_path}")
+                    result["deleted_gcs"] = True  # Consider 404 as success
+                else:
+                    logger.warning(f"Failed to delete GCS file {gcs_path} (non-blocking): {e}")
+        
+        # Also try to delete from metadata.file_path if it's a GCS path
+        if metadata.file_path and metadata.file_path.startswith('gs://'):
+            if metadata.file_path != gcs_path:  # Avoid duplicate deletion
+                try:
+                    if delete_object(metadata.file_path):
+                        result["deleted_gcs"] = True
+                        logger.info(f"Deleted GCS file from metadata.file_path: {metadata.file_path}")
+                except Exception as e:
+                    error_str = str(e)
+                    if "404" in error_str or "NotFound" in str(type(e).__name__):
+                        logger.debug(f"GCS object from metadata.file_path not found: {metadata.file_path}")
+                    else:
+                        logger.warning(f"Failed to delete GCS file from metadata.file_path (non-blocking): {e}")
         
         # Also try to delete from metadata.file_path if it exists
         if metadata.file_path and os.path.exists(metadata.file_path):

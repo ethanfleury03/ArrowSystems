@@ -69,8 +69,18 @@ class Settings:
         Set ARROW_ALLOW_APP_INGESTION=true ONLY in dedicated GPU ingestion environments,
         NOT in the main production frontend/backend.
         """
-        allow_ingestion_str = os.getenv("ARROW_ALLOW_APP_INGESTION", "false").lower()
+        # Robust parsing: accept "true/false", "1/0", "yes/no", "on/off", case-insensitive
+        allow_ingestion_str = os.getenv("ARROW_ALLOW_APP_INGESTION", "false").lower().strip()
         self.allow_app_ingestion = allow_ingestion_str in {"true", "1", "yes", "on"}
+        
+        # Log configuration at startup
+        env_var_present = "ARROW_ALLOW_APP_INGESTION" in os.environ
+        logger.info(
+            f"ARROW_ALLOW_APP_INGESTION configuration: "
+            f"env_var_present={env_var_present}, "
+            f"raw_value={os.getenv('ARROW_ALLOW_APP_INGESTION', 'NOT_SET')}, "
+            f"parsed_value={self.allow_app_ingestion}"
+        )
         
         if self.allow_app_ingestion:
             logger.warning("⚠️ WARNING: App-based ingestion is ENABLED. This should only be set in dedicated GPU ingestion environments.")

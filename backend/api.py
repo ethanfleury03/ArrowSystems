@@ -3239,19 +3239,17 @@ async def get_user_documents(request: Request):
 @app.get("/admin/documents")
 async def get_all_documents(request: Request):
     """
-    Get all documents in the index with enhanced metadata.
-    Returns list of documents with metadata including status, machine_model, etc.
-    Also includes documents in the ingestion pipeline (Phase 2).
-
+    Get all documents from database (source of truth).
+    
+    Returns list of documents from DocumentIngestionMetadata LEFT JOIN Document.
+    This endpoint uses ONLY the database as the source of truth - no merging
+    with vector index, filesystem, or GCS bucket scans.
+    
     IMPORTANT:
-    - This admin listing endpoint should work even if the RAG pipeline
-      has not been initialized. It reads from the database and document
-      metadata tables directly.
-    - RAG pipeline readiness is enforced separately on query/ingestion
-      endpoints (e.g. /query, /admin/documents/upload processing, etc.).
-    - When allow_app_ingestion is False, ingestion statuses are treated as
-      read-only and "in progress" statuses are normalized to "COMPLETE" since
-      ingestion is managed externally.
+    - Database is the single source of truth for document listing
+    - Works even if RAG pipeline is not initialized
+    - Ingestion status comes from DB only (never inferred from chunk_count)
+    - Use /admin/documents/diagnostics for storage/index mismatch analysis
     """
     # Log ingestion safety configuration once at startup (first call)
     if not hasattr(get_all_documents, '_logged_ingestion_config'):
@@ -3260,22 +3258,13 @@ async def get_all_documents(request: Request):
             allow_app_ingestion=settings.allow_app_ingestion,
             message=f"Admin documents endpoint: allow_app_ingestion={settings.allow_app_ingestion}"
         )
-        if not settings.allow_app_ingestion:
-            logger.info(
-                "admin_documents_ingestion_readonly",
-                message="App-based ingestion is disabled. All ingestion statuses are treated as read-only/externally managed."
-            )
+        logger.info("admin_documents_db_source_of_truth", message="Document listing uses database as single source of truth")
         get_all_documents._logged_ingestion_config = True
     
     try:
-        # NOTE: This admin listing endpoint should be available even when the
-        # RAG pipeline is not initialized. We only use the pipeline for
-        # optional enrichment (chunk counts, corpus metadata). The core list
-        # comes from the database / ingestion metadata.
-        global rag_pipeline, db_manager
+        global db_manager
 
-        # Enforce admin authentication using the same pattern as other /admin
-        # endpoints: user JWT is passed in X-User-Token by the frontend API.
+        # Enforce admin authentication
         if not db_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -3291,7 +3280,6 @@ async def get_all_documents(request: Request):
 
         try:
             from .security import decode_access_token
-
             payload = decode_access_token(token)
         except jwt.ExpiredSignatureError:
             raise HTTPException(
@@ -3321,467 +3309,89 @@ async def get_all_documents(request: Request):
                 detail="Admin privileges required",
             )
 
-        from .utils.document_metadata import get_document_metadata
-        
-        # Get ingestion metadata for all documents in the pipeline and log basic stats.
-        ingestion_metadata_map = {}
-
-        def _get_ingestion_metadata():
+        # Query database: DocumentIngestionMetadata LEFT JOIN Document
+        def _get_documents_from_db():
             with SessionLocal() as session:
-                from backend.utils.db import DocumentIngestionMetadata
-                all_metadata = session.query(DocumentIngestionMetadata).all()
-                logger.info(
-                    "admin_documents_ingestion_metadata",
-                    total=len(all_metadata),
+                from backend.utils.db import DocumentIngestionMetadata, Document
+                from sqlalchemy.orm import joinedload
+                
+                # Query all metadata records with optional Document join
+                query = (
+                    session.query(DocumentIngestionMetadata, Document)
+                    .outerjoin(Document, DocumentIngestionMetadata.filename == Document.file_name)
+                    .order_by(DocumentIngestionMetadata.created_at.desc())
                 )
-                return {
-                    meta.filename: {
-                        "ingestion_status": meta.status,
+                
+                results = query.all()
+                logger.info(f"Found {len(results)} documents in database")
+                
+                documents = []
+                for meta, doc in results:
+                    # Get GCS path from Document if available, otherwise from metadata.file_path
+                    gcs_path = None
+                    if doc and doc.gcs_path:
+                        gcs_path = doc.gcs_path
+                    elif meta.file_path and meta.file_path.startswith('gs://'):
+                        gcs_path = meta.file_path
+                    
+                    # Get machine model - prefer Document, fallback to metadata
+                    machine_model = None
+                    if doc and doc.machine_model:
+                        # Document.machine_model can be JSON array string or single string
+                        import json
+                        try:
+                            machine_model = json.loads(doc.machine_model) if doc.machine_model.startswith('[') else [doc.machine_model]
+                        except:
+                            machine_model = [doc.machine_model] if doc.machine_model else None
+                    elif meta.machine_model:
+                        machine_model = [meta.machine_model]
+                    
+                    # Get file type from filename
+                    file_ext = os.path.splitext(meta.filename)[1].lower()
+                    file_type = file_ext[1:] if file_ext else 'pdf'
+                    
+                    # Normalize ingestion status when app ingestion is disabled
+                    raw_status = meta.status
+                    if not settings.allow_app_ingestion:
+                        PROGRESS_STATUSES = {
+                            "PENDING_INGESTION", "CHUNKING", "READY_FOR_EMBEDDING",
+                            "EMBEDDING", "REBUILDING_INDEX", "DELETING"
+                        }
+                        if raw_status in PROGRESS_STATUSES:
+                            final_status = "COMPLETE"
+                        else:
+                            final_status = raw_status
+                    else:
+                        final_status = raw_status
+                    
+                    documents.append({
+                        "metadata_id": meta.id,
+                        "document_id": doc.id if doc else None,
+                        "filename": meta.filename,
+                        "display_name": doc.display_name if doc else meta.filename,
+                        "gcs_path": gcs_path,
+                        "file_path": meta.file_path,
+                        "file_type": file_type,
+                        "size_bytes": doc.file_size_bytes if doc else meta.file_size_bytes,
+                        "uploaded_date": meta.created_at.isoformat() if meta.created_at else None,
+                        "chunk_count": 0,  # Not available from DB - use diagnostics endpoint for index info
+                        "page_count": 0,  # Not available from DB - use diagnostics endpoint for index info
+                        "is_active": doc.is_active if doc else False,
+                        "machine_model": machine_model,
+                        "missing_machine_model": machine_model is None or len(machine_model) == 0,
+                        "requires_admin_review": doc.requires_admin_review if doc else False,
+                        "category": doc.category if doc else None,
+                        "product_family": doc.product_family if doc else None,
+                        "ingestion_status": final_status,
                         "ingestion_metadata_id": meta.id,
                         "ingestion_error": meta.error_message,
-                        "ingestion_created_at": meta.created_at.isoformat() if meta.created_at else None,
-                    }
-                    for meta in all_metadata
-                }
-
-        ingestion_metadata_map = await run_sync(_get_ingestion_metadata)
+                        "created_at": meta.created_at.isoformat() if meta.created_at else None,
+                        "updated_at": meta.updated_at.isoformat() if meta.updated_at else None,
+                    })
+                
+                return documents
         
-        documents = []
-        
-        # Group chunks by document filename and count pages
-        # Primary source: corpus_nodes (most reliable)
-        doc_chunks = {}
-        doc_pages = {}
-        seen_filenames = set()
-
-        # Determine whether the RAG pipeline is available for enrichment.
-        pipeline_available = rag_pipeline is not None and rag_pipeline.is_initialized()
-        
-        if pipeline_available and hasattr(rag_pipeline.orchestrator, 'retriever') and rag_pipeline.orchestrator.retriever:
-            retriever = rag_pipeline.orchestrator.retriever
-            if hasattr(retriever, 'corpus_nodes') and retriever.corpus_nodes:
-                logger.info(f"Found {len(retriever.corpus_nodes)} nodes in corpus_nodes")
-                for node_wrapper in retriever.corpus_nodes:
-                    node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
-                    if hasattr(node, 'metadata') and node.metadata:
-                        filename = node.metadata.get('file_name', 'Unknown')
-                        if filename and filename != 'Unknown':
-                            seen_filenames.add(filename)
-                            if filename not in doc_chunks:
-                                doc_chunks[filename] = []
-                                doc_pages[filename] = set()
-                            doc_chunks[filename].append(node)
-                            # Track unique pages
-                            page_label = node.metadata.get('page_label')
-                            if page_label:
-                                try:
-                                    page_num = int(str(page_label).split('.')[0])  # Get page number
-                                    doc_pages[filename].add(page_num)
-                                except:
-                                    pass
-        
-        # Get document IDs from ALL sources (corpus_nodes, docstore, filesystem, AND DB)
-        # Combine all sources to ensure we get all documents
-        all_filenames = set(seen_filenames)  # Start with corpus_nodes filenames
-        
-        # Build a filename -> doc_id map from docstore for O(1) lookups (optimization)
-        filename_to_doc_id = {}
-        docstore = None
-        if pipeline_available and rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'docstore') and rag_pipeline.orchestrator.index.docstore:
-            docstore = rag_pipeline.orchestrator.index.docstore
-            docstore_ids = list(docstore.docs.keys())
-            logger.info(f"Found {len(docstore_ids)} documents in docstore")
-            
-            # Build filename -> doc_id map in one pass
-            for doc_id in docstore_ids[:1000]:  # Limit to prevent memory issues
-                try:
-                    doc = docstore.get_document(doc_id)
-                    if hasattr(doc, 'metadata') and doc.metadata:
-                        filename = doc.metadata.get('file_name', doc_id)
-                        if filename and filename != doc_id:
-                            all_filenames.add(filename)
-                            if filename not in filename_to_doc_id:  # Keep first match
-                                filename_to_doc_id[filename] = doc_id
-                except:
-                    pass
-        
-        # Source 2: Get from filesystem (most comprehensive)
-        # In test mode, only scan test directories
-        from backend.utils.test_mode import is_test_mode, get_original_pdfs_dir
-        logger.info("Scanning filesystem for documents...")
-        
-        if is_test_mode():
-            # In test mode, only scan test directories
-            original_pdfs_dir = get_original_pdfs_dir()
-            if os.path.exists(original_pdfs_dir):
-                for filename in os.listdir(original_pdfs_dir):
-                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
-                        file_path = os.path.join(original_pdfs_dir, filename)
-                        if os.path.isfile(file_path):
-                            all_filenames.add(filename)
-        else:
-            # Production mode: scan production data directory
-            data_dir = "data"
-            if os.path.exists(data_dir):
-                for filename in os.listdir(data_dir):
-                    if filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
-                        file_path = os.path.join(data_dir, filename)
-                        if os.path.isfile(file_path):
-                            all_filenames.add(filename)
-        
-        # Source 3: Ensure all filenames from ingestion metadata are included,
-        # even if they are not yet in the vector index or filesystem. This
-        # makes the admin list reflect the database state, independent of RAG.
-        if ingestion_metadata_map:
-            for filename in ingestion_metadata_map.keys():
-                if filename:
-                    all_filenames.add(filename)
-
-        logger.info(
-            "admin_documents_sources_summary",
-            total_unique=len(all_filenames),
-            from_corpus=len(seen_filenames),
-            from_ingestion=len(ingestion_metadata_map),
-        )
-        
-        # Convert to list for processing
-        doc_ids = list(all_filenames)
-        
-        if seen_filenames:
-            logger.info(f"Found {len(seen_filenames)} documents via corpus_nodes")
-        if docstore:
-            logger.info(f"Found documents in docstore")
-        logger.info(f"Total unique documents: {len(doc_ids)}")
-        
-        if not doc_ids:
-            logger.warning(
-                "admin_documents_no_docs_found",
-                message="No documents found in corpus_nodes, docstore, filesystem, or ingestion metadata",
-            )
-            return {"documents": [], "total": 0}
-        
-        # Build document list (optimized - no nested loops)
-        for filename in doc_ids[:1000]:  # Limit to first 1000
-            try:
-                # Get document from docstore using O(1) lookup instead of nested loop
-                doc = None
-                if docstore and filename in filename_to_doc_id:
-                    try:
-                        doc = docstore.get_document(filename_to_doc_id[filename])
-                    except:
-                        pass
-                
-                # Get file path and size
-                file_path = os.path.join("data", filename)
-                size_bytes = 0
-                if os.path.exists(file_path):
-                    size_bytes = os.path.getsize(file_path)
-                
-                # Count chunks for this document - try multiple methods for accuracy
-                chunk_count = 0
-                
-                # Method 1: Query vector store directly for accurate count (source of truth)
-                if pipeline_available and rag_pipeline.orchestrator.index and hasattr(rag_pipeline.orchestrator.index, 'vector_store'):
-                    try:
-                        vector_store = rag_pipeline.orchestrator.index.vector_store
-                        if vector_store:
-                            # Try to query vector store by metadata
-                            # For Qdrant, we can use scroll or query with filter
-                            if hasattr(vector_store, 'client') and hasattr(vector_store, 'collection_name'):
-                                # Qdrant vector store
-                                try:
-                                    from qdrant_client import models
-                                    qdrant_client = vector_store.client
-                                    collection_name = vector_store.collection_name
-                                    
-                                    # Query with metadata filter for this filename
-                                    # Use scroll to get all points with this filename
-                                    scroll_result = qdrant_client.scroll(
-                                        collection_name=collection_name,
-                                        scroll_filter=models.Filter(
-                                            must=[
-                                                models.FieldCondition(
-                                                    key="metadata.file_name",
-                                                    match=models.MatchValue(value=filename)
-                                                )
-                                            ]
-                                        ),
-                                        limit=10000,  # Large limit to get all chunks
-                                        with_payload=True,
-                                        with_vectors=False
-                                    )
-                                    # Count the points returned
-                                    # scroll_result is a tuple: (points, next_page_offset)
-                                    if scroll_result and len(scroll_result) >= 1:
-                                        points = scroll_result[0]  # First element is list of points
-                                        chunk_count = len(points) if points else 0
-                                        if chunk_count > 0:
-                                            logger.debug(f"Got chunk count {chunk_count} from Qdrant for {filename}")
-                                except ImportError:
-                                    logger.debug("qdrant_client not available for chunk counting")
-                                except Exception as e:
-                                    logger.debug(f"Failed to query Qdrant for chunk count {filename}: {e}")
-                    except Exception as e:
-                        logger.debug(f"Failed to get chunk count from vector store for {filename}: {e}")
-                
-                # Method 2: Fallback to corpus_nodes count if vector store query failed
-                if chunk_count == 0:
-                    chunk_count = len(doc_chunks.get(filename, []))
-                    if chunk_count > 0:
-                        logger.debug(f"Got chunk count {chunk_count} from corpus_nodes for {filename}")
-                
-                # If still 0, check if document exists in filesystem (it might just not be indexed yet)
-                if chunk_count == 0 and os.path.exists(file_path):
-                    logger.debug(f"Document {filename} exists but has 0 chunks - may not be indexed yet")
-                
-                # Get page count - try multiple methods for accuracy
-                page_count = 0
-                
-                # Method 1: Try to get actual page count from the file itself
-                if os.path.exists(file_path):
-                    try:
-                        if filename.lower().endswith('.pdf'):
-                            # For PDFs: use PyMuPDF to get actual page count
-                            import fitz  # PyMuPDF
-                            pdf_doc = fitz.open(file_path)
-                            page_count = len(pdf_doc)
-                            pdf_doc.close()
-                            logger.debug(f"Got page count {page_count} from PDF file for {filename}")
-                        elif filename.lower().endswith('.docx'):
-                            # For DOCX: estimate from paragraph count (rough approximation)
-                            try:
-                                from docx import Document as DocxDocument
-                                docx_doc = DocxDocument(file_path)
-                                # Rough estimate: ~20-30 paragraphs per page for technical docs
-                                paragraph_count = len(docx_doc.paragraphs)
-                                page_count = max(1, paragraph_count // 25)
-                                logger.debug(f"Got estimated page count {page_count} from DOCX file for {filename} ({paragraph_count} paragraphs)")
-                            except ImportError:
-                                logger.warning("python-docx not available for DOCX page count")
-                            except Exception as e:
-                                logger.warning(f"Failed to get page count from DOCX {filename}: {e}")
-                    except Exception as e:
-                        logger.warning(f"Failed to get page count from file {filename}: {e}")
-                        # Fall through to other methods
-                
-                # Method 2: Use page count from chunks if available (and file method didn't work)
-                if page_count == 0:
-                    page_count = len(doc_pages.get(filename, set()))
-                    if page_count > 0:
-                        logger.debug(f"Got page count {page_count} from chunks for {filename}")
-                
-                # Method 3: Fallback estimate (only if both methods failed)
-                if page_count == 0:
-                    # Estimate from chunk count (rough: ~5 chunks per page)
-                    page_count = max(1, chunk_count // 5)
-                    logger.warning(f"Using estimated page count {page_count} for {filename} (from {chunk_count} chunks)")
-                
-                # Get file type
-                file_ext = os.path.splitext(filename)[1].lower()
-                file_type = file_ext[1:] if file_ext else 'pdf'  # Remove dot
-                
-                # Get metadata from database (Phase 1: migrated from document_metadata.json)
-                doc_metadata = get_document_metadata(filename)
-                machine_model = doc_metadata.get("machine_model")
-                # Normalize: ensure machine_model is a list (for backwards compatibility with single string)
-                if isinstance(machine_model, str):
-                    machine_model = [machine_model]
-                elif machine_model is None:
-                    machine_model = None
-                # machine_model is now either None or a list of strings
-                
-                # Get ingestion status if available
-                ingestion_info = ingestion_metadata_map.get(filename, {})
-                
-                # Log sample status for debugging (first document only)
-                if not hasattr(get_all_documents, '_logged_sample_status') and ingestion_info:
-                    logger.info(
-                        "admin_documents_sample_status",
-                        filename=filename,
-                        raw_status=ingestion_info.get("ingestion_status"),
-                        allow_app_ingestion=settings.allow_app_ingestion,
-                        message=f"Sample document status: {ingestion_info.get('ingestion_status')}"
-                    )
-                    get_all_documents._logged_sample_status = True
-                
-                # Backfill metadata for legacy documents (exist in index but no metadata entry)
-                # This ensures all documents have proper status tracking
-                # Check if document is in index by checking multiple sources:
-                # 1. In corpus_nodes (seen_filenames)
-                # 2. In docstore (filename_to_doc_id)
-                # 3. Has chunks in the index (chunk_count > 0)
-                # 4. Document exists in filesystem with pages (legacy ingestion assumption)
-                is_in_corpus = filename in seen_filenames
-                is_in_docstore = filename in filename_to_doc_id
-                has_chunks = chunk_count > 0
-                file_exists = os.path.exists(file_path)
-                has_pages = page_count > 0
-                
-                # Document is in index if it's in corpus/docstore/has chunks, OR if it exists with pages (legacy assumption)
-                is_in_index = is_in_corpus or is_in_docstore or has_chunks or (file_exists and has_pages)
-                
-                # If no status and document appears to be in index, backfill it
-                if not ingestion_info.get("ingestion_status"):
-                    if is_in_index:
-                        logger.debug(
-                            f"Backfilling metadata for legacy document: {filename} "
-                            f"(in_corpus={is_in_corpus}, in_docstore={is_in_docstore}, has_chunks={has_chunks}, "
-                            f"chunk_count={chunk_count}, file_exists={file_exists}, has_pages={has_pages}, page_count={page_count})"
-                        )
-                        # Document exists in index but no metadata = legacy ingestion, backfill as COMPLETE
-                        def _backfill_metadata():
-                            with SessionLocal() as session:
-                                from backend.utils.db import DocumentIngestionMetadata
-                                import uuid
-                                
-                                # Check if metadata was just created (race condition protection)
-                                existing = session.query(DocumentIngestionMetadata).filter_by(filename=filename).first()
-                                if existing:
-                                    return {
-                                        "ingestion_status": existing.status,
-                                        "ingestion_metadata_id": existing.id,
-                                        "ingestion_error": existing.error_message,
-                                    }
-                                
-                                # Create metadata entry for legacy document
-                                metadata_id = str(uuid.uuid4())
-                                legacy_metadata = DocumentIngestionMetadata(
-                                    id=metadata_id,
-                                    filename=filename,
-                                    machine_model=machine_model[0] if machine_model and len(machine_model) > 0 else "UNKNOWN",
-                                    status="COMPLETE",  # Legacy documents are already ingested
-                                    file_path=file_path if os.path.exists(file_path) else None,
-                                    file_size_bytes=size_bytes if size_bytes > 0 else None,
-                                )
-                                session.add(legacy_metadata)
-                                session.commit()
-                                session.refresh(legacy_metadata)
-                                
-                                logger.debug(f"backfilled_legacy_document_metadata", filename=filename, metadata_id=metadata_id)
-                                
-                                return {
-                                    "ingestion_status": legacy_metadata.status,
-                                    "ingestion_metadata_id": legacy_metadata.id,
-                                    "ingestion_error": legacy_metadata.error_message,
-                                }
-                        
-                        # Backfill metadata (only if document is in index)
-                        try:
-                            backfilled_info = await run_sync(_backfill_metadata)
-                            if backfilled_info:
-                                ingestion_info = backfilled_info
-                                # Update the map so subsequent documents don't try to backfill again
-                                ingestion_metadata_map[filename] = backfilled_info
-                                logger.debug(f"Successfully backfilled metadata for {filename}: status={backfilled_info.get('ingestion_status')}")
-                            else:
-                                logger.warning(f"Backfill returned None for {filename}")
-                        except Exception as e:
-                            logger.error(f"Failed to backfill metadata for {filename}: {e}", exc_info=True)
-                    else:
-                        # Document not in index - log for debugging
-                        logger.debug(f"Document {filename} not in index (in_corpus={is_in_corpus}, in_docstore={is_in_docstore}, has_chunks={has_chunks}, chunk_count={chunk_count})")
-                
-                # Use metadata status from database (read-only, never infer from chunk_count)
-                # If status is missing, return None rather than inferring from chunk_count
-                # This ensures status is only set by actual ingestion operations, not by index state
-                raw_status = ingestion_info.get("ingestion_status") if ingestion_info else None
-                
-                # Normalize status when app ingestion is disabled
-                # In app environments, treat "in progress" statuses as externally managed
-                if not settings.allow_app_ingestion:
-                    # Define statuses that indicate "in progress" ingestion
-                    PROGRESS_STATUSES = {
-                        "PENDING_INGESTION",
-                        "CHUNKING",
-                        "READY_FOR_EMBEDDING",
-                        "EMBEDDING",
-                        "REBUILDING_INDEX",
-                        "DELETING",
-                    }
-                    
-                    if raw_status in PROGRESS_STATUSES:
-                        # In app environments, we treat these as externally managed
-                        # The index is built by external GPU pipeline, so these statuses
-                        # are stale and should be normalized to COMPLETE
-                        final_status = "COMPLETE"
-                    else:
-                        final_status = raw_status
-                else:
-                    # When ingestion is enabled, return status as-is
-                    final_status = raw_status
-                
-                documents.append({
-                    "filename": filename,
-                    "size_bytes": size_bytes,
-                    "uploaded_date": doc_metadata.get("last_ingestion_date"),
-                    "chunk_count": chunk_count,
-                    "page_count": page_count,
-                    "file_path": file_path,
-                    "file_type": file_type,
-                    "is_active": doc_metadata.get("is_active", True),
-                    "machine_model": machine_model,  # Now a list or None
-                    "missing_machine_model": machine_model is None or (isinstance(machine_model, list) and len(machine_model) == 0),
-                    "requires_admin_review": doc_metadata.get("requires_admin_review", False),
-                    "category": doc_metadata.get("category"),
-                    "product_family": doc_metadata.get("product_family"),
-                    "ingestion_status": final_status,
-                    "ingestion_metadata_id": ingestion_info.get("ingestion_metadata_id"),
-                    "ingestion_error": ingestion_info.get("ingestion_error"),
-                })
-            except Exception as e:
-                logger.debug(f"Error processing document {filename}: {e}")
-                continue
-        
-        # Add documents that are in ingestion pipeline but not yet in index
-        for filename, ingestion_info in ingestion_metadata_map.items():
-            # Check if this document is already in the list
-            if not any(doc['filename'] == filename for doc in documents):
-                # Document is in ingestion pipeline but not in index yet
-                raw_status = ingestion_info.get("ingestion_status")
-                
-                # Normalize status when app ingestion is disabled
-                if not settings.allow_app_ingestion:
-                    PROGRESS_STATUSES = {
-                        "PENDING_INGESTION",
-                        "CHUNKING",
-                        "READY_FOR_EMBEDDING",
-                        "EMBEDDING",
-                        "REBUILDING_INDEX",
-                        "DELETING",
-                    }
-                    if raw_status in PROGRESS_STATUSES:
-                        final_status = "COMPLETE"
-                    else:
-                        final_status = raw_status
-                else:
-                    final_status = raw_status
-                
-                documents.append({
-                    "filename": filename,
-                    "size_bytes": None,
-                    "uploaded_date": ingestion_info.get("ingestion_created_at"),
-                    "chunk_count": 0,
-                    "page_count": 0,
-                    "file_path": None,
-                    "file_type": None,
-                    "is_active": False,  # Not active until fully ingested
-                    "machine_model": None,
-                    "missing_machine_model": True,
-                    "requires_admin_review": False,
-                    "category": None,
-                    "product_family": None,
-                    "ingestion_status": final_status,
-                    "ingestion_metadata_id": ingestion_info.get("ingestion_metadata_id"),
-                    "ingestion_error": ingestion_info.get("ingestion_error"),
-                })
-        
-        # Remove duplicates by filename
-        seen = set()
-        unique_docs = []
-        for doc in documents:
-            if doc['filename'] not in seen:
-                seen.add(doc['filename'])
-                unique_docs.append(doc)
+        documents = await run_sync(_get_documents_from_db)
         
         # Include allowed machine models in response for frontend dropdown
         try:
@@ -3791,8 +3401,8 @@ async def get_all_documents(request: Request):
             allowed_machine_models = []
         
         return {
-            "documents": unique_docs,
-            "total": len(unique_docs),
+            "documents": documents,
+            "total": len(documents),
             "allowed_machine_models": allowed_machine_models
         }
         
@@ -4373,24 +3983,387 @@ async def delete_document_by_metadata_id(
             request=http_request,
         )
         
-        # Return 204 No Content with optional warning header if ingestion disabled
+        # Return 204 No Content
+        # Deletion always succeeds regardless of ingestion flag - index cleanup is best-effort
         from fastapi.responses import Response
-        from backend.config.env import settings
         
-        # Add warning header if ingestion is disabled (non-blocking)
-        headers = {}
-        if not settings.allow_app_ingestion:
-            headers["X-Index-Warning"] = "Document metadata deleted. Search index will be updated on next rebuild via external GPU pipeline."
-        
-        return Response(
-            status_code=204,
-            headers=headers
+        # Log deletion result
+        logger.info(
+            {
+                "event": "document_deleted_complete",
+                "metadata_id": metadata_id,
+                "filename": filename,
+                "deleted_index_nodes": delete_result.get("deleted_index_nodes", 0),
+                "deleted_index_ref_docs": delete_result.get("deleted_index_ref_docs", 0),
+                "deleted_gcs": delete_result.get("deleted_gcs", False),
+            }
         )
+        
+        return Response(status_code=204)
     except Exception as e:
-        logger.error(f"Error deleting document {metadata_id}: {e}", exc_info=True)
+        # Log full error details for debugging
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.error(
+            {
+                "event": "document_deletion_failed",
+                "metadata_id": metadata_id,
+                "error_type": error_type,
+                "error_message": error_msg,
+            },
+            exc_info=True
+        )
+        
+        # Return detailed error message
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to delete document: {str(e)}"
+            detail=f"Failed to delete document: {error_msg} (Error type: {error_type})"
+        )
+
+
+@app.get("/admin/documents/diagnostics")
+async def get_document_diagnostics(request: Request):
+    """
+    Get diagnostics about document storage/index mismatch.
+    Returns counts and lists of orphaned records, GCS objects without DB, etc.
+    This is for diagnostics only - does not affect the main document list.
+    """
+    # Enforce admin authentication
+    global db_manager
+    if not db_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    token = request.headers.get("X-User-Token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing user token",
+        )
+
+    try:
+        from .security import decode_access_token
+        payload = decode_access_token(token)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+        ) from None
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+        ) from None
+
+    email = payload.get("email")
+    role = payload.get("role")
+    if not email or not role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token payload"
+        )
+
+    user = await db_manager.get_user_by_email(email)
+    if not user or user.get("role") != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+
+    def _get_diagnostics():
+        with SessionLocal() as session:
+            from backend.utils.db import DocumentIngestionMetadata, Document
+            from backend.utils.gcs_client import list_objects, object_exists
+            from backend.config.env import settings
+            
+            # Count DB records
+            count_db_metadata = session.query(DocumentIngestionMetadata).count()
+            count_db_documents = session.query(Document).count()
+            
+            # Get all metadata records with GCS paths
+            all_metadata = session.query(DocumentIngestionMetadata).all()
+            all_documents = session.query(Document).all()
+            
+            # Check GCS objects
+            gcs_objects = []
+            if settings.DOCS_GCS_BUCKET and settings.DOCS_GCS_PREFIX:
+                gcs_objects = list_objects(settings.DOCS_GCS_BUCKET, settings.DOCS_GCS_PREFIX)
+            
+            count_gcs_objects = len(gcs_objects)
+            
+            # Find orphaned metadata (DB says exists, GCS missing)
+            orphan_metadata_ids = []
+            for meta in all_metadata:
+                gcs_path = None
+                # Check Document table first
+                doc = session.query(Document).filter(
+                    Document.file_name == meta.filename
+                ).first()
+                if doc and doc.gcs_path:
+                    gcs_path = doc.gcs_path
+                elif meta.file_path and meta.file_path.startswith('gs://'):
+                    gcs_path = meta.file_path
+                
+                if gcs_path:
+                    if not object_exists(gcs_path):
+                        orphan_metadata_ids.append({
+                            "metadata_id": meta.id,
+                            "filename": meta.filename,
+                            "gcs_path": gcs_path,
+                            "reason": "GCS object not found"
+                        })
+            
+            # Find GCS objects without DB records
+            gcs_objects_without_db = []
+            gcs_paths_in_db = set()
+            for doc in all_documents:
+                if doc.gcs_path:
+                    gcs_paths_in_db.add(doc.gcs_path)
+            for meta in all_metadata:
+                if meta.file_path and meta.file_path.startswith('gs://'):
+                    gcs_paths_in_db.add(meta.file_path)
+            
+            for obj_name in gcs_objects:
+                gcs_path = f"gs://{settings.DOCS_GCS_BUCKET}/{obj_name}"
+                if gcs_path not in gcs_paths_in_db:
+                    gcs_objects_without_db.append({
+                        "object_name": obj_name,
+                        "gcs_path": gcs_path,
+                        "reason": "No DB record found"
+                    })
+            
+            return {
+                "count_db_metadata": count_db_metadata,
+                "count_db_documents": count_db_documents,
+                "count_gcs_objects": count_gcs_objects,
+                "orphan_metadata_ids": orphan_metadata_ids,
+                "gcs_objects_without_db": gcs_objects_without_db,
+            }
+    
+    try:
+        diagnostics = await run_sync(_get_diagnostics)
+        return diagnostics
+    except Exception as e:
+        logger.error(f"Error getting document diagnostics: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get diagnostics: {str(e)}"
+        )
+
+
+@app.get("/admin/documents/orphans")
+async def get_orphaned_documents(request: Request):
+    """
+    Get list of orphaned document records.
+    Orphans are: metadata with GCS path that doesn't exist, or metadata with no file_path/gcs_path.
+    """
+    # Enforce admin authentication (same as diagnostics)
+    global db_manager
+    if not db_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    token = request.headers.get("X-User-Token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing user token",
+        )
+
+    try:
+        from .security import decode_access_token
+        payload = decode_access_token(token)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+        ) from None
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+        ) from None
+
+    email = payload.get("email")
+    role = payload.get("role")
+    if not email or not role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token payload"
+        )
+
+    user = await db_manager.get_user_by_email(email)
+    if not user or user.get("role") != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+
+    def _find_orphans():
+        with SessionLocal() as session:
+            from backend.utils.db import DocumentIngestionMetadata, Document
+            from backend.utils.gcs_client import object_exists
+            
+            all_metadata = session.query(DocumentIngestionMetadata).all()
+            orphans = []
+            
+            for meta in all_metadata:
+                gcs_path = None
+                reason = None
+                
+                # Check Document table for GCS path
+                doc = session.query(Document).filter(
+                    Document.file_name == meta.filename
+                ).first()
+                
+                if doc and doc.gcs_path:
+                    gcs_path = doc.gcs_path
+                elif meta.file_path and meta.file_path.startswith('gs://'):
+                    gcs_path = meta.file_path
+                
+                # Determine if orphaned
+                if gcs_path:
+                    if not object_exists(gcs_path):
+                        reason = "GCS object not found"
+                elif not meta.file_path:
+                    reason = "No file_path or gcs_path set"
+                elif not meta.file_path.startswith('gs://'):
+                    reason = "file_path is not a GCS path"
+                
+                if reason:
+                    orphans.append({
+                        "metadata_id": meta.id,
+                        "filename": meta.filename,
+                        "gcs_path": gcs_path,
+                        "file_path": meta.file_path,
+                        "reason": reason,
+                        "created_at": meta.created_at.isoformat() if meta.created_at else None,
+                    })
+            
+            return orphans
+    
+    try:
+        orphans = await run_sync(_find_orphans)
+        return {"orphans": orphans, "count": len(orphans)}
+    except Exception as e:
+        logger.error(f"Error finding orphaned documents: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to find orphans: {str(e)}"
+        )
+
+
+@app.delete("/admin/documents/orphans")
+async def delete_orphaned_documents(request: Request):
+    """
+    Delete all orphaned document records (DB cleanup only, best-effort).
+    Returns count of deleted records and any failures.
+    """
+    # Enforce admin authentication
+    global db_manager
+    if not db_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    token = request.headers.get("X-User-Token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing user token",
+        )
+
+    try:
+        from .security import decode_access_token
+        payload = decode_access_token(token)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+        ) from None
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+        ) from None
+
+    email = payload.get("email")
+    role = payload.get("role")
+    if not email or not role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token payload"
+        )
+
+    user = await db_manager.get_user_by_email(email)
+    if not user or user.get("role") != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+
+    def _delete_orphans():
+        with SessionLocal() as session:
+            from backend.utils.db import DocumentIngestionMetadata, Document
+            from backend.utils.gcs_client import object_exists
+            from backend.utils.simple_delete import delete_document_metadata_simple
+            
+            all_metadata = session.query(DocumentIngestionMetadata).all()
+            orphans_to_delete = []
+            
+            # Find all orphans
+            for meta in all_metadata:
+                gcs_path = None
+                reason = None
+                
+                doc = session.query(Document).filter(
+                    Document.file_name == meta.filename
+                ).first()
+                
+                if doc and doc.gcs_path:
+                    gcs_path = doc.gcs_path
+                elif meta.file_path and meta.file_path.startswith('gs://'):
+                    gcs_path = meta.file_path
+                
+                if gcs_path:
+                    if not object_exists(gcs_path):
+                        reason = "GCS object not found"
+                elif not meta.file_path:
+                    reason = "No file_path or gcs_path set"
+                elif not meta.file_path.startswith('gs://'):
+                    reason = "file_path is not a GCS path"
+                
+                if reason:
+                    orphans_to_delete.append((meta.id, reason))
+            
+            # Delete orphans using simple_delete (handles all cleanup)
+            count_deleted = 0
+            count_failed = 0
+            failures = []
+            
+            for metadata_id, reason in orphans_to_delete:
+                try:
+                    delete_document_metadata_simple(metadata_id)
+                    count_deleted += 1
+                    logger.info(f"Deleted orphan record: {metadata_id} (reason: {reason})")
+                except Exception as e:
+                    count_failed += 1
+                    failures.append({
+                        "metadata_id": metadata_id,
+                        "reason": f"Deletion failed: {str(e)}"
+                    })
+                    logger.error(f"Failed to delete orphan {metadata_id}: {e}", exc_info=True)
+            
+            return {
+                "count_deleted": count_deleted,
+                "count_failed": count_failed,
+                "failures": failures,
+            }
+    
+    try:
+        result = await run_sync(_delete_orphans)
+        return result
+    except Exception as e:
+        logger.error(f"Error deleting orphaned documents: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete orphans: {str(e)}"
         )
 
 
@@ -4909,58 +4882,183 @@ async def upload_document(
         sanitized_filename = re.sub(r'[^\w\s.-]', '_', file.filename)
         sanitized_filename = sanitized_filename.replace(' ', '_')
         
-        # Determine GCS object name: {prefix}{metadata_id}/{sanitized_filename}
-        gcs_object_name = f"{settings.DOCS_GCS_PREFIX}{metadata_id}/{sanitized_filename}"
+        # CRITICAL FIX: Transactional upload flow - all in one sync function
+        # 1. Create DB record and flush to get metadata_id
+        # 2. Upload to GCS using metadata_id in path
+        # 3. Update DB record with GCS path and create Document record
+        # 4. Only commit if GCS upload succeeded
+        # 5. If GCS upload fails, rollback DB transaction (no orphan records)
         
-        # Upload to GCS (primary storage)
-        gcs_path = None
-        if settings.DOCS_GCS_BUCKET:
-            from backend.utils.gcs_client import upload_bytes, get_gcs_client
-            
-            # Check GCS client availability before attempting upload
-            gcs_client = get_gcs_client()
-            if not gcs_client:
+        def _transactional_upload():
+            """Handle entire upload transaction: DB flush -> GCS upload -> DB commit."""
+            session = SessionLocal()
+            try:
+                from backend.utils.db import DocumentIngestionMetadata, Document
+                from backend.utils.gcs_client import upload_bytes, get_gcs_client, delete_object
+                
+                # Step 1: Create metadata record and flush (get ID without committing)
+                metadata = DocumentIngestionMetadata(
+                    id=metadata_id,
+                    filename=file.filename,
+                    machine_model=normalized_machine_model,
+                    status="PENDING_INGESTION",
+                    description=description,
+                    file_path=None,  # Will be set after GCS upload succeeds
+                    file_size_bytes=file_size,
+                )
+                session.add(metadata)
+                session.flush()  # Get metadata_id without committing
+                
+                logger.info(
+                    {
+                        "event": "document_metadata_flushed",
+                        "metadata_id": metadata.id,
+                        "filename": metadata.filename,
+                        "request_id": request_id,
+                    }
+                )
+                
+                # Step 2: Upload to GCS using metadata_id in path
+                gcs_object_name = f"{settings.DOCS_GCS_PREFIX}{metadata.id}/{sanitized_filename}"
+                gcs_path = None
+                
+                if not settings.DOCS_GCS_BUCKET:
+                    raise ValueError("DOCS_GCS_BUCKET not configured. GCS upload is required.")
+                
+                gcs_client = get_gcs_client()
+                if not gcs_client:
+                    raise ValueError("GCS client not available. Check that GOOGLE_APPLICATION_CREDENTIALS is set.")
+                
+                gcs_path = upload_bytes(
+                    bucket_name=settings.DOCS_GCS_BUCKET,
+                    object_name=gcs_object_name,
+                    content=content,
+                    content_type=file.content_type or "application/pdf"
+                )
+                
+                if not gcs_path:
+                    import os
+                    creds_set = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+                    error_msg = f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'."
+                    if not creds_set:
+                        error_msg += " GCS credentials not configured."
+                    raise ValueError(error_msg)
+                
+                logger.info(
+                    {
+                        "event": "document_uploaded_to_gcs",
+                        "filename": file.filename,
+                        "size_bytes": file_size,
+                        "gcs_path": gcs_path,
+                        "request_id": request_id,
+                    }
+                )
+                
+                # Step 3: Update metadata with GCS path and create/update Document record
+                metadata_file_path = gcs_path if gcs_path else (original_path if settings.DOCS_LOCAL_SAVE_ENABLED else None)
+                metadata.file_path = metadata_file_path
+                
+                # Create or update Document record with GCS path
+                doc_record = session.query(Document).filter(
+                    Document.file_name == file.filename
+                ).first()
+                
+                if doc_record:
+                    # Update existing record
+                    doc_record.gcs_path = gcs_path
+                    doc_record.file_size_bytes = file_size
+                    doc_record.machine_model = normalized_machine_model
+                    doc_record.updated_at = datetime.utcnow()
+                else:
+                    # Create new record
+                    doc_record = Document(
+                        file_name=file.filename,
+                        gcs_path=gcs_path,
+                        file_size_bytes=file_size,
+                        machine_model=normalized_machine_model,
+                        is_active=True,
+                    )
+                    session.add(doc_record)
+                
+                # Step 4: Commit transaction (GCS upload succeeded)
+                session.commit()
+                session.refresh(metadata)
+                session.refresh(doc_record)
+                
+                logger.info(
+                    {
+                        "event": "document_upload_transaction_committed",
+                        "metadata_id": metadata.id,
+                        "document_id": doc_record.id,
+                        "filename": metadata.filename,
+                        "gcs_path": gcs_path,
+                        "request_id": request_id,
+                    }
+                )
+                
+                return {
+                    "id": metadata.id,
+                    "filename": metadata.filename,
+                    "machine_model": metadata.machine_model,
+                    "status": metadata.status,
+                    "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
+                }
+            except Exception as e:
+                # Rollback DB transaction on any error
+                session.rollback()
+                error_type = type(e).__name__
+                error_msg = str(e)
+                logger.error(
+                    {
+                        "event": "document_upload_transaction_failed",
+                        "metadata_id": metadata_id,
+                        "filename": file.filename,
+                        "error": error_msg,
+                        "error_type": error_type,
+                        "request_id": request_id,
+                    },
+                    exc_info=True
+                )
+                # If GCS upload partially succeeded, try to delete as compensation
+                if 'gcs_path' in locals() and gcs_path:
+                    try:
+                        delete_object(gcs_path)
+                        logger.warning(f"Deleted GCS object {gcs_path} after transaction failure")
+                    except Exception as cleanup_error:
+                        logger.error(f"Failed to cleanup GCS object after failure: {cleanup_error}")
+                raise
+            finally:
+                session.close()
+        
+        # Execute transactional upload
+        try:
+            metadata_result = await run_sync(_transactional_upload)
+        except ValueError as ve:
+            # Convert ValueError to HTTPException with appropriate status
+            error_msg = str(ve)
+            if "GCS client not available" in error_msg:
                 raise HTTPException(
                     status_code=500,
                     detail="GCS client not available. Check that GOOGLE_APPLICATION_CREDENTIALS is set or run 'gcloud auth application-default login'. See logs for details."
                 )
-            
-            gcs_path = upload_bytes(
-                bucket_name=settings.DOCS_GCS_BUCKET,
-                object_name=gcs_object_name,
-                content=content,
-                content_type=file.content_type or "application/pdf"
-            )
-            
-            if not gcs_path:
-                # Check common issues and provide helpful error message
+            elif "DOCS_GCS_BUCKET not configured" in error_msg:
+                raise HTTPException(
+                    status_code=500,
+                    detail="DOCS_GCS_BUCKET not configured. GCS upload is required."
+                )
+            elif "Failed to upload" in error_msg:
                 import os
                 creds_set = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
                 error_detail = f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'. "
                 if not creds_set:
                     error_detail += "GCS credentials not configured. Set GOOGLE_APPLICATION_CREDENTIALS environment variable or run 'gcloud auth application-default login'. "
                 error_detail += "Check backend logs for detailed error information."
-                raise HTTPException(
-                    status_code=500,
-                    detail=error_detail
-                )
-            
-            logger.info(
-                {
-                    "event": "document_uploaded_to_gcs",
-                    "filename": file.filename,
-                    "size_bytes": file_size,
-                    "gcs_path": gcs_path,
-                    "request_id": request_id,
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="DOCS_GCS_BUCKET not configured. GCS upload is required."
-            )
+                raise HTTPException(status_code=500, detail=error_detail)
+            else:
+                raise HTTPException(status_code=500, detail=f"Upload failed: {error_msg}")
         
         # Optionally save to local disk (for dev/backward compatibility)
+        # This happens after the transactional upload succeeds
         original_path = None
         if settings.DOCS_LOCAL_SAVE_ENABLED:
             from backend.utils.test_mode import get_original_pdfs_dir
@@ -4989,66 +5087,8 @@ async def upload_document(
                 }
             )
         
-        # Create metadata record with PENDING_INGESTION status
-        # Use normalized_machine_model (already normalized above)
-        # Capture SessionLocal in a default argument to avoid closure scoping issues
-        session_factory = SessionLocal
-        if session_factory is None:
-            logger.error("SessionLocal is not configured")
-            raise HTTPException(
-                status_code=500,
-                detail="Database session factory not available"
-            )
-        
-        # CRITICAL FIX: Always set file_path to GCS path so ingest.py can find it
-        # ingest.py requires either Document.gcs_path OR DocumentIngestionMetadata.file_path starting with 'gs://'
-        metadata_file_path = gcs_path if gcs_path else (original_path if settings.DOCS_LOCAL_SAVE_ENABLED else None)
-        
-        def _create_metadata(session_factory=session_factory):
-            with session_factory() as session:
-                # Log database connection for consistency check
-                from backend.config.env import settings as upload_settings
-                db_url = upload_settings.DATABASE_URL if hasattr(upload_settings, 'DATABASE_URL') else os.getenv('DATABASE_URL', 'NOT_SET')
-                import re
-                if db_url and db_url != 'NOT_SET':
-                    db_url_safe = re.sub(r':([^:@]+)@', r':***@', db_url)
-                    logger.info(f"🔍 Upload endpoint using DATABASE_URL: {db_url_safe}")
-                
-                metadata = DocumentIngestionMetadata(
-                    id=metadata_id,
-                    filename=file.filename,
-                    machine_model=normalized_machine_model,
-                    status="PENDING_INGESTION",
-                    description=description,
-                    file_path=metadata_file_path,  # Always set to GCS path (or local if enabled)
-                    file_size_bytes=file_size,
-                )
-                session.add(metadata)
-                session.commit()
-                session.refresh(metadata)
-                
-                logger.info(
-                    {
-                        "event": "document_ingestion_metadata_created",
-                        "metadata_id": metadata.id,
-                        "filename": metadata.filename,
-                        "file_path": metadata.file_path,
-                        "has_gcs_path": metadata.file_path and metadata.file_path.startswith('gs://'),
-                        "request_id": request_id,
-                    }
-                )
-                
-                return {
-                    "id": metadata.id,
-                    "filename": metadata.filename,
-                    "machine_model": metadata.machine_model,
-                    "status": metadata.status,
-                    "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
-                }
-        
-        metadata_result = await run_sync(_create_metadata)
-        
         # Log document record created
+        # Note: Document record is already created in the transactional upload function
         logger.info(
             {
                 "event": "document_record_created",
@@ -5060,43 +5100,6 @@ async def upload_document(
             }
         )
         
-        # Update document metadata in database (Phase 1: migrated from document_metadata.json)
-        # This ensures the machine_model shows up in the document list immediately
-        from .utils.document_metadata import upsert_document
-        # SessionLocal is already imported at module level, no need to re-import
-        try:
-            session = session_factory()
-            try:
-                upsert_document(
-                    session=session,
-                    file_name=file.filename,
-                    gcs_path=gcs_path,  # Store GCS path in Document table
-                    machine_model=[normalized_machine_model],  # Use normalized version
-                    requires_admin_review=False,  # Clear review flag since we have a valid machine model
-                    file_size_bytes=file_size,
-                )
-                logger.info(
-                    {
-                        "event": "document_metadata_updated",
-                        "filename": file.filename,
-                        "gcs_path": gcs_path,
-                        "machine_model": normalized_machine_model,
-                        "request_id": request_id,
-                    }
-                )
-            finally:
-                session.close()
-        except Exception as e:
-            # Don't fail the upload if metadata update fails - log and continue
-            logger.warning(
-                {
-                    "event": "document_metadata_update_failed",
-                    "filename": file.filename,
-                    "error": str(e),
-                    "request_id": request_id,
-                }
-            )
-        
         # Audit log metadata created
         await audit_log(
             "document_metadata_created",
@@ -5106,7 +5109,7 @@ async def upload_document(
             metadata={
                 "filename": file.filename,
                 "machine_model": machine_model,
-                "metadata_id": metadata_id,
+                "metadata_id": metadata_result["id"],
                 "status": "PENDING_INGESTION",
             },
             request=http_request,

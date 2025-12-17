@@ -343,6 +343,24 @@ def download_to_file(gcs_uri: str, dest_path: str) -> bool:
         return False
 
 
+def object_exists(gcs_path: str) -> bool:
+    """
+    Check if a GCS object exists.
+    
+    Args:
+        gcs_path: Full GCS path (gs://bucket/path) or bucket/path
+    
+    Returns:
+        True if object exists, False if not found or error
+    """
+    bucket_name, blob_name = parse_gcs_path(gcs_path)
+    
+    if not bucket_name or not blob_name:
+        return False
+    
+    return blob_exists(bucket_name, blob_name)
+
+
 def delete_object(gcs_path: str) -> bool:
     """
     Delete an object from GCS (best-effort, logs warning on failure).
@@ -371,6 +389,11 @@ def delete_object(gcs_path: str) -> bool:
         logger.info(f"Successfully deleted GCS object: {gcs_path}")
         return True
     except Exception as e:
+        # Handle 404 (object not found) gracefully - this is expected for orphaned records
+        error_str = str(e)
+        if "404" in error_str or "NotFound" in str(type(e).__name__):
+            logger.debug(f"GCS object not found (already deleted or never existed): {gcs_path}")
+            return True  # Consider this success - object is gone
         # Log warning but don't fail - deletion is best-effort
         logger.warning(f"Failed to delete GCS object {gcs_path}: {e}")
         return False
