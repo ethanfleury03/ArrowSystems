@@ -4876,8 +4876,10 @@ def check_machine_model_exists(normalized_machine_model: str) -> bool:
         return machine is not None
 
 
-# INDEX-WRITE PATH (gated): requires settings.allow_app_ingestion=True
-# This endpoint triggers chunking and embedding which write to the vector index.
+# DOCUMENT UPLOAD ENDPOINT
+# This endpoint ALWAYS works - it uploads files to GCS and creates database records.
+# Ingestion (chunking/embedding) is optional and only triggered if allow_app_ingestion=True.
+# Upload succeeds regardless of ingestion flag - ingestion is a separate step.
 @app.post("/admin/documents/upload")
 async def upload_document(
     http_request: Request,
@@ -4887,9 +4889,16 @@ async def upload_document(
     description: Optional[str] = Form(None),
 ):
     """
-    Phase 1: Upload a document with machine model selection.
-    Validates file, stores it safely, and creates metadata record with PENDING_INGESTION status.
-    Ingestion will be handled in later phases.
+    Upload a document with machine model selection.
+    
+    IMPORTANT: This endpoint ALWAYS works regardless of ARROW_ALLOW_APP_INGESTION setting.
+    It uploads the file to GCS and creates database records. This is Phase 1 (upload).
+    
+    Ingestion (Phase 2: chunking, Phase 3: embedding) is optional:
+    - If allow_app_ingestion=True: Ingestion is triggered automatically in background
+    - If allow_app_ingestion=False: Upload succeeds, ingestion must be done via external pipeline
+    
+    The upload always succeeds - ingestion is a separate, optional step.
     """
     import uuid
     from datetime import datetime
@@ -4994,7 +5003,7 @@ async def upload_document(
             session = SessionLocal()
             try:
                 from backend.utils.db import DocumentIngestionMetadata, Document
-                from backend.utils.gcs_client import upload_bytes, get_gcs_client, delete_object
+                from backend.utils.gcs_client import upload_bytes, get_gcs_client, delete_object, blob_exists, parse_gcs_path
                 
                 # Step 1: Create metadata record and flush (get ID without committing)
                 metadata = DocumentIngestionMetadata(
@@ -5036,13 +5045,50 @@ async def upload_document(
                     content_type=file.content_type or "application/pdf"
                 )
                 
+                # CRITICAL: GCS upload MUST succeed - no fallback to local storage
                 if not gcs_path:
                     import os
                     creds_set = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-                    error_msg = f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'."
+                    error_msg = f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'. "
                     if not creds_set:
-                        error_msg += " GCS credentials not configured."
+                        error_msg += "GCS credentials not configured. "
+                    error_msg += "Database transaction will be rolled back. No document record will be created."
+                    logger.error(
+                        {
+                            "event": "gcs_upload_failed_before_commit",
+                            "filename": file.filename,
+                            "bucket": settings.DOCS_GCS_BUCKET,
+                            "object_name": gcs_object_name,
+                            "credentials_configured": creds_set,
+                            "request_id": request_id,
+                        }
+                    )
                     raise ValueError(error_msg)
+                
+                # Verify GCS object exists after upload (defensive check)
+                try:
+                    bucket_name, blob_name = parse_gcs_path(gcs_path)
+                    if not blob_exists(bucket_name, blob_name):
+                        error_msg = f"GCS upload reported success but object not found: {gcs_path}. This indicates a critical error."
+                        logger.error(
+                            {
+                                "event": "gcs_upload_verification_failed",
+                                "filename": file.filename,
+                                "gcs_path": gcs_path,
+                                "request_id": request_id,
+                            }
+                        )
+                        raise ValueError(error_msg)
+                except Exception as verify_error:
+                    # If verification fails, try to delete the object and rollback
+                    logger.error(f"Failed to verify GCS upload: {verify_error}")
+                    try:
+                        from backend.utils.gcs_client import delete_object
+                        delete_object(gcs_path)
+                        logger.warning(f"Deleted unverified GCS object: {gcs_path}")
+                    except Exception as cleanup_error:
+                        logger.error(f"Failed to cleanup unverified GCS object: {cleanup_error}")
+                    raise ValueError(f"GCS upload verification failed: {verify_error}")
                 
                 logger.info(
                     {
@@ -5055,32 +5101,44 @@ async def upload_document(
                 )
                 
                 # Step 3: Update metadata with GCS path and create/update Document record
-                metadata_file_path = gcs_path if gcs_path else (original_path if settings.DOCS_LOCAL_SAVE_ENABLED else None)
-                metadata.file_path = metadata_file_path
+                # CRITICAL: Only use GCS path - no fallback to local storage
+                # Documents MUST be in GCS - this is the single source of truth
+                metadata.file_path = gcs_path
                 
                 # Create or update Document record with GCS path
+                # CRITICAL: Document record MUST have gcs_path - no exceptions
                 doc_record = session.query(Document).filter(
                     Document.file_name == file.filename
                 ).first()
                 
                 if doc_record:
                     # Update existing record
-                    doc_record.gcs_path = gcs_path
+                    doc_record.gcs_path = gcs_path  # Always set from successful GCS upload
                     doc_record.file_size_bytes = file_size
                     doc_record.machine_model = normalized_machine_model
                     doc_record.updated_at = datetime.utcnow()
+                    # Ensure is_active is True for re-uploads
+                    if not doc_record.is_active:
+                        doc_record.is_active = True
                 else:
-                    # Create new record
+                    # Create new record - gcs_path is REQUIRED
                     doc_record = Document(
                         file_name=file.filename,
-                        gcs_path=gcs_path,
+                        gcs_path=gcs_path,  # REQUIRED - must not be None
                         file_size_bytes=file_size,
                         machine_model=normalized_machine_model,
                         is_active=True,
+                        requires_admin_review=False,  # No review needed if GCS upload succeeded
                     )
                     session.add(doc_record)
                 
-                # Step 4: Commit transaction (GCS upload succeeded)
+                # Final validation: Ensure both records have GCS paths before commit
+                if not metadata.file_path or not metadata.file_path.startswith('gs://'):
+                    raise ValueError(f"Metadata file_path is not a valid GCS path: {metadata.file_path}")
+                if not doc_record.gcs_path or not doc_record.gcs_path.startswith('gs://'):
+                    raise ValueError(f"Document gcs_path is not a valid GCS path: {doc_record.gcs_path}")
+                
+                # Step 4: Commit transaction (GCS upload succeeded and verified)
                 session.commit()
                 session.refresh(metadata)
                 session.refresh(doc_record)
@@ -5104,8 +5162,31 @@ async def upload_document(
                     "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
                 }
             except Exception as e:
-                # Rollback DB transaction on any error
-                session.rollback()
+                # CRITICAL: Rollback DB transaction on ANY error
+                # This ensures no orphaned records are created
+                try:
+                    session.rollback()
+                    logger.info(
+                        {
+                            "event": "document_upload_transaction_rolled_back",
+                            "metadata_id": metadata_id,
+                            "filename": file.filename,
+                            "request_id": request_id,
+                        }
+                    )
+                except Exception as rollback_error:
+                    logger.critical(
+                        {
+                            "event": "document_upload_rollback_failed",
+                            "metadata_id": metadata_id,
+                            "filename": file.filename,
+                            "rollback_error": str(rollback_error),
+                            "request_id": request_id,
+                        },
+                        exc_info=True
+                    )
+                    # This is critical - if rollback fails, we have a serious problem
+                
                 error_type = type(e).__name__
                 error_msg = str(e)
                 logger.error(
@@ -5116,19 +5197,42 @@ async def upload_document(
                         "error": error_msg,
                         "error_type": error_type,
                         "request_id": request_id,
+                        "note": "Database transaction rolled back - no records created",
                     },
                     exc_info=True
                 )
+                
                 # If GCS upload partially succeeded, try to delete as compensation
                 if 'gcs_path' in locals() and gcs_path:
                     try:
-                        delete_object(gcs_path)
-                        logger.warning(f"Deleted GCS object {gcs_path} after transaction failure")
+                        from backend.utils.gcs_client import delete_object
+                        if delete_object(gcs_path):
+                            logger.warning(
+                                {
+                                    "event": "gcs_object_deleted_after_failure",
+                                    "gcs_path": gcs_path,
+                                    "filename": file.filename,
+                                    "request_id": request_id,
+                                }
+                            )
                     except Exception as cleanup_error:
-                        logger.error(f"Failed to cleanup GCS object after failure: {cleanup_error}")
+                        logger.error(
+                            {
+                                "event": "gcs_cleanup_failed_after_transaction_failure",
+                                "gcs_path": gcs_path,
+                                "filename": file.filename,
+                                "cleanup_error": str(cleanup_error),
+                                "request_id": request_id,
+                            },
+                            exc_info=True
+                        )
                 raise
             finally:
-                session.close()
+                # Always close session, even if rollback failed
+                try:
+                    session.close()
+                except Exception as close_error:
+                    logger.error(f"Failed to close session: {close_error}")
         
         # Execute transactional upload
         try:
@@ -5215,6 +5319,17 @@ async def upload_document(
             request=http_request,
         )
         
+        # Log ingestion flag at request-time for debugging
+        logger.info(
+            {
+                "event": "document_upload_ingestion_flag_check",
+                "allow_app_ingestion": settings.allow_app_ingestion,
+                "metadata_id": metadata_result["id"],
+                "filename": file.filename,
+                "request_id": request_id,
+            }
+        )
+        
         # INDEX-WRITE PATH: Single-document ingestion (incremental, not bulk)
         # Document row and file upload are always completed above
         # Only trigger ingestion if app-based ingestion is allowed
@@ -5269,23 +5384,26 @@ async def upload_document(
                 "size_bytes": file_size,
             }
         else:
-            # Ingestion disabled - document uploaded but not ingested
+            # Ingestion disabled - document uploaded successfully but ingestion not triggered
+            # This is NORMAL and EXPECTED - upload always succeeds, ingestion is separate
             logger.info(
                 {
                     "event": "document_uploaded_no_ingestion",
                     "filename": file.filename,
                     "document_id": metadata_result["id"],
                     "request_id": request_id,
-                    "message": "Document uploaded successfully. Ingestion disabled - ingestion must be triggered via external GPU pipeline.",
+                    "note": "Document uploaded successfully. Ingestion will be handled by external pipeline.",
                 }
             )
             
+            # Return success - upload succeeded, ingestion is separate
             return {
                 "status": "success",
-                "message": f"File {file.filename} uploaded successfully. Document metadata created with PENDING_INGESTION status. Ingestion must be triggered via external GPU pipeline.",
+                "message": f"File {file.filename} uploaded successfully. Document is ready for ingestion via external pipeline.",
                 "metadata": metadata_result,
                 "file_path": original_path,
                 "size_bytes": file_size,
+                "ingestion_note": "Ingestion will be handled by external GPU pipeline when ready.",
             }
         
     except HTTPException:
