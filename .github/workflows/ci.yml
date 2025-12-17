@@ -219,6 +219,9 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@v3
         with:
+          driver: docker-container
+          driver-opts: |
+            image=ghcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -269,13 +272,6 @@ jobs:
           echo "Authenticating Docker with Artifact Registry using service account impersonation..."
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
-
-      - name: Login to Docker Hub (optional)
-        continue-on-error: true
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build & Push Backend Image (attempt 1)
         id: build-backend
@@ -1061,6 +1057,9 @@ jobs:
         id: buildx-frontend
         uses: docker/setup-buildx-action@v3
         with:
+          driver: docker-container
+          driver-opts: |
+            image=ghcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
