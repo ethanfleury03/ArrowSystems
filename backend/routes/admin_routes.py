@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 import json
 import re
 import sys
@@ -93,13 +93,29 @@ class MachineUpdateRequest(BaseModel):
     machine_kind: Optional[str] = None
 
 
-def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager]]) -> APIRouter:
+def create_admin_router(
+    db_manager_getter: Callable[[], Optional[DatabaseManager]],
+    db_manager_ensurer: Optional[Callable[[], Awaitable[bool]]] = None,
+) -> APIRouter:
     router = APIRouter(prefix="/admin", tags=["admin"])
 
     async def get_db_manager() -> DatabaseManager:
         manager = db_manager_getter()
         if manager is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database not initialized")
+            # Try to initialize lazily (helps recover from transient startup failures)
+            if db_manager_ensurer is not None:
+                try:
+                    await db_manager_ensurer()
+                except Exception:
+                    # Ignore and fall through to 503 below
+                    pass
+                manager = db_manager_getter()
+
+        if manager is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Service temporarily unavailable. Database is unavailable. Please try again later.",
+            )
         return manager
 
     async def get_current_admin(

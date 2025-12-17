@@ -165,12 +165,113 @@ rag_state = {
     "status": "initializing",  # "initializing" | "ready" | "error"
     "last_error": None,
 }
+
+# Global DB state for retryable initialization (prevents permanent "stuck initializing")
+db_state = {
+    "status": "not_started",  # "not_started" | "initializing" | "ready" | "error"
+    "last_error": None,
+    "last_attempt_ts": None,
+    "attempts": 0,
+}
+db_init_lock: asyncio.Lock = asyncio.Lock()
 feedback_manager = None  # Local JSON feedback store
 saved_response_manager = None  # Local saved response store
 
 
 def get_db_manager_instance() -> Optional[DatabaseManager]:
     return db_manager
+
+
+def _db_unavailable_detail() -> str:
+    """
+    Produce a user-safe error message that distinguishes transient init from hard failure.
+    The frontend currently expects a string under the "detail" key.
+    """
+    status_val = db_state.get("status")
+    last_err = db_state.get("last_error")
+
+    if status_val in ("not_started", "initializing"):
+        base = "Service temporarily unavailable. Database is still initializing. Please try again in a moment."
+    else:
+        base = "Service temporarily unavailable. Database is unavailable. Please try again later."
+
+    # In dev, include the underlying error to speed up debugging
+    if settings.is_dev and last_err:
+        return f"{base} ({last_err})"
+
+    return base
+
+
+async def ensure_db_manager_initialized(
+    *,
+    max_attempts: int = 5,
+    initial_delay_s: float = 0.5,
+    max_delay_s: float = 5.0,
+) -> bool:
+    """
+    Ensure the global DatabaseManager is initialized.
+
+    Why this exists:
+    - Cloud Run + Cloud SQL connections can transiently fail on cold start.
+    - Previously, a single failure left db_manager=None permanently until the next deploy/restart,
+      causing login to return 503 forever ("still initializing").
+
+    This function retries with exponential backoff and is concurrency-safe.
+    """
+    global db_manager, saved_response_manager, db_state
+
+    if db_manager is not None:
+        db_state["status"] = "ready"
+        db_state["last_error"] = None
+        return True
+
+    async with db_init_lock:
+        if db_manager is not None:
+            db_state["status"] = "ready"
+            db_state["last_error"] = None
+            return True
+
+        db_state["status"] = "initializing"
+        delay = max(0.0, float(initial_delay_s))
+
+        for attempt in range(1, int(max_attempts) + 1):
+            db_state["attempts"] = attempt
+            db_state["last_attempt_ts"] = time.time()
+            try:
+                # Validate connection (runs a trivial SELECT 1)
+                from .utils.db import _validate_database_connection
+                await asyncio.to_thread(_validate_database_connection, engine, DATABASE_URL)
+
+                # Initialize DB manager (creates missing tables with checkfirst=True)
+                manager = await asyncio.to_thread(DatabaseManager)
+                db_manager = manager
+
+                # Optional managers that depend on db_manager
+                try:
+                    saved_response_manager = SavedResponseManager(db_manager)
+                except Exception as e:
+                    # Non-fatal, but log for debugging
+                    logger.warning("saved_response_manager_init_failed", error=str(e), exc_info=True)
+                    saved_response_manager = None
+
+                db_state["status"] = "ready"
+                db_state["last_error"] = None
+                logger.info("database_manager_ready", attempt=attempt)
+                return True
+
+            except Exception as e:
+                err = f"{type(e).__name__}: {str(e)}"
+                db_state["last_error"] = err
+                logger.error("database_manager_init_attempt_failed", attempt=attempt, error=err, exc_info=True)
+
+                if attempt < int(max_attempts):
+                    # Backoff between attempts
+                    await asyncio.sleep(delay)
+                    delay = min(max_delay_s, delay * 2 if delay > 0 else 0.5)
+
+        db_state["status"] = "error"
+        logger.error("database_manager_init_failed", error=db_state.get("last_error"))
+        return False
 
 
 # =============================================================================
@@ -442,7 +543,12 @@ app.add_middleware(LoggingMiddleware)
 # The /health endpoint is intentionally not rate limited
 
 # Register admin routes
-app.include_router(create_admin_router(get_db_manager_instance))
+app.include_router(
+    create_admin_router(
+        get_db_manager_instance,
+        db_manager_ensurer=lambda: ensure_db_manager_initialized(max_attempts=3, initial_delay_s=0.5, max_delay_s=5.0),
+    )
+)
 
 
 async def start_rag_init_if_needed():
@@ -554,12 +660,9 @@ async def startup_event():
             feedback_manager = None
             logger.warning("feedback_manager_init_failed", error=str(e), exc_info=True)
 
-        # Database initialization - wrapped in try/except to prevent worker crash
+        # Database initialization - retryable + non-fatal (service can still serve RAG-only endpoints)
         try:
-            # Log database connection info and validate connection
-            from .utils.db import _validate_database_connection
             logger.info(f"Database URL configured: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'database'}")
-            _validate_database_connection(engine, DATABASE_URL)
             
             # Run database migrations
             if settings.is_dev:
@@ -589,12 +692,13 @@ async def startup_event():
                 else:
                     logger.info("migration_check_passed", message="Database is up to date")
             
-            # Initialize database
-            try:
-                db_manager = DatabaseManager()
-                saved_response_manager = SavedResponseManager(db_manager)
-                logger.info("database_manager_created", database="postgres")
-                
+            # Initialize database manager with retries (prevents permanent "db_manager=None" after transient failures)
+            db_ready = await ensure_db_manager_initialized(max_attempts=5, initial_delay_s=0.5, max_delay_s=5.0)
+            if not db_ready:
+                print(f"[STARTUP] ⚠️ Database initialization failed: {db_state.get('last_error')}", flush=True)
+            else:
+                logger.info("database_initialized", database="postgres")
+
                 # Seed default users (non-critical - continue even if this fails)
                 try:
                     await db_manager.seed_default_users()
@@ -602,14 +706,6 @@ async def startup_event():
                 except Exception as seed_error:
                     logger.warning("seed_default_users_failed", error=str(seed_error), exc_info=True)
                     # Continue startup even if seeding fails - users can be created manually
-                
-                logger.info("database_initialized", database="postgres")
-            except Exception as db_init_error:
-                logger.error("database_initialization_failed", error=str(db_init_error), exc_info=True)
-                # Don't raise - log error but allow app to start
-                print(f"[STARTUP] ⚠️ Database initialization failed: {db_init_error}", flush=True)
-                db_manager = None
-                saved_response_manager = None
             
             # GCS connectivity smoke check (non-fatal, but logs errors)
             try:
@@ -710,6 +806,9 @@ async def startup_event():
             # Catch any other database-related errors
             logger.error("database_startup_error", error=str(db_error), error_type=type(db_error).__name__, exc_info=True)
             print(f"[STARTUP] ⚠️ Database startup error: {type(db_error).__name__}: {db_error}", flush=True)
+            # Mark DB state as failed, but allow later retries via ensure_db_manager_initialized()
+            db_state["status"] = "error"
+            db_state["last_error"] = f"{type(db_error).__name__}: {str(db_error)}"
             db_manager = None
             saved_response_manager = None
     
@@ -1801,11 +1900,16 @@ async def database_health_check():
 async def auth_login(request: Request, response: Response):
     """Login endpoint with rate limiting. Sets JWT in cookie."""
     if not db_manager:
-        logger.error("login_attempted_before_db_init", message="Login attempted before database manager was initialized")
-        raise HTTPException(
-            status_code=503, 
-            detail="Service temporarily unavailable. Database is still initializing. Please try again in a moment."
-        )
+        # Try to recover from transient DB init failures (common on Cloud Run cold starts)
+        ok = await ensure_db_manager_initialized(max_attempts=3, initial_delay_s=0.3, max_delay_s=2.0)
+        if not ok:
+            logger.error(
+                "login_rejected_db_unavailable",
+                db_status=db_state.get("status"),
+                db_error=db_state.get("last_error"),
+                message="Login attempted but database manager is not ready",
+            )
+            raise HTTPException(status_code=503, detail=_db_unavailable_detail())
 
     try:
         # Parse request body manually to avoid FastAPI parameter resolution issues with rate limiter
@@ -2013,7 +2117,9 @@ async def auth_get_current_user(request: Request):
     but user JWT can come from X-User-Token or cookie.
     """
     if not db_manager:
-        raise HTTPException(status_code=503, detail="Database not initialized")
+        ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.2, max_delay_s=1.5)
+        if not ok:
+            raise HTTPException(status_code=503, detail=_db_unavailable_detail())
     
     # Try to get token from multiple sources (priority: X-User-Token > Cookie > Authorization)
     token = None
@@ -2104,7 +2210,9 @@ async def auth_get_current_user(request: Request):
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
 async def auth_get_user(user_id: str):
     if not db_manager:
-        raise HTTPException(status_code=503, detail="Database not initialized")
+        ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.2, max_delay_s=1.5)
+        if not ok:
+            raise HTTPException(status_code=503, detail=_db_unavailable_detail())
     if not user_id.isdigit():
         raise HTTPException(status_code=400, detail="Invalid user id")
     user = await db_manager.get_user_by_id(int(user_id))
@@ -3382,9 +3490,15 @@ async def get_all_documents(request: Request):
 
         # Enforce admin authentication
         if not db_manager:
+            ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.3, max_delay_s=2.0)
+            if ok:
+                # Re-check after attempted init
+                pass
+
+        if not db_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Database not initialized",
+                detail=_db_unavailable_detail(),
             )
 
         token = request.headers.get("X-User-Token")
@@ -4318,9 +4432,14 @@ async def get_document_diagnostics(request: Request):
     # Enforce admin authentication
     global db_manager
     if not db_manager:
+        ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.3, max_delay_s=2.0)
+        if ok:
+            pass
+
+    if not db_manager:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not initialized",
+            detail=_db_unavailable_detail(),
         )
 
     token = request.headers.get("X-User-Token")
@@ -4481,9 +4600,14 @@ async def get_orphaned_documents(request: Request):
     # Enforce admin authentication (same as diagnostics)
     global db_manager
     if not db_manager:
+        ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.3, max_delay_s=2.0)
+        if ok:
+            pass
+
+    if not db_manager:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not initialized",
+            detail=_db_unavailable_detail(),
         )
 
     token = request.headers.get("X-User-Token")
@@ -4582,9 +4706,14 @@ async def delete_orphaned_documents(request: Request):
     # Enforce admin authentication
     global db_manager
     if not db_manager:
+        ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.3, max_delay_s=2.0)
+        if ok:
+            pass
+
+    if not db_manager:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not initialized",
+            detail=_db_unavailable_detail(),
         )
 
     token = request.headers.get("X-User-Token")
