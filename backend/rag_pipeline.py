@@ -439,8 +439,12 @@ def get_rag_pipeline(cache_dir="/root/.cache/huggingface/hub", db_manager=None, 
     # Check if pipeline is not initialized but index files exist
     # This handles the case where backend boots before GCS download finishes
     if not _pipeline_instance.is_initialized():
-        # Use provided storage_dir, or default to production path
-        check_dir = storage_dir or "/app/latest_model"
+        # Use provided storage_dir, or default based on environment.
+        # On Cloud Run, prefer /tmp (writable) unless overridden by RAG_INDEX_LOCAL_DIR.
+        default_dir = os.getenv("RAG_INDEX_LOCAL_DIR")
+        if not default_dir:
+            default_dir = "/tmp/latest_model" if (os.getenv("K_SERVICE") or os.getenv("K_REVISION")) else "/app/latest_model"
+        check_dir = storage_dir or default_dir
         
         # Check if index files exist
         if _check_index_files_exist(check_dir):

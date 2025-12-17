@@ -57,6 +57,9 @@ class Settings:
         
         # GCS Document Storage Configuration
         self._load_gcs_config()
+
+        # RAG Index Storage Configuration (GCS source + local target dir)
+        self._load_rag_index_config()
     
     def _load_ingestion_config(self) -> None:
         """
@@ -144,6 +147,45 @@ class Settings:
                     )
             except Exception as e:
                 logger.debug(f"Could not log GCS auth info: {e}")
+
+    def _load_rag_index_config(self) -> None:
+        """
+        Load configuration for the RAG index artifacts.
+
+        - Source of truth is GCS (bucket + prefix).
+        - On Cloud Run, the index is downloaded at startup into a writable local directory.
+
+        Env vars:
+        - RAG_INDEX_GCS_BUCKET: GCS bucket containing index artifacts (default: arrow-rag-support-prod-rag)
+        - RAG_INDEX_GCS_PREFIX: GCS prefix containing index artifacts (default: latest_model/)
+          - Can be "" to indicate bucket root.
+        - RAG_INDEX_LOCAL_DIR: Local directory where index will be downloaded/loaded from.
+          - Default: /tmp/latest_model on Cloud Run / prod, latest_model in dev.
+        """
+        is_cloud_run = bool(os.getenv("K_SERVICE") or os.getenv("K_REVISION"))
+
+        self.RAG_INDEX_GCS_BUCKET = os.getenv("RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag").strip()
+
+        raw_prefix = os.getenv("RAG_INDEX_GCS_PREFIX", "latest_model/")
+        raw_prefix = (raw_prefix or "").strip()
+        if raw_prefix:
+            # Normalize to "<prefix>/" with no leading slash
+            normalized = raw_prefix.strip("/")
+            self.RAG_INDEX_GCS_PREFIX = f"{normalized}/" if normalized else ""
+        else:
+            self.RAG_INDEX_GCS_PREFIX = ""
+
+        default_local_dir = "/tmp/latest_model" if (self.is_prod or is_cloud_run) else "latest_model"
+        local_dir = os.getenv("RAG_INDEX_LOCAL_DIR", default_local_dir)
+        local_dir = (local_dir or "").strip() or default_local_dir
+        self.RAG_INDEX_LOCAL_DIR = local_dir
+
+        # Loud startup log to confirm configuration
+        gcs_location = f"gs://{self.RAG_INDEX_GCS_BUCKET}/{self.RAG_INDEX_GCS_PREFIX}" if self.RAG_INDEX_GCS_PREFIX else f"gs://{self.RAG_INDEX_GCS_BUCKET}/"
+        logger.info(
+            f"RAG index configured: source={gcs_location} local_dir={self.RAG_INDEX_LOCAL_DIR} "
+            f"(env={self.ENV}, cloud_run={is_cloud_run})"
+        )
     
     def _load_anthropic_key(self) -> None:
         """Load Anthropic API key - optional, used for Claude LLM integration."""

@@ -461,7 +461,12 @@ async def start_rag_init_if_needed():
     rag_state["last_error"] = None
     
     # Get storage path
-    storage_path = getattr(app.state, "rag_storage_path", None) or "/app/latest_model"
+    # Default to configured local dir (Cloud Run-safe), fallback to legacy /app/latest_model
+    storage_path = (
+        getattr(app.state, "rag_storage_path", None)
+        or getattr(settings, "RAG_INDEX_LOCAL_DIR", None)
+        or "/app/latest_model"
+    )
     
     # Start background task
     async def _init_rag_background():
@@ -721,7 +726,12 @@ async def startup_event():
             print(f"[DEBUG] ENV check: ENV={os.getenv('ENV')}, settings.ENV={settings.ENV}, is_prod={settings.is_prod}", flush=True)
             if settings.is_prod:
                 print("[RAG] ✅ Production mode detected - starting GCS index download...", flush=True)
-                logger.info("[RAG] Production mode — downloading index from GCS on startup")
+                logger.info(
+                    "[RAG] Production mode — downloading index from GCS on startup",
+                    rag_index_bucket=getattr(settings, "RAG_INDEX_GCS_BUCKET", None),
+                    rag_index_prefix=getattr(settings, "RAG_INDEX_GCS_PREFIX", None),
+                    rag_index_local_dir=getattr(settings, "RAG_INDEX_LOCAL_DIR", None),
+                )
                 try:
                     from backend.rag.startup_downloader import download_index_from_gcs
                     print("[RAG] Calling download_index_from_gcs()...", flush=True)
@@ -776,12 +786,12 @@ async def startup_event():
                               is_dir=storage_path_abs.is_dir() if storage_path_abs.exists() else False,
                               message=f"RAG storage path resolved: {storage_path} (absolute: {storage_path_abs.is_absolute()})")
             
+            # Store storage path in app state EARLY so other background init uses the same directory
+            app.state.rag_storage_path = storage_path
+
             # Create pipeline instance
             cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
-            
-            # Store storage path in app state
-            app.state.rag_storage_path = storage_path
+            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
             
             # Initialize RAG state
             rag_state["status"] = "initializing"
@@ -1255,7 +1265,11 @@ async def rag_status_public():
     last_error = rag_state["last_error"]
     
     # Storage path we expect the index to be in
-    storage_path = getattr(app.state, "rag_storage_path", None) or "/app/latest_model"
+    storage_path = (
+        getattr(app.state, "rag_storage_path", None)
+        or getattr(settings, "RAG_INDEX_LOCAL_DIR", None)
+        or "/app/latest_model"
+    )
     index_dir_exists = bool(storage_path and os.path.exists(storage_path))
     
     # Map rag_state status to response format
@@ -1529,11 +1543,13 @@ async def rag_validate_index():
     storage_path = getattr(app.state, "rag_storage_path", None)
     required_files = ["docstore.json", "default__vector_store.json", "index_store.json"]
     
-    # In production, always check /app/latest_model (not gcsfuse paths)
+    # In production, validate the configured local directory (download target)
     from backend.config.env import settings
     if settings.is_prod:
-        storage_path = "/app/latest_model"
-        logger.info("[RAG] Production mode - validating index at /app/latest_model")
+        configured = getattr(settings, "RAG_INDEX_LOCAL_DIR", None)
+        if configured:
+            storage_path = configured
+        logger.info("[RAG] Production mode - validating index", storage_path=storage_path)
     
     if storage_path is None:
         return RAGIndexValidationResponse(
