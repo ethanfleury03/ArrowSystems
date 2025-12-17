@@ -209,6 +209,9 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
             logger.info(f"embedding_model_initialized", model_name=embed_model_name)
         
         # Load existing index or create new one
+        # IMPORTANT: This is incremental ingestion - we load the existing index and add to it
+        # This allows single-document ingestion without rebuilding the entire index
+        # Safe for Cloud Run CPU environments (processes one document at a time)
         index = None
         if os.path.exists(storage_dir):
             try:
@@ -226,7 +229,9 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
             index = VectorStoreIndex(nodes=[], show_progress=False)
             logger.info(f"embedding_index_created_new", metadata_id=metadata_id, storage_dir=storage_dir)
         
-        # Insert nodes into index (embeddings generated automatically)
+        # Insert nodes into existing index (incremental addition, not rebuild)
+        # Embeddings are generated automatically during insertion
+        # This adds the new document's chunks to the existing index without affecting other documents
         batch_size = 50
         successful_inserts = 0
         failed_inserts = 0

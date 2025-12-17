@@ -5106,9 +5106,11 @@ async def upload_document(
             request=http_request,
         )
         
-        # INDEX-WRITE PATH: ingestion is optional and gated by allow_app_ingestion
+        # INDEX-WRITE PATH: Single-document ingestion (incremental, not bulk)
         # Document row and file upload are always completed above
         # Only trigger ingestion if app-based ingestion is allowed
+        # This processes ONE document at a time, adding it to the existing index incrementally
+        # This is safe for Cloud Run CPU environments (no bulk processing)
         if settings.allow_app_ingestion:
             # Log ingestion enqueued
             logger.info(

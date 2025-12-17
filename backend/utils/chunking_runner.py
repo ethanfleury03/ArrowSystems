@@ -29,11 +29,11 @@ logger = get_logger(__name__)
 
 def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional[str]:
     """
-    Run chunking for a document ingestion metadata record.
+    Run chunking for a SINGLE document ingestion metadata record.
     
-    INDEX-WRITE PATH: creates chunks for embedding
+    INDEX-WRITE PATH: creates chunks for embedding (single-document, incremental)
     
-    This function:
+    This function processes ONE document at a time:
     1. Loads the DocumentIngestionMetadata record
     2. Sets status to CHUNKING
     3. Loads the file and converts to text
@@ -41,6 +41,9 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
     5. Saves chunks to temporary storage
     6. Sets status to READY_FOR_EMBEDDING on success
     7. Sets status to FAILED on error
+    
+    This is safe for Cloud Run CPU environments - processes one document at a time,
+    not bulk ingestion of all documents.
     
     Args:
         metadata_id: The ID of the DocumentIngestionMetadata record
