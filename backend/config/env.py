@@ -123,6 +123,27 @@ class Settings:
         
         if self.DOCS_GCS_BUCKET:
             logger.info(f"GCS document storage configured: gs://{self.DOCS_GCS_BUCKET}/{self.DOCS_GCS_PREFIX} (local_save={self.DOCS_LOCAL_SAVE_ENABLED})")
+            
+            # Log GCS authentication info if available
+            try:
+                from backend.utils.gcs_client import _get_auth_info, _is_cloud_run
+                auth_info = _get_auth_info()
+                is_cloud_run = _is_cloud_run()
+                
+                if is_cloud_run:
+                    logger.info(
+                        f"GCS authentication: Using Cloud Run service account identity "
+                        f"(project: {auth_info.get('project', 'unknown')}, "
+                        f"service account: {auth_info.get('service_account_email', 'unknown')})"
+                    )
+                else:
+                    logger.info(
+                        f"GCS authentication: Using Application Default Credentials "
+                        f"(project: {auth_info.get('project', 'unknown')}, "
+                        f"has_goog_app_creds: {auth_info.get('has_goog_app_creds', False)})"
+                    )
+            except Exception as e:
+                logger.debug(f"Could not log GCS auth info: {e}")
     
     def _load_anthropic_key(self) -> None:
         """Load Anthropic API key - optional, used for Claude LLM integration."""

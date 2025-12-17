@@ -2,6 +2,9 @@
 Google Cloud Storage client utilities.
 
 Provides helper functions for accessing files from Cloud Storage buckets.
+
+Uses Application Default Credentials (ADC) which works automatically on Cloud Run
+via the metadata server, or via GOOGLE_APPLICATION_CREDENTIALS in local dev.
 """
 
 import os
@@ -14,6 +17,13 @@ logger = logging.getLogger(__name__)
 # Lazy import of Google Cloud Storage
 _gcs_client = None
 _gcs_available = None
+_gcs_auth_info = None  # Cached auth info for logging
+
+
+def _is_cloud_run() -> bool:
+    """Detect if running on Cloud Run."""
+    # Cloud Run sets K_SERVICE environment variable
+    return bool(os.getenv("K_SERVICE"))
 
 
 def _check_gcs_available() -> bool:
@@ -29,8 +39,53 @@ def _check_gcs_available() -> bool:
     return _gcs_available
 
 
+def _get_auth_info():
+    """Get authentication information for logging."""
+    global _gcs_auth_info
+    if _gcs_auth_info is not None:
+        return _gcs_auth_info
+    
+    try:
+        import google.auth
+        creds, project = google.auth.default()
+        creds_type = type(creds).__name__
+        
+        # Try to get service account email if available
+        service_account_email = None
+        if hasattr(creds, 'service_account_email'):
+            service_account_email = creds.service_account_email
+        elif hasattr(creds, '_service_account_email'):
+            service_account_email = getattr(creds, '_service_account_email', None)
+        
+        _gcs_auth_info = {
+            "project": project,
+            "creds_type": creds_type,
+            "service_account_email": service_account_email,
+            "is_cloud_run": _is_cloud_run(),
+            "has_goog_app_creds": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
+        }
+        return _gcs_auth_info
+    except Exception as e:
+        logger.debug(f"Could not get auth info: {e}")
+        return {
+            "project": None,
+            "creds_type": "unknown",
+            "service_account_email": None,
+            "is_cloud_run": _is_cloud_run(),
+            "has_goog_app_creds": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
+        }
+
+
 def get_gcs_client():
-    """Get or create a GCS client. Returns None if not available."""
+    """
+    Get or create a GCS client using Application Default Credentials (ADC).
+    
+    On Cloud Run: Uses service account identity via metadata server automatically.
+    On local dev: Uses GOOGLE_APPLICATION_CREDENTIALS if set, otherwise ADC.
+    
+    Returns:
+        storage.Client instance or None if not available
+    """
     global _gcs_client
     
     if not _check_gcs_available():
@@ -40,17 +95,73 @@ def get_gcs_client():
     if _gcs_client is None:
         try:
             from google.cloud import storage
-            # Check for credentials
-            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if not creds_path and not os.path.exists(os.path.expanduser("~/.config/gcloud/application_default_credentials.json")):
-                logger.warning("GCS credentials not found. Set GOOGLE_APPLICATION_CREDENTIALS or run 'gcloud auth application-default login'")
+            
+            # Create client - this will use ADC automatically
+            # On Cloud Run: uses metadata server (service account)
+            # On local: uses GOOGLE_APPLICATION_CREDENTIALS if set, otherwise ADC
             _gcs_client = storage.Client()
+            
+            # Log authentication info on first initialization
+            auth_info = _get_auth_info()
+            if auth_info["is_cloud_run"]:
+                logger.info(
+                    {
+                        "event": "gcs_client_initialized",
+                        "environment": "cloud_run",
+                        "project": auth_info["project"],
+                        "creds_type": auth_info["creds_type"],
+                        "service_account_email": auth_info["service_account_email"],
+                        "message": "Using Cloud Run service account identity via metadata server",
+                    }
+                )
+            else:
+                logger.info(
+                    {
+                        "event": "gcs_client_initialized",
+                        "environment": "local_dev",
+                        "project": auth_info["project"],
+                        "creds_type": auth_info["creds_type"],
+                        "has_goog_app_creds": auth_info["has_goog_app_creds"],
+                        "message": "Using Application Default Credentials (local dev mode)",
+                    }
+                )
+            
         except Exception as e:
             error_msg = str(e)
-            if "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in str(type(e).__name__):
-                logger.error("GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS environment variable or run 'gcloud auth application-default login'")
+            error_type = type(e).__name__
+            is_cloud_run = _is_cloud_run()
+            
+            if "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in error_type:
+                if is_cloud_run:
+                    logger.error(
+                        {
+                            "event": "gcs_auth_failed",
+                            "environment": "cloud_run",
+                            "error": "GCS authentication failed. Ensure the Cloud Run service account has "
+                                    "Storage Object Admin (or Storage Admin) IAM role on the bucket. "
+                                    "Check IAM bindings for the service account.",
+                        }
+                    )
+                else:
+                    logger.error(
+                        {
+                            "event": "gcs_auth_failed",
+                            "environment": "local_dev",
+                            "error": "GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS "
+                                    "environment variable to a service account JSON key file, or run "
+                                    "'gcloud auth application-default login' for local development.",
+                        }
+                    )
             else:
-                logger.error(f"Failed to initialize GCS client: {e}", exc_info=True)
+                logger.error(
+                    {
+                        "event": "gcs_client_init_failed",
+                        "error": str(e),
+                        "error_type": error_type,
+                        "environment": "cloud_run" if is_cloud_run else "local_dev",
+                    },
+                    exc_info=True
+                )
             return None
     
     return _gcs_client
@@ -232,13 +343,33 @@ def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_typ
         error_type = type(e).__name__
         error_msg = str(e)
         
-        # Provide more specific error messages
+        # Provide environment-aware error messages
+        is_cloud_run = _is_cloud_run()
+        
         if "403" in error_msg or "Forbidden" in error_msg or "PermissionDenied" in error_type:
-            logger.error(f"GCS permission denied. Service account needs 'storage.objects.create' permission on bucket {bucket_name}")
+            if is_cloud_run:
+                logger.error(
+                    f"GCS permission denied on bucket '{bucket_name}'. "
+                    f"Ensure the Cloud Run service account has Storage Object Admin (or Storage Admin) "
+                    f"IAM role on bucket '{bucket_name}'. Check IAM bindings for the service account."
+                )
+            else:
+                logger.error(
+                    f"GCS permission denied. Service account needs 'storage.objects.create' permission on bucket {bucket_name}"
+                )
         elif "404" in error_msg or "NotFound" in error_type:
             logger.error(f"GCS bucket not found: {bucket_name}. Verify the bucket name and that it exists in your GCP project.")
         elif "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in error_type:
-            logger.error("GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS or run 'gcloud auth application-default login'")
+            if is_cloud_run:
+                logger.error(
+                    f"GCS authentication failed. Ensure the Cloud Run service account has proper IAM permissions "
+                    f"on bucket '{bucket_name}'. The service account should have Storage Object Admin role."
+                )
+            else:
+                logger.error(
+                    "GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS environment variable "
+                    "to a service account JSON key file, or run 'gcloud auth application-default login' for local development."
+                )
         else:
             logger.error(f"Failed to upload {object_name} to {bucket_name}: {e}", exc_info=True)
         return None

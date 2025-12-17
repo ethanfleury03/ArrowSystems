@@ -606,6 +606,89 @@ async def startup_event():
                 db_manager = None
                 saved_response_manager = None
             
+            # GCS connectivity smoke check (non-fatal, but logs errors)
+            try:
+                from .utils.gcs_client import get_gcs_client, _is_cloud_run
+                from .config.env import settings
+                
+                if settings.DOCS_GCS_BUCKET:
+                    gcs_client = get_gcs_client()
+                    if gcs_client:
+                        # Try to access the bucket (lightweight check)
+                        bucket = gcs_client.bucket(settings.DOCS_GCS_BUCKET)
+                        try:
+                            # This is a lightweight operation that just checks permissions
+                            bucket.reload()
+                            logger.info(
+                                {
+                                    "event": "gcs_smoke_check_passed",
+                                    "bucket": settings.DOCS_GCS_BUCKET,
+                                    "environment": "cloud_run" if _is_cloud_run() else "local_dev",
+                                    "message": "GCS bucket access verified successfully",
+                                }
+                            )
+                        except Exception as bucket_error:
+                            error_msg = str(bucket_error)
+                            is_cloud_run = _is_cloud_run()
+                            if "403" in error_msg or "Forbidden" in error_msg or "PermissionDenied" in error_msg:
+                                if is_cloud_run:
+                                    logger.error(
+                                        {
+                                            "event": "gcs_smoke_check_failed",
+                                            "bucket": settings.DOCS_GCS_BUCKET,
+                                            "error": "Permission denied",
+                                            "environment": "cloud_run",
+                                            "message": f"Cloud Run service account does not have access to bucket '{settings.DOCS_GCS_BUCKET}'. "
+                                                       f"Ensure the service account has Storage Object Admin (or Storage Admin) IAM role on the bucket.",
+                                        }
+                                    )
+                                else:
+                                    logger.error(
+                                        {
+                                            "event": "gcs_smoke_check_failed",
+                                            "bucket": settings.DOCS_GCS_BUCKET,
+                                            "error": "Permission denied",
+                                            "environment": "local_dev",
+                                            "message": "GCS bucket access denied. Check service account permissions or GOOGLE_APPLICATION_CREDENTIALS.",
+                                        }
+                                    )
+                            elif "404" in error_msg or "NotFound" in error_msg:
+                                logger.error(
+                                    {
+                                        "event": "gcs_smoke_check_failed",
+                                        "bucket": settings.DOCS_GCS_BUCKET,
+                                        "error": "Bucket not found",
+                                        "message": f"GCS bucket '{settings.DOCS_GCS_BUCKET}' not found. Verify the bucket name and that it exists in your GCP project.",
+                                    }
+                                )
+                            else:
+                                logger.warning(
+                                    {
+                                        "event": "gcs_smoke_check_failed",
+                                        "bucket": settings.DOCS_GCS_BUCKET,
+                                        "error": error_msg,
+                                        "message": "GCS bucket access check failed (non-fatal). Uploads may fail.",
+                                    }
+                                )
+                    else:
+                        logger.warning(
+                            {
+                                "event": "gcs_smoke_check_skipped",
+                                "bucket": settings.DOCS_GCS_BUCKET,
+                                "message": "GCS client not available. Uploads will fail.",
+                            }
+                        )
+            except Exception as gcs_check_error:
+                # Non-fatal - log but don't block startup
+                logger.warning(
+                    {
+                        "event": "gcs_smoke_check_error",
+                        "error": str(gcs_check_error),
+                        "message": "GCS smoke check encountered an error (non-fatal). Uploads may fail.",
+                    },
+                    exc_info=True
+                )
+            
             # Run database connection check (non-fatal)
             if db_manager is not None:
                 try:
@@ -5160,7 +5243,19 @@ async def upload_document(
                 
                 gcs_client = get_gcs_client()
                 if not gcs_client:
-                    raise ValueError("GCS client not available. Check that GOOGLE_APPLICATION_CREDENTIALS is set.")
+                    # Environment-aware error message
+                    is_cloud_run = bool(os.getenv("K_SERVICE"))
+                    if is_cloud_run:
+                        raise ValueError(
+                            f"GCS client not available. Ensure the Cloud Run service account has "
+                            f"Storage Object Admin IAM role on bucket '{settings.DOCS_GCS_BUCKET}'. "
+                            f"Check IAM bindings for the service account."
+                        )
+                    else:
+                        raise ValueError(
+                            "GCS client not available. Set GOOGLE_APPLICATION_CREDENTIALS environment variable "
+                            "to a service account JSON key file, or run 'gcloud auth application-default login' for local development."
+                        )
                 
                 gcs_path = upload_bytes(
                     bucket_name=settings.DOCS_GCS_BUCKET,
@@ -5171,18 +5266,31 @@ async def upload_document(
                 
                 # CRITICAL: GCS upload MUST succeed - no fallback to local storage
                 if not gcs_path:
-                    import os
+                    is_cloud_run = bool(os.getenv("K_SERVICE"))
                     creds_set = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-                    error_msg = f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'. "
-                    if not creds_set:
-                        error_msg += "GCS credentials not configured. "
-                    error_msg += "Database transaction will be rolled back. No document record will be created."
+                    
+                    if is_cloud_run:
+                        error_msg = (
+                            f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'. "
+                            f"Ensure the Cloud Run service account has Storage Object Admin (or Storage Admin) "
+                            f"IAM role on bucket '{settings.DOCS_GCS_BUCKET}'. Check IAM bindings for the service account. "
+                            f"Database transaction will be rolled back. No document record will be created."
+                        )
+                    else:
+                        error_msg = (
+                            f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'. "
+                        )
+                        if not creds_set:
+                            error_msg += "GCS credentials not configured. Set GOOGLE_APPLICATION_CREDENTIALS or run 'gcloud auth application-default login'. "
+                        error_msg += "Database transaction will be rolled back. No document record will be created."
+                    
                     logger.error(
                         {
                             "event": "gcs_upload_failed_before_commit",
                             "filename": file.filename,
                             "bucket": settings.DOCS_GCS_BUCKET,
                             "object_name": gcs_object_name,
+                            "environment": "cloud_run" if is_cloud_run else "local_dev",
                             "credentials_configured": creds_set,
                             "request_id": request_id,
                         }
@@ -5364,24 +5472,31 @@ async def upload_document(
         except ValueError as ve:
             # Convert ValueError to HTTPException with appropriate status
             error_msg = str(ve)
+            is_cloud_run = bool(os.getenv("K_SERVICE"))
+            
             if "GCS client not available" in error_msg:
-                raise HTTPException(
-                    status_code=500,
-                    detail="GCS client not available. Check that GOOGLE_APPLICATION_CREDENTIALS is set or run 'gcloud auth application-default login'. See logs for details."
-                )
+                if is_cloud_run:
+                    detail = (
+                        f"GCS client not available. Ensure the Cloud Run service account has "
+                        f"Storage Object Admin IAM role on bucket '{settings.DOCS_GCS_BUCKET}'. "
+                        f"Check IAM bindings for the service account. See logs for details."
+                    )
+                else:
+                    detail = (
+                        "GCS client not available. Set GOOGLE_APPLICATION_CREDENTIALS environment variable "
+                        "to a service account JSON key file, or run 'gcloud auth application-default login' for local development. "
+                        "See logs for details."
+                    )
+                raise HTTPException(status_code=500, detail=detail)
             elif "DOCS_GCS_BUCKET not configured" in error_msg:
                 raise HTTPException(
                     status_code=500,
                     detail="DOCS_GCS_BUCKET not configured. GCS upload is required."
                 )
             elif "Failed to upload" in error_msg:
-                import os
-                creds_set = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-                error_detail = f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'. "
-                if not creds_set:
-                    error_detail += "GCS credentials not configured. Set GOOGLE_APPLICATION_CREDENTIALS environment variable or run 'gcloud auth application-default login'. "
-                error_detail += "Check backend logs for detailed error information."
-                raise HTTPException(status_code=500, detail=error_detail)
+                # Error message already contains environment-aware details from the ValueError
+                # Just pass it through
+                raise HTTPException(status_code=500, detail=error_msg)
             else:
                 raise HTTPException(status_code=500, detail=f"Upload failed: {error_msg}")
         
