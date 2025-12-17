@@ -4374,7 +4374,7 @@ async def delete_document_by_metadata_id(
         # Add warning header if ingestion is disabled (non-blocking)
         headers = {}
         if not settings.allow_app_ingestion:
-            headers["X-Index-Warning"] = "Search index may be stale until next rebuild via external pipeline"
+            headers["X-Index-Warning"] = "Document metadata deleted. Search index will be updated on next rebuild via external GPU pipeline."
         
         return Response(
             status_code=204,
@@ -4909,7 +4909,16 @@ async def upload_document(
         # Upload to GCS (primary storage)
         gcs_path = None
         if settings.DOCS_GCS_BUCKET:
-            from backend.utils.gcs_client import upload_bytes
+            from backend.utils.gcs_client import upload_bytes, get_gcs_client
+            
+            # Check GCS client availability before attempting upload
+            gcs_client = get_gcs_client()
+            if not gcs_client:
+                raise HTTPException(
+                    status_code=500,
+                    detail="GCS client not available. Check that GOOGLE_APPLICATION_CREDENTIALS is set or run 'gcloud auth application-default login'. See logs for details."
+                )
+            
             gcs_path = upload_bytes(
                 bucket_name=settings.DOCS_GCS_BUCKET,
                 object_name=gcs_object_name,
@@ -4918,9 +4927,16 @@ async def upload_document(
             )
             
             if not gcs_path:
+                # Check common issues and provide helpful error message
+                import os
+                creds_set = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+                error_detail = f"Failed to upload file to GCS bucket '{settings.DOCS_GCS_BUCKET}'. "
+                if not creds_set:
+                    error_detail += "GCS credentials not configured. Set GOOGLE_APPLICATION_CREDENTIALS environment variable or run 'gcloud auth application-default login'. "
+                error_detail += "Check backend logs for detailed error information."
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Failed to upload file to GCS bucket {settings.DOCS_GCS_BUCKET}"
+                    detail=error_detail
                 )
             
             logger.info(
@@ -4978,20 +4994,44 @@ async def upload_document(
                 detail="Database session factory not available"
             )
         
+        # CRITICAL FIX: Always set file_path to GCS path so ingest.py can find it
+        # ingest.py requires either Document.gcs_path OR DocumentIngestionMetadata.file_path starting with 'gs://'
+        metadata_file_path = gcs_path if gcs_path else (original_path if settings.DOCS_LOCAL_SAVE_ENABLED else None)
+        
         def _create_metadata(session_factory=session_factory):
             with session_factory() as session:
+                # Log database connection for consistency check
+                from backend.config.env import settings as upload_settings
+                db_url = upload_settings.DATABASE_URL if hasattr(upload_settings, 'DATABASE_URL') else os.getenv('DATABASE_URL', 'NOT_SET')
+                import re
+                if db_url and db_url != 'NOT_SET':
+                    db_url_safe = re.sub(r':([^:@]+)@', r':***@', db_url)
+                    logger.info(f"🔍 Upload endpoint using DATABASE_URL: {db_url_safe}")
+                
                 metadata = DocumentIngestionMetadata(
                     id=metadata_id,
                     filename=file.filename,
                     machine_model=normalized_machine_model,
                     status="PENDING_INGESTION",
                     description=description,
-                    file_path=original_path if settings.DOCS_LOCAL_SAVE_ENABLED else None,  # Only set if local save enabled
+                    file_path=metadata_file_path,  # Always set to GCS path (or local if enabled)
                     file_size_bytes=file_size,
                 )
                 session.add(metadata)
                 session.commit()
                 session.refresh(metadata)
+                
+                logger.info(
+                    {
+                        "event": "document_ingestion_metadata_created",
+                        "metadata_id": metadata.id,
+                        "filename": metadata.filename,
+                        "file_path": metadata.file_path,
+                        "has_gcs_path": metadata.file_path and metadata.file_path.startswith('gs://'),
+                        "request_id": request_id,
+                    }
+                )
+                
                 return {
                     "id": metadata.id,
                     "filename": metadata.filename,
