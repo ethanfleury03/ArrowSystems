@@ -3,18 +3,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { resolveApiBaseUrl, ALLOW_APP_INGESTION } from "@/config/api";
-import { Upload, FileText, Trash2, Edit, Eye, EyeOff, X, Check, ExternalLink } from "lucide-react";
+import { Upload, FileText, Trash2, Edit, Eye, EyeOff, X, Check, ExternalLink, RefreshCw, AlertTriangle, Database, Cloud, Wrench } from "lucide-react";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface Document {
   filename: string;
-  size_bytes: number;
+  size_bytes: number | null;
   uploaded_date?: string | null;
   chunk_count: number;
   page_count: number;
-  file_path: string;
-  file_type: string;
+  file_path: string | null;
+  gcs_path?: string | null;
+  file_type: string | null;
   is_active: boolean;
-  machine_model?: string | null;
+  machine_model?: string | null | string[];
   missing_machine_model?: boolean;
   requires_admin_review?: boolean;
   category?: string | null;
@@ -22,6 +24,11 @@ interface Document {
   ingestion_status?: string | null;
   ingestion_metadata_id?: string | null;
   ingestion_error?: string | null;
+  metadata_id?: string;
+  document_id?: number | null;
+  display_name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 type SortField = keyof Pick<Document, "filename" | "page_count" | "is_active">;
@@ -103,6 +110,23 @@ export default function AdminDocumentsPage() {
   
   // Allowed machine models for dropdown
   const [allowedMachineModels, setAllowedMachineModels] = useState<string[]>([]);
+
+  // Maintenance/Diagnostics state
+  const [diagnosticsResult, setDiagnosticsResult] = useState<any>(null);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [diagnosticsLastRun, setDiagnosticsLastRun] = useState<Date | null>(null);
+  const [isDiagnosticsModalOpen, setIsDiagnosticsModalOpen] = useState(false);
+
+  const [orphansList, setOrphansList] = useState<any[]>([]);
+  const [orphansLoading, setOrphansLoading] = useState(false);
+  const [orphansError, setOrphansError] = useState<string | null>(null);
+  const [isOrphansModalOpen, setIsOrphansModalOpen] = useState(false);
+
+  const [deleteOrphansLoading, setDeleteOrphansLoading] = useState(false);
+  const [deleteOrphansResult, setDeleteOrphansResult] = useState<any>(null);
+  const [isDeleteOrphansConfirmOpen, setIsDeleteOrphansConfirmOpen] = useState(false);
+  const [isDeleteOrphansFailuresOpen, setIsDeleteOrphansFailuresOpen] = useState(false);
 
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
 
@@ -315,6 +339,10 @@ export default function AdminDocumentsPage() {
     setIsEditModalOpen(false);
     setIsDeleteModalOpen(false);
     setIsViewModalOpen(false);
+    setIsDiagnosticsModalOpen(false);
+    setIsOrphansModalOpen(false);
+    setIsDeleteOrphansConfirmOpen(false);
+    setIsDeleteOrphansFailuresOpen(false);
     resetFormState();
   };
 
@@ -513,27 +541,28 @@ export default function AdminDocumentsPage() {
     }
     setActionSubmitting(true);
     try {
-      // Use Phase 4 delete endpoint if metadata_id is available, otherwise use old endpoint
-      let response;
-      // Cookie-based JWT is automatically sent with fetch requests
-      if (selectedDocument.ingestion_metadata_id) {
-        // Phase 4: Use metadata_id endpoint for safe delete with reindex
-        response = await fetch(`${apiBaseUrl}/admin/documents/metadata/${selectedDocument.ingestion_metadata_id}`, {
-          method: "DELETE",
-          credentials: "include",
-        });
-      } else {
-        // Fallback to old endpoint
-        const encodedFilename = encodeURIComponent(selectedDocument.filename);
-        response = await fetch(`${apiBaseUrl}/admin/documents/${encodedFilename}`, {
-          method: "DELETE",
-          credentials: "include",
-        });
+      // Use metadata_id endpoint (preferred) or ingestion_metadata_id (fallback)
+      const metadataId = selectedDocument.metadata_id || selectedDocument.ingestion_metadata_id;
+      if (!metadataId) {
+        throw new Error("Document metadata ID not found. Cannot delete.");
       }
       
+      // Use the reliable delete endpoint that works even if GCS object is missing
+      const response = await fetch(`${apiBaseUrl}/admin/documents/metadata/${metadataId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      
       if (!response.ok) {
-        const detail = await response.json().catch(() => null);
-        throw new Error(extractApiError(detail) || "Failed to delete document");
+        let errorDetail = null;
+        try {
+          errorDetail = await response.json();
+        } catch {
+          // Response might not be JSON
+          errorDetail = { detail: `HTTP ${response.status}: ${response.statusText}` };
+        }
+        const errorMessage = extractApiError(errorDetail) || `Failed to delete document (${response.status})`;
+        throw new Error(errorMessage);
       }
       
       // Close modal immediately and reset state
@@ -552,11 +581,106 @@ export default function AdminDocumentsPage() {
       await fetchDocuments();
     } catch (err) {
       console.error("Delete document failed:", err);
-      showToast(err instanceof Error ? err.message : "Failed to delete document", "error");
+      // Extract detailed error message from response
+      let errorMessage = "Failed to delete document";
+      if (err instanceof Error) {
+        errorMessage = err.message;
+      }
+      // Show the actual error message from backend
+      showToast(errorMessage, "error");
     } finally {
       setActionSubmitting(false);
     }
   };
+
+  // Maintenance functions
+  const runDiagnostics = useCallback(async () => {
+    setDiagnosticsLoading(true);
+    setDiagnosticsError(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/admin/documents/diagnostics`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(extractApiError(error) || `Failed to get diagnostics (${response.status})`);
+      }
+      const data = await response.json();
+      setDiagnosticsResult(data);
+      setDiagnosticsLastRun(new Date());
+      setIsDiagnosticsModalOpen(true);
+    } catch (err) {
+      console.error("Diagnostics failed:", err);
+      setDiagnosticsError(err instanceof Error ? err.message : "Failed to get diagnostics");
+      showToast(err instanceof Error ? err.message : "Failed to get diagnostics", "error");
+    } finally {
+      setDiagnosticsLoading(false);
+    }
+  }, [apiBaseUrl, showToast]);
+
+  const viewOrphans = useCallback(async () => {
+    setOrphansLoading(true);
+    setOrphansError(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/admin/documents/orphans`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(extractApiError(error) || `Failed to get orphans (${response.status})`);
+      }
+      const data = await response.json();
+      setOrphansList(data.orphans || []);
+      setIsOrphansModalOpen(true);
+    } catch (err) {
+      console.error("View orphans failed:", err);
+      setOrphansError(err instanceof Error ? err.message : "Failed to get orphans");
+      showToast(err instanceof Error ? err.message : "Failed to get orphans", "error");
+    } finally {
+      setOrphansLoading(false);
+    }
+  }, [apiBaseUrl, showToast]);
+
+  const deleteAllOrphans = useCallback(async () => {
+    setDeleteOrphansLoading(true);
+    try {
+      const response = await fetch(`${apiBaseUrl}/admin/documents/orphans`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(extractApiError(error) || `Failed to delete orphans (${response.status})`);
+      }
+      const data = await response.json();
+      setDeleteOrphansResult(data);
+      
+      // Show success message
+      const successMsg = `✅ Deleted ${data.count_deleted || 0} orphan record(s)`;
+      if (data.count_failed > 0) {
+        showToast(`${successMsg}. ${data.count_failed} failed.`, "error");
+        setIsDeleteOrphansFailuresOpen(true);
+      } else {
+        showToast(successMsg, "success");
+      }
+      
+      // Close confirmation modal
+      setIsDeleteOrphansConfirmOpen(false);
+      
+      // Refresh documents list
+      await fetchDocuments();
+      
+      // Refresh orphans list if modal is open
+      if (isOrphansModalOpen) {
+        await viewOrphans();
+      }
+    } catch (err) {
+      console.error("Delete orphans failed:", err);
+      showToast(err instanceof Error ? err.message : "Failed to delete orphans", "error");
+    } finally {
+      setDeleteOrphansLoading(false);
+    }
+  }, [apiBaseUrl, showToast, fetchDocuments, isOrphansModalOpen, viewOrphans]);
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 md:mx-0 md:px-6 xl:mx-auto">
@@ -570,6 +694,102 @@ export default function AdminDocumentsPage() {
           Upload Document
         </Button>
       </div>
+
+      {/* Maintenance Section */}
+      <section className="rounded-xl border bg-background shadow-sm p-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <Wrench className="h-5 w-5 text-muted-foreground" />
+            <h2 className="text-lg font-semibold">Maintenance</h2>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={runDiagnostics}
+              disabled={diagnosticsLoading}
+            >
+              {diagnosticsLoading ? (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  Running...
+                </>
+              ) : (
+                <>
+                  <Database className="mr-2 h-4 w-4" />
+                  Diagnostics
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={viewOrphans}
+              disabled={orphansLoading}
+            >
+              {orphansLoading ? (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  Loading...
+                </>
+              ) : (
+                <>
+                  <AlertTriangle className="mr-2 h-4 w-4" />
+                  View Orphans
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                // Load orphans first to show count in confirmation
+                if (orphansList.length === 0) {
+                  await viewOrphans();
+                }
+                setIsDeleteOrphansConfirmOpen(true);
+              }}
+              disabled={deleteOrphansLoading || orphansLoading}
+              className="text-destructive hover:text-destructive"
+            >
+              {deleteOrphansLoading ? (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete All Orphans
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={fetchDocuments}
+              disabled={loadingTable}
+            >
+              {loadingTable ? (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  Refreshing...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Refresh
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+        {diagnosticsLastRun && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Last diagnostics run: {diagnosticsLastRun.toLocaleString()}
+          </p>
+        )}
+      </section>
 
       <section className="rounded-xl border bg-background shadow-sm">
         <div className="flex flex-col gap-4 border-b border-border p-4 md:flex-row md:items-center md:justify-between">
@@ -704,7 +924,7 @@ export default function AdminDocumentsPage() {
                       )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
-                      {formatFileSize(doc.size_bytes)}
+                      {formatFileSize(doc.size_bytes || 0)}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{doc.page_count}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm">
@@ -1008,6 +1228,288 @@ export default function AdminDocumentsPage() {
                 </Button>
                 <Button variant="destructive" onClick={submitDelete} disabled={actionSubmitting || deleteConfirmation !== "DELETE"}>
                   {actionSubmitting ? "Deleting..." : "Delete"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Diagnostics Modal */}
+      {isDiagnosticsModalOpen && diagnosticsResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-2xl rounded-lg border border-border bg-background p-6 shadow-lg max-h-[90vh] overflow-y-auto">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Document Diagnostics</h2>
+              <button
+                onClick={() => setIsDiagnosticsModalOpen(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-md border border-border bg-muted/30 p-3">
+                  <div className="text-xs font-medium text-muted-foreground">DB Metadata Records</div>
+                  <div className="text-2xl font-semibold">{diagnosticsResult.count_db_metadata || 0}</div>
+                </div>
+                <div className="rounded-md border border-border bg-muted/30 p-3">
+                  <div className="text-xs font-medium text-muted-foreground">DB Document Records</div>
+                  <div className="text-2xl font-semibold">{diagnosticsResult.count_db_documents || 0}</div>
+                </div>
+                <div className="rounded-md border border-border bg-muted/30 p-3">
+                  <div className="text-xs font-medium text-muted-foreground">GCS Objects</div>
+                  <div className="text-2xl font-semibold">{diagnosticsResult.count_gcs_objects || 0}</div>
+                </div>
+                <div className="rounded-md border border-border bg-muted/30 p-3">
+                  <div className="text-xs font-medium text-muted-foreground">Orphaned Metadata</div>
+                  <div className="text-2xl font-semibold text-orange-600 dark:text-orange-400">
+                    {diagnosticsResult.orphan_metadata_ids?.length || 0}
+                  </div>
+                </div>
+              </div>
+
+              {diagnosticsResult.orphan_metadata_ids && diagnosticsResult.orphan_metadata_ids.length > 0 && (
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-orange-600 dark:text-orange-400">
+                    Orphaned Metadata Records ({diagnosticsResult.orphan_metadata_ids.length})
+                  </h3>
+                  <div className="max-h-48 overflow-y-auto rounded-md border border-border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs">Metadata ID</TableHead>
+                          <TableHead className="text-xs">Filename</TableHead>
+                          <TableHead className="text-xs">GCS Path</TableHead>
+                          <TableHead className="text-xs">Reason</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {diagnosticsResult.orphan_metadata_ids.map((orphan: any, idx: number) => (
+                          <TableRow key={idx}>
+                            <TableCell className="text-xs font-mono">{orphan.metadata_id?.substring(0, 8)}...</TableCell>
+                            <TableCell className="text-xs">{orphan.filename}</TableCell>
+                            <TableCell className="text-xs font-mono text-muted-foreground truncate max-w-xs" title={orphan.gcs_path}>
+                              {orphan.gcs_path}
+                            </TableCell>
+                            <TableCell className="text-xs text-orange-600 dark:text-orange-400">{orphan.reason}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              )}
+
+              {diagnosticsResult.gcs_objects_without_db && diagnosticsResult.gcs_objects_without_db.length > 0 && (
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-blue-600 dark:text-blue-400">
+                    GCS Objects Without DB Records ({diagnosticsResult.gcs_objects_without_db.length})
+                  </h3>
+                  <div className="max-h-48 overflow-y-auto rounded-md border border-border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs">Object Name</TableHead>
+                          <TableHead className="text-xs">GCS Path</TableHead>
+                          <TableHead className="text-xs">Reason</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {diagnosticsResult.gcs_objects_without_db.map((obj: any, idx: number) => (
+                          <TableRow key={idx}>
+                            <TableCell className="text-xs">{obj.object_name}</TableCell>
+                            <TableCell className="text-xs font-mono text-muted-foreground truncate max-w-xs" title={obj.gcs_path}>
+                              {obj.gcs_path}
+                            </TableCell>
+                            <TableCell className="text-xs text-blue-600 dark:text-blue-400">{obj.reason}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              )}
+
+              {(!diagnosticsResult.orphan_metadata_ids || diagnosticsResult.orphan_metadata_ids.length === 0) &&
+               (!diagnosticsResult.gcs_objects_without_db || diagnosticsResult.gcs_objects_without_db.length === 0) && (
+                <div className="rounded-md border border-green-500/30 bg-green-500/10 p-3 text-center text-sm text-green-700 dark:text-green-400">
+                  ✅ All records are consistent
+                </div>
+              )}
+
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setIsDiagnosticsModalOpen(false)}>
+                  Close
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Orphans Modal */}
+      {isOrphansModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-4xl rounded-lg border border-border bg-background p-6 shadow-lg max-h-[90vh] overflow-y-auto">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Orphaned Documents</h2>
+              <button
+                onClick={() => setIsOrphansModalOpen(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              {orphansError ? (
+                <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400">
+                  {orphansError}
+                </div>
+              ) : orphansList.length === 0 ? (
+                <div className="rounded-md border border-green-500/30 bg-green-500/10 p-3 text-center text-sm text-green-700 dark:text-green-400">
+                  ✅ No orphaned records found
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    Found {orphansList.length} orphaned record(s). These are database records that reference missing GCS objects or have no file path.
+                  </p>
+                  <div className="max-h-96 overflow-y-auto rounded-md border border-border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs">Metadata ID</TableHead>
+                          <TableHead className="text-xs">Filename</TableHead>
+                          <TableHead className="text-xs">GCS Path</TableHead>
+                          <TableHead className="text-xs">File Path</TableHead>
+                          <TableHead className="text-xs">Reason</TableHead>
+                          <TableHead className="text-xs">Created At</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {orphansList.map((orphan: any, idx: number) => (
+                          <TableRow key={idx}>
+                            <TableCell className="text-xs font-mono">{orphan.metadata_id?.substring(0, 8)}...</TableCell>
+                            <TableCell className="text-xs">{orphan.filename}</TableCell>
+                            <TableCell className="text-xs font-mono text-muted-foreground truncate max-w-xs" title={orphan.gcs_path}>
+                              {orphan.gcs_path || "—"}
+                            </TableCell>
+                            <TableCell className="text-xs font-mono text-muted-foreground truncate max-w-xs" title={orphan.file_path}>
+                              {orphan.file_path || "—"}
+                            </TableCell>
+                            <TableCell className="text-xs text-orange-600 dark:text-orange-400">{orphan.reason}</TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {orphan.created_at ? new Date(orphan.created_at).toLocaleDateString() : "—"}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
+              )}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setIsOrphansModalOpen(false)}>
+                  Close
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete All Orphans Confirmation Modal */}
+      {isDeleteOrphansConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-lg border border-border bg-background p-6 shadow-lg">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-destructive">Delete All Orphans</h2>
+              <button
+                onClick={() => setIsDeleteOrphansConfirmOpen(false)}
+                className="text-muted-foreground hover:text-foreground"
+                disabled={deleteOrphansLoading}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                This will permanently delete all orphaned document records from the database.
+                {orphansList.length > 0 && (
+                  <span className="block mt-2 font-semibold text-foreground">
+                    {orphansList.length} orphaned record(s) will be deleted.
+                  </span>
+                )}
+              </p>
+              <p className="text-sm text-muted-foreground">
+                This action cannot be undone. Orphaned records are database entries that reference missing GCS objects or have no file path.
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setIsDeleteOrphansConfirmOpen(false)}
+                  disabled={deleteOrphansLoading}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={deleteAllOrphans}
+                  disabled={deleteOrphansLoading}
+                >
+                  {deleteOrphansLoading ? "Deleting..." : "Delete All Orphans"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Orphans Failures Modal */}
+      {isDeleteOrphansFailuresOpen && deleteOrphansResult && deleteOrphansResult.failures && deleteOrphansResult.failures.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-2xl rounded-lg border border-border bg-background p-6 shadow-lg max-h-[90vh] overflow-y-auto">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-destructive">Deletion Failures</h2>
+              <button
+                onClick={() => setIsDeleteOrphansFailuresOpen(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                {deleteOrphansResult.count_deleted || 0} orphan(s) deleted successfully.
+                {deleteOrphansResult.count_failed > 0 && (
+                  <span className="block mt-2 font-semibold text-destructive">
+                    {deleteOrphansResult.count_failed} deletion(s) failed:
+                  </span>
+                )}
+              </p>
+              <div className="max-h-96 overflow-y-auto rounded-md border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-xs">Metadata ID</TableHead>
+                      <TableHead className="text-xs">Failure Reason</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {deleteOrphansResult.failures.map((failure: any, idx: number) => (
+                      <TableRow key={idx}>
+                        <TableCell className="text-xs font-mono">{failure.metadata_id?.substring(0, 8)}...</TableCell>
+                        <TableCell className="text-xs text-red-600 dark:text-red-400">{failure.reason}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setIsDeleteOrphansFailuresOpen(false)}>
+                  Close
                 </Button>
               </div>
             </div>
