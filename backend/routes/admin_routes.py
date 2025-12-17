@@ -249,7 +249,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             
             FRONTEND_BASE_URL = os.getenv(
                 "FRONTEND_BASE_URL",
-                "https://arrow-rag-frontend-70705019874.us-central1.run.app",
+                "https://support.arrsys.com",
             )
             
             # Open DB session to load User ORM instance and generate invite
