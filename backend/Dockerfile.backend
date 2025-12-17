@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Lightweight Dockerfile for RAG App - Development & Production
 # Models download at runtime, not during build
 
@@ -69,36 +68,38 @@ ENV HF_HOME=/app/.cache/huggingface \
 # This ensures models are available offline in production
 # Models are downloaded during build and baked into the image
 RUN mkdir -p /app/.cache/huggingface && \
-    python - << 'EOF'
-import os
-import sys
-from sentence_transformers import SentenceTransformer
-
-MODELS = [
-    "BAAI/bge-base-en-v1.5",
-    "BAAI/bge-large-en-v1.5",
-    "sentence-transformers/all-MiniLM-L6-v2",
-    "sentence-transformers/all-mpnet-base-v2",
-]
-
-cache_dir = os.getenv("HF_HOME", "/app/.cache/huggingface")
-os.makedirs(cache_dir, exist_ok=True)
-
-print("📥 Pre-downloading embedding models...")
-for model_name in MODELS:
-    try:
-        print(f"   Downloading: {model_name}")
-        model = SentenceTransformer(model_name, cache_folder=cache_dir)
-        test_embedding = model.encode("test", convert_to_numpy=True)
-        print(f"   ✅ {model_name} (dim: {len(test_embedding)})")
-    except Exception as e:
-        print(f"   ❌ {model_name}: {e}")
-        if model_name == "BAAI/bge-base-en-v1.5":
-            print("❌ ERROR: Primary model failed to download")
-            sys.exit(1)
-
-print("✅ All models downloaded successfully")
-EOF
+    printf '%s\n' \
+        'import os' \
+        'import sys' \
+        'from sentence_transformers import SentenceTransformer' \
+        '' \
+        'MODELS = [' \
+        '    "BAAI/bge-base-en-v1.5",' \
+        '    "BAAI/bge-large-en-v1.5",' \
+        '    "sentence-transformers/all-MiniLM-L6-v2",' \
+        '    "sentence-transformers/all-mpnet-base-v2",' \
+        ']' \
+        '' \
+        'cache_dir = os.getenv("HF_HOME", "/app/.cache/huggingface")' \
+        'os.makedirs(cache_dir, exist_ok=True)' \
+        '' \
+        'print("📥 Pre-downloading embedding models...")' \
+        'for model_name in MODELS:' \
+        '    try:' \
+        '        print(f"   Downloading: {model_name}")' \
+        '        model = SentenceTransformer(model_name, cache_folder=cache_dir)' \
+        '        test_embedding = model.encode("test", convert_to_numpy=True)' \
+        '        print(f"   ✅ {model_name} (dim: {len(test_embedding)})")' \
+        '    except Exception as e:' \
+        '        print(f"   ❌ {model_name}: {e}")' \
+        '        if model_name == "BAAI/bge-base-en-v1.5":' \
+        '            print("❌ ERROR: Primary model failed to download")' \
+        '            sys.exit(1)' \
+        '' \
+        'print("✅ All models downloaded successfully")' \
+        > /tmp/download_models.py && \
+    python /tmp/download_models.py && \
+    rm /tmp/download_models.py
 
 # Conditionally install development dependencies
 # This layer only rebuilds when BUILD_ENV changes or dependencies stage is invalidated
