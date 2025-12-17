@@ -635,8 +635,7 @@ export function DocumentsTab() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Document</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete &quot;{selectedDoc?.filename}&quot;? This requires a full index rebuild.
-              The deletion will happen in the background.
+              Are you sure you want to delete &quot;{selectedDoc?.filename}&quot;? This will permanently delete the document and remove it from the search index.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
