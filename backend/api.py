@@ -4878,8 +4878,9 @@ def check_machine_model_exists(normalized_machine_model: str) -> bool:
 
 # DOCUMENT UPLOAD ENDPOINT
 # This endpoint ALWAYS works - it uploads files to GCS and creates database records.
-# Ingestion (chunking/embedding) is optional and only triggered if allow_app_ingestion=True.
-# Upload succeeds regardless of ingestion flag - ingestion is a separate step.
+# IMPORTANT: Upload endpoint ALWAYS triggers ingestion (chunking + embedding) regardless of allow_app_ingestion flag.
+# It uses force=True to bypass gate checks in run_chunking() and run_embedding().
+# This ensures single-document uploads always get ingested into the index.
 @app.post("/admin/documents/upload")
 async def upload_document(
     http_request: Request,
@@ -4891,14 +4892,17 @@ async def upload_document(
     """
     Upload a document with machine model selection.
     
-    IMPORTANT: This endpoint ALWAYS works regardless of ARROW_ALLOW_APP_INGESTION setting.
-    It uploads the file to GCS and creates database records. This is Phase 1 (upload).
+    IMPORTANT: This endpoint ALWAYS works and ALWAYS triggers ingestion.
+    - Phase 1: Uploads file to GCS and creates database records (always succeeds)
+    - Phase 2: Triggers chunking in background (always triggered, uses force=True)
+    - Phase 3: Triggers embedding in background (always triggered, uses force=True)
     
-    Ingestion (Phase 2: chunking, Phase 3: embedding) is optional:
-    - If allow_app_ingestion=True: Ingestion is triggered automatically in background
-    - If allow_app_ingestion=False: Upload succeeds, ingestion must be done via external pipeline
+    The upload endpoint bypasses the allow_app_ingestion flag by using force=True
+    when calling run_chunking() and run_embedding(). This ensures single-document
+    uploads always get ingested into the index, regardless of the global ingestion setting.
     
-    The upload always succeeds - ingestion is a separate, optional step.
+    The allow_app_ingestion flag still controls bulk ingestion operations, but not
+    individual document uploads from the UI.
     """
     import uuid
     from datetime import datetime
@@ -5327,84 +5331,71 @@ async def upload_document(
                 "metadata_id": metadata_result["id"],
                 "filename": file.filename,
                 "request_id": request_id,
+                "note": "Upload endpoint ALWAYS triggers ingestion (bypasses allow_app_ingestion flag)",
             }
         )
         
         # INDEX-WRITE PATH: Single-document ingestion (incremental, not bulk)
         # Document row and file upload are always completed above
-        # Only trigger ingestion if app-based ingestion is allowed
+        # IMPORTANT: Upload endpoint ALWAYS triggers ingestion, regardless of allow_app_ingestion flag
         # This processes ONE document at a time, adding it to the existing index incrementally
         # This is safe for Cloud Run CPU environments (no bulk processing)
-        if settings.allow_app_ingestion:
-            # Log ingestion enqueued
-            logger.info(
-                {
-                    "event": "document_ingestion_enqueued",
-                    "document_id": metadata_result["id"],
-                    "filename": metadata_result["filename"],
-                    "machine_model_id": machine_model_obj.id if machine_model_obj else None,
-                    "request_id": request_id,
-                }
-            )
-            
-            # Trigger background chunking task (Phase 2)
-            # After chunking completes, it will trigger embedding (Phase 3)
-            from backend.utils.chunking_runner import run_chunking
-            from backend.utils.embedding_runner import run_embedding
-            
-            def chunking_with_embedding_trigger(meta_id: str, req_id: Optional[str] = None):
-                """Run chunking, then trigger embedding if successful."""
-                try:
-                    # Run chunking (returns metadata_id if successful)
-                    result = run_chunking(meta_id, request_id=req_id)
-                    # If chunking succeeded, trigger embedding
-                    if result:
-                        # Schedule embedding as a background task
-                        # Note: We can't use background_tasks here since we're already in a background task
-                        # So we'll call it directly, but it's async-safe
-                        run_embedding(meta_id, request_id=req_id)
-                except Exception as e:
-                    logger.exception(
-                        {
-                            "event": "chunking_or_embedding_failed",
-                            "metadata_id": meta_id,
-                            "request_id": req_id,
-                            "error": str(e),
-                        }
-                    )
-            
-            background_tasks.add_task(chunking_with_embedding_trigger, metadata_id, request_id)
-            logger.info(f"chunking_task_queued", metadata_id=metadata_id, filename=file.filename)
-            
-            return {
-                "status": "success",
-                "message": f"File {file.filename} uploaded successfully. Chunking started in background.",
-                "metadata": metadata_result,
-                "file_path": original_path,
-                "size_bytes": file_size,
+        # We use force=True to bypass the gate checks in run_chunking/run_embedding
+        logger.info(
+            {
+                "event": "document_ingestion_enqueued",
+                "document_id": metadata_result["id"],
+                "filename": metadata_result["filename"],
+                "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+                "request_id": request_id,
+                "force_bypass": True,
+                "note": "Upload endpoint always ingests - using force=True to bypass allow_app_ingestion check",
             }
-        else:
-            # Ingestion disabled - document uploaded successfully but ingestion not triggered
-            # This is NORMAL and EXPECTED - upload always succeeds, ingestion is separate
-            logger.info(
-                {
-                    "event": "document_uploaded_no_ingestion",
-                    "filename": file.filename,
-                    "document_id": metadata_result["id"],
-                    "request_id": request_id,
-                    "note": "Document uploaded successfully. Ingestion will be handled by external pipeline.",
-                }
-            )
-            
-            # Return success - upload succeeded, ingestion is separate
-            return {
-                "status": "success",
-                "message": f"File {file.filename} uploaded successfully. Document is ready for ingestion via external pipeline.",
-                "metadata": metadata_result,
-                "file_path": original_path,
-                "size_bytes": file_size,
-                "ingestion_note": "Ingestion will be handled by external GPU pipeline when ready.",
+        )
+        
+        # Trigger background chunking task (Phase 2)
+        # After chunking completes, it will trigger embedding (Phase 3)
+        # Use force=True to bypass allow_app_ingestion checks in these functions
+        from backend.utils.chunking_runner import run_chunking
+        from backend.utils.embedding_runner import run_embedding
+        
+        def chunking_with_embedding_trigger(meta_id: str, req_id: Optional[str] = None):
+            """Run chunking, then trigger embedding if successful. Uses force=True to bypass ingestion flag."""
+            try:
+                # Run chunking with force=True to bypass allow_app_ingestion check
+                result = run_chunking(meta_id, request_id=req_id, force=True)
+                # If chunking succeeded, trigger embedding
+                if result:
+                    # Run embedding with force=True to bypass allow_app_ingestion check
+                    run_embedding(meta_id, request_id=req_id, force=True)
+            except Exception as e:
+                logger.exception(
+                    {
+                        "event": "chunking_or_embedding_failed",
+                        "metadata_id": meta_id,
+                        "request_id": req_id,
+                        "error": str(e),
+                        "note": "Ingestion failed but upload succeeded - document is in GCS and DB",
+                    }
+                )
+        
+        background_tasks.add_task(chunking_with_embedding_trigger, metadata_id, request_id)
+        logger.info(
+            {
+                "event": "chunking_task_queued",
+                "metadata_id": metadata_id,
+                "filename": file.filename,
+                "force_bypass": True,
             }
+        )
+        
+        return {
+            "status": "success",
+            "message": f"File {file.filename} uploaded successfully. Chunking started in background.",
+            "metadata": metadata_result,
+            "file_path": original_path,
+            "size_bytes": file_size,
+        }
         
     except HTTPException:
         raise

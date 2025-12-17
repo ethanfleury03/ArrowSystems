@@ -27,7 +27,7 @@ from backend.utils.test_mode import get_chunks_dir
 logger = get_logger(__name__)
 
 
-def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional[str]:
+def run_chunking(metadata_id: str, request_id: Optional[str] = None, force: bool = False) -> Optional[str]:
     """
     Run chunking for a SINGLE document ingestion metadata record.
     
@@ -48,23 +48,36 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
     Args:
         metadata_id: The ID of the DocumentIngestionMetadata record
         request_id: Optional request ID for tracing
+        force: If True, bypass the allow_app_ingestion check (for upload-triggered ingestion)
     
     Returns:
         metadata_id if successful, None on failure
     """
-    # Check if app-based ingestion is allowed
+    # Check if app-based ingestion is allowed (unless force=True)
     from backend.config.env import settings
-    if not settings.allow_app_ingestion:
+    if not force and not settings.allow_app_ingestion:
         logger.warning(
             {
                 "event": "ingestion_blocked_from_app",
                 "metadata_id": metadata_id,
                 "request_id": request_id,
                 "function": "run_chunking",
+                "force_bypass": False,
             }
         )
         raise RuntimeError(
             "Ingestion is disabled in this environment. Chunking must be triggered via external GPU pipeline."
+        )
+    
+    if force:
+        logger.info(
+            {
+                "event": "ingestion_forced_bypass",
+                "metadata_id": metadata_id,
+                "request_id": request_id,
+                "function": "run_chunking",
+                "note": "Bypassing allow_app_ingestion check (force=True from upload endpoint)",
+            }
         )
     
     session: Optional[Session] = None
