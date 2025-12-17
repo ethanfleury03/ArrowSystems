@@ -240,7 +240,7 @@ def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_typ
         elif "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in error_type:
             logger.error("GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS or run 'gcloud auth application-default login'")
         else:
-        logger.error(f"Failed to upload {object_name} to {bucket_name}: {e}", exc_info=True)
+            logger.error(f"Failed to upload {object_name} to {bucket_name}: {e}", exc_info=True)
         return None
 
 

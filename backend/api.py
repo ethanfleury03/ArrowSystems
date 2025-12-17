@@ -3929,7 +3929,8 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
 async def delete_document_by_metadata_id(
     http_request: Request,
     background_tasks: BackgroundTasks,
-    metadata_id: str
+    metadata_id: str,
+    force: bool = False
 ):
     """
     Delete a document by metadata_id.
@@ -3946,10 +3947,21 @@ async def delete_document_by_metadata_id(
     - Local files (if exist)
     
     Does NOT trigger full index rebuild. Uses incremental deletion from the index.
+    
+    Args:
+        force: If True, continue with DB+GCS deletion even if index deletion fails.
+               If False, return 500 if index deletion fails (unless index is unavailable).
+    
+    Returns:
+        200 with deletion summary if force=True and warnings occurred
+        204 No Content on success
+        404 if metadata_id not found
+        500 with detailed error message on failure
     """
     from .logging_context import get_user_id, get_user_role
     user_id = get_user_id()
     user_role = get_user_role()
+    request_id = http_request.headers.get("X-Request-ID", "unknown")
     
     # Validate metadata_id exists
     def _check_metadata():
@@ -3970,18 +3982,35 @@ async def delete_document_by_metadata_id(
         delete_result = await run_sync(delete_document_metadata_simple, metadata_id)
         filename = delete_result.get("filename", "unknown")
         
+        # Check for warnings (index deletion failures)
+        warnings = []
+        deleted_index_nodes = delete_result.get("deleted_index_nodes", 0)
+        deleted_index_ref_docs = delete_result.get("deleted_index_ref_docs", 0)
+        
+        # If index deletion failed but DB deletion succeeded, add warning
+        if deleted_index_nodes == 0 and deleted_index_ref_docs == 0:
+            # Check if index was available but nothing was deleted
+            try:
+                from backend.rag_pipeline import rag_pipeline
+                if rag_pipeline and rag_pipeline.is_initialized():
+                    warnings.append("Index deletion skipped or no chunks found in index")
+            except:
+                warnings.append("Index not available - chunks may remain in index until next rebuild")
+        
         logger.info(
             {
                 "event": "document_deleted_simple",
                 "metadata_id": metadata_id,
                 "filename": filename,
+                "request_id": request_id,
                 "deleted_metadata": delete_result.get("deleted_metadata"),
                 "deleted_document": delete_result.get("deleted_document"),
                 "deleted_chunks_file": delete_result.get("deleted_chunks_file"),
                 "deleted_gcs": delete_result.get("deleted_gcs"),
                 "deleted_local": delete_result.get("deleted_local"),
-                "deleted_index_nodes": delete_result.get("deleted_index_nodes", 0),
-                "deleted_index_ref_docs": delete_result.get("deleted_index_ref_docs", 0),
+                "deleted_index_nodes": deleted_index_nodes,
+                "deleted_index_ref_docs": deleted_index_ref_docs,
+                "warnings": warnings,
             }
         )
         
@@ -3998,41 +4027,42 @@ async def delete_document_by_metadata_id(
             request=http_request,
         )
         
-        # Return 204 No Content
-        # Deletion always succeeds regardless of ingestion flag - index cleanup is best-effort
-        from fastapi.responses import Response
-        
-        # Log deletion result
-        logger.info(
-            {
-                "event": "document_deleted_complete",
+        # If force mode and we have warnings, return 200 with summary
+        if force and warnings:
+            return {
                 "metadata_id": metadata_id,
-                "filename": filename,
-                "deleted_index_nodes": delete_result.get("deleted_index_nodes", 0),
-                "deleted_index_ref_docs": delete_result.get("deleted_index_ref_docs", 0),
+                "deleted_db": delete_result.get("deleted_metadata", False),
                 "deleted_gcs": delete_result.get("deleted_gcs", False),
+                "deleted_index_nodes": deleted_index_nodes,
+                "deleted_index_ref_docs": deleted_index_ref_docs,
+                "warnings": warnings,
             }
-        )
         
+        # Return 204 No Content on success
+        from fastapi.responses import Response
         return Response(status_code=204)
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (404, etc.)
+        raise
     except Exception as e:
         # Log full error details for debugging
         error_type = type(e).__name__
         error_msg = str(e)
-        logger.error(
+        logger.exception(
             {
-                "event": "document_deletion_failed",
+                "event": "admin_delete_document_failed",
                 "metadata_id": metadata_id,
+                "request_id": request_id,
                 "error_type": error_type,
                 "error_message": error_msg,
-            },
-            exc_info=True
+            }
         )
         
         # Return detailed error message
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to delete document: {error_msg} (Error type: {error_type})"
+            detail=f"Delete failed: {error_type}: {error_msg}"
         )
 
 
@@ -4257,11 +4287,46 @@ async def get_document_diagnostics(request: Request):
     try:
         diagnostics = await run_sync(_get_diagnostics)
         return diagnostics
-    except Exception as e:
-        logger.error(f"Error getting document diagnostics: {e}", exc_info=True)
+    except SyntaxError as e:
+        # Syntax errors in imported modules (like gcs_client.py)
+        logger.exception(
+            {
+                "event": "diagnostics_syntax_error",
+                "error": str(e),
+                "file": getattr(e, 'filename', 'unknown'),
+                "lineno": getattr(e, 'lineno', 'unknown'),
+            }
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get diagnostics: {str(e)}"
+            detail=f"Failed to get diagnostics: Syntax error in {getattr(e, 'filename', 'unknown')} at line {getattr(e, 'lineno', 'unknown')}: {str(e)}"
+        )
+    except ImportError as e:
+        # Import errors (module not found, etc.)
+        logger.exception(
+            {
+                "event": "diagnostics_import_error",
+                "error": str(e),
+            }
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get diagnostics: Import error: {str(e)}"
+        )
+    except Exception as e:
+        # Other errors
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.exception(
+            {
+                "event": "diagnostics_error",
+                "error_type": error_type,
+                "error_message": error_msg,
+            }
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get diagnostics: {error_type}: {error_msg}"
         )
 
 

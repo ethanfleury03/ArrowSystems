@@ -113,8 +113,14 @@ def delete_document_metadata_simple(metadata_id: str) -> dict:
                         retriever = rag_pipeline.orchestrator.retriever
                         if hasattr(retriever, 'corpus_nodes') and retriever.corpus_nodes:
                             for node_wrapper in retriever.corpus_nodes:
-                                node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
-                                if hasattr(node, 'metadata') and node.metadata:
+                                try:
+                                    if node_wrapper is None:
+                                        continue
+                                    node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
+                                    if node is None:
+                                        continue
+                                    if not hasattr(node, 'metadata') or not node.metadata:
+                                        continue
                                     # Match by ingestion_metadata_id (preferred) or metadata_id
                                     node_metadata_id = (
                                         node.metadata.get('ingestion_metadata_id') or 
@@ -125,39 +131,66 @@ def delete_document_metadata_simple(metadata_id: str) -> dict:
                                         # Track ref_doc_id if available
                                         if hasattr(node, 'ref_doc_id') and node.ref_doc_id:
                                             ref_doc_ids_to_delete.add(node.ref_doc_id)
+                                except Exception as e:
+                                    logger.debug(f"Error processing node_wrapper in corpus_nodes: {e}")
+                                    continue
                     
                     # Method 2: Find nodes via docstore by ingestion_metadata_id
                     if hasattr(index, 'docstore') and index.docstore:
-                        for doc_id in list(index.docstore.docs.keys()):
-                            try:
-                                doc = index.docstore.get_document(doc_id)
-                                if hasattr(doc, 'metadata') and doc.metadata:
+                        try:
+                            doc_keys = list(index.docstore.docs.keys()) if hasattr(index.docstore, 'docs') and index.docstore.docs else []
+                            for doc_id in doc_keys:
+                                try:
+                                    if doc_id is None:
+                                        continue
+                                    doc = index.docstore.get_document(doc_id)
+                                    if doc is None:
+                                        continue
+                                    if not hasattr(doc, 'metadata') or not doc.metadata:
+                                        continue
                                     doc_metadata_id = (
                                         doc.metadata.get('ingestion_metadata_id') or 
                                         doc.metadata.get('metadata_id')
                                     )
                                     if doc_metadata_id == metadata_id:
                                         ref_doc_ids_to_delete.add(doc_id)
-                            except Exception as e:
-                                logger.debug(f"Error checking docstore doc {doc_id}: {e}")
-                                continue
+                                except KeyError:
+                                    # Doc ID doesn't exist in docstore - skip
+                                    logger.debug(f"Doc ID {doc_id} not found in docstore")
+                                    continue
+                                except Exception as e:
+                                    logger.debug(f"Error checking docstore doc {doc_id}: {e}")
+                                    continue
+                        except Exception as e:
+                            logger.warning(f"Error accessing docstore: {e}")
+                            # Continue with deletion even if docstore access fails
                     
                     # Delete nodes from index
                     for node in nodes_to_delete:
                         try:
-                            if hasattr(node, 'node_id'):
-                                index.delete(node.node_id)
-                                result["deleted_index_nodes"] += 1
-                                logger.debug(f"Deleted node {node.node_id} from index")
+                            if node is None:
+                                continue
+                            if not hasattr(node, 'node_id') or node.node_id is None:
+                                logger.debug("Skipping node without node_id")
+                                continue
+                            index.delete(node.node_id)
+                            result["deleted_index_nodes"] += 1
+                            logger.debug(f"Deleted node {node.node_id} from index")
                         except Exception as e:
-                            logger.warning(f"Failed to delete node {getattr(node, 'node_id', 'unknown')}: {e}")
+                            node_id = getattr(node, 'node_id', 'unknown') if node else 'None'
+                            logger.warning(f"Failed to delete node {node_id}: {e}")
                     
                     # Delete reference documents (this removes associated nodes)
                     for ref_doc_id in ref_doc_ids_to_delete:
                         try:
+                            if ref_doc_id is None:
+                                continue
                             index.delete_ref_doc(ref_doc_id, delete_from_docstore=True)
                             result["deleted_index_ref_docs"] += 1
                             logger.debug(f"Deleted ref_doc {ref_doc_id} from index")
+                        except KeyError:
+                            # Ref doc doesn't exist - treat as success
+                            logger.debug(f"Ref doc {ref_doc_id} not found in index (may already be deleted)")
                         except Exception as e:
                             logger.warning(f"Failed to delete ref_doc {ref_doc_id}: {e}")
                     
