@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _gcs_client = None
 _gcs_available = None
 _gcs_auth_info = None  # Cached auth info for logging
+_gcs_last_init_error = None  # Cached last init error for surfacing in API responses
 
 
 def _is_cloud_run() -> bool:
@@ -87,6 +88,7 @@ def get_gcs_client():
         storage.Client instance or None if not available
     """
     global _gcs_client
+    global _gcs_last_init_error
     
     if not _check_gcs_available():
         logger.error("Google Cloud Storage library not installed. Install with: pip install google-cloud-storage")
@@ -100,6 +102,7 @@ def get_gcs_client():
             # On Cloud Run: uses metadata server (service account)
             # On local: uses GOOGLE_APPLICATION_CREDENTIALS if set, otherwise ADC
             _gcs_client = storage.Client()
+            _gcs_last_init_error = None
             
             # Log authentication info on first initialization
             auth_info = _get_auth_info()
@@ -130,28 +133,19 @@ def get_gcs_client():
             error_msg = str(e)
             error_type = type(e).__name__
             is_cloud_run = _is_cloud_run()
+            _gcs_last_init_error = f"{error_type}: {error_msg}"
             
             if "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in error_type:
-                if is_cloud_run:
-                    logger.error(
-                        {
-                            "event": "gcs_auth_failed",
-                            "environment": "cloud_run",
-                            "error": "GCS authentication failed. Ensure the Cloud Run service account has "
-                                    "Storage Object Admin (or Storage Admin) IAM role on the bucket. "
-                                    "Check IAM bindings for the service account.",
-                        }
-                    )
-                else:
-                    logger.error(
-                        {
-                            "event": "gcs_auth_failed",
-                            "environment": "local_dev",
-                            "error": "GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS "
-                                    "environment variable to a service account JSON key file, or run "
-                                    "'gcloud auth application-default login' for local development.",
-                        }
-                    )
+                # Log real underlying error; avoid blanket IAM advice unless we know it's permission-related
+                logger.error(
+                    {
+                        "event": "gcs_auth_failed",
+                        "environment": "cloud_run" if is_cloud_run else "local_dev",
+                        "error_type": error_type,
+                        "error_message": error_msg,
+                    },
+                    exc_info=True,
+                )
             else:
                 logger.error(
                     {
@@ -165,6 +159,15 @@ def get_gcs_client():
             return None
     
     return _gcs_client
+
+
+def get_gcs_last_init_error() -> Optional[str]:
+    """Return the last GCS client initialization error (if any)."""
+    return _gcs_last_init_error
+
+
+class GCSUploadError(RuntimeError):
+    """Raised when a GCS upload fails. Message preserves the underlying exception details."""
 
 
 def parse_gcs_path(gcs_path: str) -> tuple[Optional[str], Optional[str]]:
@@ -324,15 +327,26 @@ def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_typ
     """
     client = get_gcs_client()
     if not client:
-        logger.error("GCS client not available for upload. Check GCS credentials and configuration.")
-        return None
+        auth_info = _get_auth_info()
+        raise GCSUploadError(
+            "GCS upload failed: storage client not available. "
+            f"environment={'cloud_run' if auth_info.get('is_cloud_run') else 'local_dev'}, "
+            f"creds_type={auth_info.get('creds_type')}, "
+            f"service_account_email={auth_info.get('service_account_email')}, "
+            f"last_init_error={get_gcs_last_init_error() or 'unknown'}"
+        )
     
     try:
+        # Lazy import to avoid hard dependency when running without google-cloud-storage
+        try:
+            from google.api_core.exceptions import GoogleAPICallError  # type: ignore
+        except Exception:  # pragma: no cover
+            GoogleAPICallError = Exception  # type: ignore
+
         bucket = client.bucket(bucket_name)
         # Check if bucket exists
         if not bucket.exists():
-            logger.error(f"GCS bucket does not exist: {bucket_name}. Please create the bucket or check the bucket name.")
-            return None
+            raise GCSUploadError(f"GCS upload failed: bucket does not exist: {bucket_name}")
         
         blob = bucket.blob(object_name)
         blob.upload_from_string(content, content_type=content_type)
@@ -340,39 +354,68 @@ def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_typ
         logger.info(f"Successfully uploaded to GCS: {gcs_uri}")
         return gcs_uri
     except Exception as e:
+        # Preserve and surface the real underlying GCS exception (do not blanket-rewrite into IAM advice)
         error_type = type(e).__name__
         error_msg = str(e)
-        
-        # Provide environment-aware error messages
-        is_cloud_run = _is_cloud_run()
-        
-        if "403" in error_msg or "Forbidden" in error_msg or "PermissionDenied" in error_type:
-            if is_cloud_run:
-                logger.error(
-                    f"GCS permission denied on bucket '{bucket_name}'. "
-                    f"Ensure the Cloud Run service account has Storage Object Admin (or Storage Admin) "
-                    f"IAM role on bucket '{bucket_name}'. Check IAM bindings for the service account."
-                )
-            else:
-                logger.error(
-                    f"GCS permission denied. Service account needs 'storage.objects.create' permission on bucket {bucket_name}"
-                )
-        elif "404" in error_msg or "NotFound" in error_type:
-            logger.error(f"GCS bucket not found: {bucket_name}. Verify the bucket name and that it exists in your GCP project.")
-        elif "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in error_type:
-            if is_cloud_run:
-                logger.error(
-                    f"GCS authentication failed. Ensure the Cloud Run service account has proper IAM permissions "
-                    f"on bucket '{bucket_name}'. The service account should have Storage Object Admin role."
-                )
-            else:
-                logger.error(
-                    "GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS environment variable "
-                    "to a service account JSON key file, or run 'gcloud auth application-default login' for local development."
-                )
-        else:
-            logger.error(f"Failed to upload {object_name} to {bucket_name}: {e}", exc_info=True)
-        return None
+        size_bytes = len(content) if content is not None else 0
+
+        # Best-effort extraction of HTTP status + API error details
+        status_code = None
+        errors = None
+        reason = None
+        try:
+            status_code = getattr(e, "code", None)
+            if callable(status_code):
+                status_code = status_code()
+        except Exception:
+            status_code = None
+        try:
+            if status_code is None and hasattr(e, "response") and getattr(e, "response") is not None:
+                status_code = getattr(getattr(e, "response"), "status", None) or getattr(getattr(e, "response"), "status_code", None)
+        except Exception:
+            pass
+        try:
+            errors = getattr(e, "errors", None)
+            if isinstance(errors, list) and errors:
+                reason = errors[0].get("reason") if isinstance(errors[0], dict) else None
+        except Exception:
+            errors = None
+            reason = None
+
+        logger.exception(
+            {
+                "event": "gcs_upload_failed",
+                "bucket": bucket_name,
+                "object_name": object_name,
+                "content_type": content_type,
+                "size_bytes": size_bytes,
+                "exc_type": error_type,
+                "exc_message": error_msg,
+                "status_code": status_code,
+                "errors": errors,
+                "reason": reason,
+            }
+        )
+
+        hint = None
+        # Only suggest IAM when the *actual* error indicates permission/auth problems
+        if status_code in (401, 403) or "PermissionDenied" in error_type or "Forbidden" in error_type:
+            hint = "Permission denied. Confirm runtime service account + bucket IAM, and verify bucket/prefix are correct."
+
+        base = f"GCS upload failed: {error_type}: {error_msg} (bucket={bucket_name}, object={object_name})"
+        if hint:
+            base = f"{base} Hint: {hint}"
+
+        # If this was a google api call error, rethrow with chaining so logs keep traceback
+        try:
+            from google.api_core.exceptions import GoogleAPICallError  # type: ignore
+            if isinstance(e, GoogleAPICallError):
+                raise GCSUploadError(base) from e
+        except Exception:
+            # google api core not available or isinstance check failed; fall through
+            pass
+
+        raise GCSUploadError(base) from e
 
 
 def upload_file(bucket_name: str, object_name: str, local_path: str, content_type: str = "application/pdf") -> Optional[str]:
@@ -394,8 +437,14 @@ def upload_file(bucket_name: str, object_name: str, local_path: str, content_typ
     
     client = get_gcs_client()
     if not client:
-        logger.error("GCS client not available for upload")
-        return None
+        auth_info = _get_auth_info()
+        raise GCSUploadError(
+            "GCS upload failed: storage client not available. "
+            f"environment={'cloud_run' if auth_info.get('is_cloud_run') else 'local_dev'}, "
+            f"creds_type={auth_info.get('creds_type')}, "
+            f"service_account_email={auth_info.get('service_account_email')}, "
+            f"last_init_error={get_gcs_last_init_error() or 'unknown'}"
+        )
     
     try:
         bucket = client.bucket(bucket_name)
@@ -405,8 +454,18 @@ def upload_file(bucket_name: str, object_name: str, local_path: str, content_typ
         logger.info(f"Successfully uploaded file to GCS: {gcs_uri}")
         return gcs_uri
     except Exception as e:
-        logger.error(f"Failed to upload file {local_path} to {bucket_name}/{object_name}: {e}", exc_info=True)
-        return None
+        logger.exception(
+            {
+                "event": "gcs_upload_file_failed",
+                "bucket": bucket_name,
+                "object_name": object_name,
+                "content_type": content_type,
+                "local_path": local_path,
+                "exc_type": type(e).__name__,
+                "exc_message": str(e),
+            }
+        )
+        raise GCSUploadError(f"GCS upload failed: {type(e).__name__}: {e} (bucket={bucket_name}, object={object_name})") from e
 
 
 def list_objects(bucket_name: str, prefix: str = "") -> List[str]:
