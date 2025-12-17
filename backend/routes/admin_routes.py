@@ -1192,7 +1192,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
         name = " ".join(name.upper().split())
         
         # Validate machine_kind
-        valid_kinds = [MachineKind.PRINT_ENGINE.value, MachineKind.BLADE_CUTTER.value, MachineKind.LASER_CUTTER.value]
+        valid_kinds = [MachineKind.PRINT_ENGINE.value, MachineKind.BLADE_CUTTER.value, MachineKind.LASER_CUTTER.value, MachineKind.PRINTER.value]
         machine_kind = request.machine_kind.strip()
         if machine_kind not in valid_kinds:
             raise HTTPException(
@@ -1251,7 +1251,7 @@ def create_admin_router(db_manager_getter: Callable[[], Optional[DatabaseManager
             raise HTTPException(status_code=400, detail="At least one field (name or machine_kind) must be provided")
         
         # Validate machine_kind if provided
-        valid_kinds = [MachineKind.PRINT_ENGINE.value, MachineKind.BLADE_CUTTER.value, MachineKind.LASER_CUTTER.value]
+        valid_kinds = [MachineKind.PRINT_ENGINE.value, MachineKind.BLADE_CUTTER.value, MachineKind.LASER_CUTTER.value, MachineKind.PRINTER.value]
         if request.machine_kind is not None:
             machine_kind = request.machine_kind.strip()
             if machine_kind not in valid_kinds:

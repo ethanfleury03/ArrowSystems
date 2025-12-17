@@ -68,7 +68,7 @@ export default function MachineModelsPage() {
   const [deleting, setDeleting] = useState(false);
   const { toast } = useToast();
 
-  const MACHINE_KINDS = ["Print Engine", "Blade Cutter", "Laser Cutter"] as const;
+  const MACHINE_KINDS = ["Print Engine", "Blade Cutter", "Laser Cutter", "Printer"] as const;
 
   const fetchMachines = useCallback(async () => {
     setLoading(true);

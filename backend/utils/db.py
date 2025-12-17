@@ -264,6 +264,7 @@ class MachineKind(str, Enum):
     PRINT_ENGINE = "Print Engine"
     BLADE_CUTTER = "Blade Cutter"
     LASER_CUTTER = "Laser Cutter"
+    PRINTER = "Printer"
 
 
 class MachineModel(Base):
@@ -278,7 +279,7 @@ class MachineModel(Base):
     
     __table_args__ = (
         CheckConstraint(
-            "machine_kind IN ('Print Engine', 'Blade Cutter', 'Laser Cutter')",
+            "machine_kind IN ('Print Engine', 'Blade Cutter', 'Laser Cutter', 'Printer')",
             name='check_machine_kind'
         ),
     )
