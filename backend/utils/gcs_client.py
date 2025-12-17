@@ -343,11 +343,10 @@ def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_typ
         except Exception:  # pragma: no cover
             GoogleAPICallError = Exception  # type: ignore
 
-        bucket = client.bucket(bucket_name)
-        # Check if bucket exists
-        if not bucket.exists():
-            raise GCSUploadError(f"GCS upload failed: bucket does not exist: {bucket_name}")
-        
+        # IMPORTANT: Do NOT call bucket metadata APIs (bucket.exists / bucket.reload / client.get_bucket).
+        # Uploading objects should only require object permissions (e.g., roles/storage.objectAdmin),
+        # not storage.buckets.get.
+        bucket = client.bucket(bucket_name)  # No API call
         blob = bucket.blob(object_name)
         blob.upload_from_string(content, content_type=content_type)
         gcs_uri = f"gs://{bucket_name}/{object_name}"
@@ -400,7 +399,14 @@ def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_typ
         hint = None
         # Only suggest IAM when the *actual* error indicates permission/auth problems
         if status_code in (401, 403) or "PermissionDenied" in error_type or "Forbidden" in error_type:
-            hint = "Permission denied. Confirm runtime service account + bucket IAM, and verify bucket/prefix are correct."
+            # Special case: buckets.get is NOT required for object uploads; if we see it, that's a codepath smell.
+            if "storage.buckets.get" in error_msg or "buckets.get" in error_msg:
+                hint = (
+                    "Permission denied for storage.buckets.get (bucket metadata). "
+                    "The upload path should not call bucket metadata APIs; ensure upload avoids bucket.exists/reload/get_bucket."
+                )
+            else:
+                hint = "Permission denied. Confirm runtime service account + bucket IAM, and verify bucket/prefix are correct."
 
         base = f"GCS upload failed: {error_type}: {error_msg} (bucket={bucket_name}, object={object_name})"
         if hint:

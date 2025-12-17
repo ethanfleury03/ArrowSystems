@@ -732,15 +732,18 @@ async def startup_event():
                             error_msg = str(bucket_error)
                             is_cloud_run = _is_cloud_run()
                             if "403" in error_msg or "Forbidden" in error_msg or "PermissionDenied" in error_msg:
-                                if is_cloud_run:
-                                    logger.error(
+                                # bucket.reload() requires storage.buckets.get, which is OPTIONAL for object uploads.
+                                # Do not mislead operators into granting broader permissions just because this check failed.
+                                if "storage.buckets.get" in error_msg or "buckets.get" in error_msg:
+                                    logger.warning(
                                         {
                                             "event": "gcs_smoke_check_failed",
                                             "bucket": settings.DOCS_GCS_BUCKET,
-                                            "error": "Permission denied",
-                                            "environment": "cloud_run",
-                                            "message": f"Cloud Run service account does not have access to bucket '{settings.DOCS_GCS_BUCKET}'. "
-                                                       f"Ensure the service account has Storage Object Admin (or Storage Admin) IAM role on the bucket.",
+                                            "error": "Missing storage.buckets.get (optional)",
+                                            "environment": "cloud_run" if is_cloud_run else "local_dev",
+                                            "message": "Bucket metadata access (storage.buckets.get) is not granted. "
+                                                       "This is optional and does NOT block object uploads with roles/storage.objectAdmin. "
+                                                       "Use /admin/gcs/smoke-upload to validate object upload instead.",
                                         }
                                     )
                                 else:
@@ -749,8 +752,10 @@ async def startup_event():
                                             "event": "gcs_smoke_check_failed",
                                             "bucket": settings.DOCS_GCS_BUCKET,
                                             "error": "Permission denied",
-                                            "environment": "local_dev",
-                                            "message": "GCS bucket access denied. Check service account permissions or GOOGLE_APPLICATION_CREDENTIALS.",
+                                            "environment": "cloud_run" if is_cloud_run else "local_dev",
+                                            "message": "GCS bucket metadata access denied during startup smoke check. "
+                                                       "This may indicate missing permissions or wrong bucket name. "
+                                                       "Use /admin/gcs/smoke-upload to validate object upload path.",
                                         }
                                     )
                             elif "404" in error_msg or "NotFound" in error_msg:
@@ -5820,18 +5825,66 @@ async def admin_gcs_permissions(request: Request):
     if not settings.DOCS_GCS_BUCKET:
         raise HTTPException(status_code=500, detail="DOCS_GCS_BUCKET is not configured")
 
+    # NOTE:
+    # - Uploads should work with object-level permissions alone (roles/storage.objectAdmin).
+    # - storage.buckets.get is OPTIONAL and should never be required for uploads.
     try:
         from google.cloud import storage
         client = storage.Client()
         bucket = client.bucket(settings.DOCS_GCS_BUCKET)
-        requested = [
+
+        requested_object = [
             "storage.objects.create",
             "storage.objects.delete",
             "storage.objects.get",
             "storage.objects.list",
         ]
-        granted = bucket.test_iam_permissions(requested) or []
-        return {"bucket": settings.DOCS_GCS_BUCKET, "requested": requested, "granted": granted}
+        requested_optional_bucket = [
+            "storage.buckets.get",
+        ]
+
+        granted_all = []
+        test_iam_error = None
+        try:
+            granted_all = bucket.test_iam_permissions(requested_object + requested_optional_bucket) or []
+        except Exception as e:
+            test_iam_error = f"{type(e).__name__}: {e}"
+            logger.exception(
+                {
+                    "event": "gcs_permissions_test_iam_failed",
+                    "bucket": settings.DOCS_GCS_BUCKET,
+                    "error": str(e),
+                }
+            )
+
+        granted_object = [p for p in granted_all if p in requested_object]
+        granted_optional_bucket = [p for p in granted_all if p in requested_optional_bucket]
+
+        # Explicit optional bucket metadata probe (diagnostics only)
+        bucket_get_ok = None
+        bucket_get_error = None
+        try:
+            bucket.reload()  # requires storage.buckets.get
+            bucket_get_ok = True
+        except Exception as e:
+            bucket_get_ok = False
+            bucket_get_error = f"{type(e).__name__}: {e}"
+
+        return {
+            "bucket": settings.DOCS_GCS_BUCKET,
+            "object_permissions": {
+                "requested": requested_object,
+                "granted": granted_object,
+            },
+            "optional_bucket_permissions": {
+                "requested": requested_optional_bucket,
+                "granted": granted_optional_bucket,
+                "note": "These are optional. Uploads should not require storage.buckets.get.",
+                "bucket_get_ok": bucket_get_ok,
+                "bucket_get_error": bucket_get_error,
+            },
+            "test_iam_error": test_iam_error,
+        }
     except Exception as e:
         logger.exception({"event": "gcs_permissions_failed", "bucket": settings.DOCS_GCS_BUCKET, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"GCS permissions check failed: {type(e).__name__}: {e}")
