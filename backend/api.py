@@ -5614,36 +5614,19 @@ async def upload_document(
         # Execute transactional upload
         try:
             metadata_result = await run_sync(_transactional_upload)
-        except ValueError as ve:
-            # Convert ValueError to HTTPException with appropriate status
-            error_msg = str(ve)
-            is_cloud_run = bool(os.getenv("K_SERVICE"))
-            
-            if "GCS client not available" in error_msg:
-                if is_cloud_run:
-                    detail = (
-                        f"GCS client not available. Ensure the Cloud Run service account has "
-                        f"Storage Object Admin IAM role on bucket '{settings.DOCS_GCS_BUCKET}'. "
-                        f"Check IAM bindings for the service account. See logs for details."
-                    )
-                else:
-                    detail = (
-                        "GCS client not available. Set GOOGLE_APPLICATION_CREDENTIALS environment variable "
-                        "to a service account JSON key file, or run 'gcloud auth application-default login' for local development. "
-                        "See logs for details."
-                    )
-                raise HTTPException(status_code=500, detail=detail)
-            elif "DOCS_GCS_BUCKET not configured" in error_msg:
-                raise HTTPException(
-                    status_code=500,
-                    detail="DOCS_GCS_BUCKET not configured. GCS upload is required."
-                )
-            elif "Failed to upload" in error_msg:
-                # Error message already contains environment-aware details from the ValueError
-                # Just pass it through
-                raise HTTPException(status_code=500, detail=error_msg)
-            else:
-                raise HTTPException(status_code=500, detail=f"Upload failed: {error_msg}")
+        except Exception as e:
+            # IMPORTANT: Do not mask the underlying GCS error.
+            # Return exact error string (type + message) to make failures actionable.
+            error_detail = f"{type(e).__name__}: {str(e)}"
+            logger.exception(
+                {
+                    "event": "document_upload_failed_transactional",
+                    "filename": file.filename if file else None,
+                    "request_id": request_id,
+                    "error_detail": error_detail,
+                }
+            )
+            raise HTTPException(status_code=500, detail=error_detail)
         
         # Optionally save to local disk (for dev/backward compatibility)
         # This happens after the transactional upload succeeds
@@ -5778,6 +5761,122 @@ async def upload_document(
             status_code=500,
             detail=get_error_detail(e, "An internal error occurred while uploading document")
         )
+
+
+def _require_admin_token_only(request: Request) -> dict:
+    """
+    Admin-only guard for diagnostic endpoints.
+    Uses the signed user JWT (X-User-Token) and enforces role == ADMIN.
+
+    Note: This is intentionally token-only (no DB lookup) so diagnostics can work even if DB is unhealthy.
+    """
+    token = request.headers.get("X-User-Token")
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing user token")
+
+    try:
+        from .security import decode_access_token
+        payload = decode_access_token(token)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired") from None
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from None
+
+    role = payload.get("role")
+    if role != "ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
+
+    return payload
+
+
+@app.get("/admin/gcs/identity")
+async def admin_gcs_identity(request: Request):
+    """
+    Return the runtime service account email from the metadata server (Cloud Run).
+    """
+    _require_admin_token_only(request)
+
+    import urllib.request
+
+    url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
+    req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            email = resp.read().decode("utf-8").strip()
+        return {"service_account_email": email}
+    except Exception as e:
+        logger.exception({"event": "gcs_identity_failed", "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to fetch runtime service account email: {type(e).__name__}: {e}")
+
+
+@app.get("/admin/gcs/permissions")
+async def admin_gcs_permissions(request: Request):
+    """
+    Check GCS bucket IAM permissions from inside the running container.
+    """
+    _require_admin_token_only(request)
+
+    if not settings.DOCS_GCS_BUCKET:
+        raise HTTPException(status_code=500, detail="DOCS_GCS_BUCKET is not configured")
+
+    try:
+        from google.cloud import storage
+        client = storage.Client()
+        bucket = client.bucket(settings.DOCS_GCS_BUCKET)
+        requested = [
+            "storage.objects.create",
+            "storage.objects.delete",
+            "storage.objects.get",
+            "storage.objects.list",
+        ]
+        granted = bucket.test_iam_permissions(requested) or []
+        return {"bucket": settings.DOCS_GCS_BUCKET, "requested": requested, "granted": granted}
+    except Exception as e:
+        logger.exception({"event": "gcs_permissions_failed", "bucket": settings.DOCS_GCS_BUCKET, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"GCS permissions check failed: {type(e).__name__}: {e}")
+
+
+@app.get("/admin/gcs/smoke-upload")
+async def admin_gcs_smoke_upload(request: Request):
+    """
+    Upload a tiny object to GCS to validate bucket/prefix/object-name behavior.
+    """
+    _require_admin_token_only(request)
+
+    if not settings.DOCS_GCS_BUCKET:
+        raise HTTPException(status_code=500, detail="DOCS_GCS_BUCKET is not configured")
+
+    from datetime import datetime
+    from backend.utils.gcs_client import upload_bytes
+
+    prefix = (getattr(settings, "DOCS_GCS_PREFIX", "") or "").lstrip("/")
+    if prefix and not prefix.endswith("/"):
+        prefix = prefix + "/"
+
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    object_name = f"{prefix}_smoke/{ts}.txt"
+    content = f"smoke test {ts}\n".encode("utf-8")
+
+    try:
+        gcs_path = upload_bytes(
+            bucket_name=settings.DOCS_GCS_BUCKET,
+            object_name=object_name,
+            content=content,
+            content_type="text/plain",
+        )
+        return {"ok": True, "bucket": settings.DOCS_GCS_BUCKET, "object_name": object_name, "gcs_path": gcs_path}
+    except Exception as e:
+        error_detail = f"{type(e).__name__}: {str(e)}"
+        logger.exception(
+            {
+                "event": "gcs_smoke_upload_failed",
+                "bucket": settings.DOCS_GCS_BUCKET,
+                "object_name": object_name,
+                "error_detail": error_detail,
+            }
+        )
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 # Single-chunk operation - always allowed (not bulk)
