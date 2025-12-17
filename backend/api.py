@@ -4309,14 +4309,18 @@ async def delete_document_by_metadata_id(
     """
     Delete a document by metadata_id.
     
+    IMPORTANT: This endpoint ALWAYS works regardless of ARROW_ALLOW_APP_INGESTION setting.
+    It uses incremental deletion (simple_delete) which does not require ingestion to be enabled.
+    
     Always works regardless of ingestion toggle. Deletes:
+    - Chunks from vector index (incremental deletion, if RAG pipeline available)
     - DocumentIngestionMetadata row
     - Document row (if exists)
     - Chunks JSON file
     - GCS file (best-effort)
     - Local files (if exist)
     
-    Does NOT trigger index rebuild. Index must be rebuilt via external pipeline if needed.
+    Does NOT trigger full index rebuild. Uses incremental deletion from the index.
     """
     from .logging_context import get_user_id, get_user_role
     user_id = get_user_id()
@@ -4351,6 +4355,8 @@ async def delete_document_by_metadata_id(
                 "deleted_chunks_file": delete_result.get("deleted_chunks_file"),
                 "deleted_gcs": delete_result.get("deleted_gcs"),
                 "deleted_local": delete_result.get("deleted_local"),
+                "deleted_index_nodes": delete_result.get("deleted_index_nodes", 0),
+                "deleted_index_ref_docs": delete_result.get("deleted_index_ref_docs", 0),
             }
         )
         
