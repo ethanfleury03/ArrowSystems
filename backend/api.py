@@ -75,6 +75,28 @@ def get_error_detail(error: Exception, generic_message: str) -> str:
         return f"{generic_message}: {str(error)}"
 
 
+def check_bulk_ingest_endpoint_enabled() -> None:
+    """
+    Check if bulk ingestion endpoints are enabled.
+    
+    Raises HTTPException(403) if bulk endpoints are disabled.
+    Use this to gate any endpoints that perform full index rebuilds or bulk ingestion.
+    
+    Single-document operations (upload, delete) should NOT use this - they are always allowed.
+    """
+    if not settings.enable_bulk_ingest_endpoints:
+        logger.warning(
+            {
+                "event": "bulk_ingest_endpoint_blocked",
+                "note": "Bulk ingestion endpoints are disabled. Use CLI: python ingest.py",
+            }
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Bulk ingestion endpoints are disabled. Run ingest.py manually."
+        )
+
+
 def get_rag_disabled_response(path: str = "/query") -> JSONResponse:
     """
     Return a structured 503 response for RAG-disabled endpoints.
@@ -3253,12 +3275,7 @@ async def get_all_documents(request: Request):
     """
     # Log ingestion safety configuration once at startup (first call)
     if not hasattr(get_all_documents, '_logged_ingestion_config'):
-        logger.info(
-            "admin_documents_ingestion_config",
-            allow_app_ingestion=settings.allow_app_ingestion,
-            message=f"Admin documents endpoint: allow_app_ingestion={settings.allow_app_ingestion}"
-        )
-        logger.info("admin_documents_db_source_of_truth", message="Document listing uses database as single source of truth")
+        logger.info("admin_documents_config", message="Document listing uses database as single source of truth. Single-document ingestion is always enabled.")
         get_all_documents._logged_ingestion_config = True
     
     try:
@@ -3350,13 +3367,13 @@ async def get_all_documents(request: Request):
                     file_ext = os.path.splitext(meta.filename)[1].lower()
                     file_type = file_ext[1:] if file_ext else 'pdf'
                     
-                    # Normalize ingestion status when app ingestion is disabled
+                    # Status normalization (no longer needed since ingestion is always enabled)
                     raw_status = meta.status
-                    if not settings.allow_app_ingestion:
-                        PROGRESS_STATUSES = {
-                            "PENDING_INGESTION", "CHUNKING", "READY_FOR_EMBEDDING",
-                            "EMBEDDING", "REBUILDING_INDEX", "DELETING"
-                        }
+                    # Keep for backward compatibility but ingestion is always enabled now
+                    PROGRESS_STATUSES = {
+                        "PENDING_INGESTION", "CHUNKING", "READY_FOR_EMBEDDING",
+                        "EMBEDDING", "REBUILDING_INDEX", "DELETING"
+                    }
                         if raw_status in PROGRESS_STATUSES:
                             final_status = "COMPLETE"
                         else:
@@ -3919,10 +3936,10 @@ async def delete_document_by_metadata_id(
     """
     Delete a document by metadata_id.
     
-    IMPORTANT: This endpoint ALWAYS works regardless of ARROW_ALLOW_APP_INGESTION setting.
-    It uses incremental deletion (simple_delete) which does not require ingestion to be enabled.
+    IMPORTANT: This endpoint ALWAYS works - no gates.
+    It uses incremental deletion (simple_delete) which does not require any flags.
     
-    Always works regardless of ingestion toggle. Deletes:
+    Always works. Deletes:
     - Chunks from vector index (incremental deletion, if RAG pipeline available)
     - DocumentIngestionMetadata row
     - Document row (if exists)
@@ -4878,9 +4895,8 @@ def check_machine_model_exists(normalized_machine_model: str) -> bool:
 
 # DOCUMENT UPLOAD ENDPOINT
 # This endpoint ALWAYS works - it uploads files to GCS and creates database records.
-# IMPORTANT: Upload endpoint ALWAYS triggers ingestion (chunking + embedding) regardless of allow_app_ingestion flag.
-# It uses force=True to bypass gate checks in run_chunking() and run_embedding().
-# This ensures single-document uploads always get ingested into the index.
+# IMPORTANT: Upload endpoint ALWAYS triggers ingestion (chunking + embedding) - no gates.
+# Single-document ingestion is always allowed and runs automatically.
 @app.post("/admin/documents/upload")
 async def upload_document(
     http_request: Request,
@@ -4894,15 +4910,13 @@ async def upload_document(
     
     IMPORTANT: This endpoint ALWAYS works and ALWAYS triggers ingestion.
     - Phase 1: Uploads file to GCS and creates database records (always succeeds)
-    - Phase 2: Triggers chunking in background (always triggered, uses force=True)
-    - Phase 3: Triggers embedding in background (always triggered, uses force=True)
+    - Phase 2: Triggers chunking in background (always triggered, no gates)
+    - Phase 3: Triggers embedding in background (always triggered, no gates)
     
-    The upload endpoint bypasses the allow_app_ingestion flag by using force=True
-    when calling run_chunking() and run_embedding(). This ensures single-document
-    uploads always get ingested into the index, regardless of the global ingestion setting.
+    Single-document ingestion is always allowed. There are no ingestion gates.
+    The document will be automatically chunked and embedded into the index.
     
-    The allow_app_ingestion flag still controls bulk ingestion operations, but not
-    individual document uploads from the UI.
+    For bulk/full ingestion, use the CLI: python ingest.py
     """
     import uuid
     from datetime import datetime
@@ -5323,24 +5337,11 @@ async def upload_document(
             request=http_request,
         )
         
-        # Log ingestion flag at request-time for debugging
-        logger.info(
-            {
-                "event": "document_upload_ingestion_flag_check",
-                "allow_app_ingestion": settings.allow_app_ingestion,
-                "metadata_id": metadata_result["id"],
-                "filename": file.filename,
-                "request_id": request_id,
-                "note": "Upload endpoint ALWAYS triggers ingestion (bypasses allow_app_ingestion flag)",
-            }
-        )
-        
         # INDEX-WRITE PATH: Single-document ingestion (incremental, not bulk)
         # Document row and file upload are always completed above
-        # IMPORTANT: Upload endpoint ALWAYS triggers ingestion, regardless of allow_app_ingestion flag
+        # IMPORTANT: Upload endpoint ALWAYS triggers ingestion - no gates
         # This processes ONE document at a time, adding it to the existing index incrementally
         # This is safe for Cloud Run CPU environments (no bulk processing)
-        # We use force=True to bypass the gate checks in run_chunking/run_embedding
         logger.info(
             {
                 "event": "document_ingestion_enqueued",
@@ -5348,26 +5349,25 @@ async def upload_document(
                 "filename": metadata_result["filename"],
                 "machine_model_id": machine_model_obj.id if machine_model_obj else None,
                 "request_id": request_id,
-                "force_bypass": True,
-                "note": "Upload endpoint always ingests - using force=True to bypass allow_app_ingestion check",
+                "note": "Upload endpoint always ingests - no gates, single-document ingestion always allowed",
             }
         )
         
         # Trigger background chunking task (Phase 2)
         # After chunking completes, it will trigger embedding (Phase 3)
-        # Use force=True to bypass allow_app_ingestion checks in these functions
+        # No gates - ingestion always runs for single-document uploads
         from backend.utils.chunking_runner import run_chunking
         from backend.utils.embedding_runner import run_embedding
         
         def chunking_with_embedding_trigger(meta_id: str, req_id: Optional[str] = None):
-            """Run chunking, then trigger embedding if successful. Uses force=True to bypass ingestion flag."""
+            """Run chunking, then trigger embedding if successful. No gates - always allowed."""
             try:
-                # Run chunking with force=True to bypass allow_app_ingestion check
-                result = run_chunking(meta_id, request_id=req_id, force=True)
+                # Run chunking (no gates - always allowed)
+                result = run_chunking(meta_id, request_id=req_id)
                 # If chunking succeeded, trigger embedding
                 if result:
-                    # Run embedding with force=True to bypass allow_app_ingestion check
-                    run_embedding(meta_id, request_id=req_id, force=True)
+                    # Run embedding (no gates - always allowed)
+                    run_embedding(meta_id, request_id=req_id)
             except Exception as e:
                 logger.exception(
                     {
@@ -5414,29 +5414,15 @@ async def upload_document(
         )
 
 
-# INDEX-WRITE PATH (gated): requires settings.allow_app_ingestion=True
-# This endpoint regenerates chunk summaries (read-only operation, but gated for consistency).
+# Single-chunk operation - always allowed (not bulk)
 @app.post("/admin/chunks/{chunk_id}/regenerate-summary")
 async def regenerate_chunk_summary(http_request: Request, chunk_id: str):
     """
     Regenerate summary for a specific chunk.
     
     NOTE: This endpoint does not write to the embedding index, only updates summaries in memory.
-    However, we gate it behind allow_app_ingestion for consistency.
+    Single-chunk operations are always allowed.
     """
-    # Check if app-based ingestion is allowed (for consistency, even though this doesn't write embeddings)
-    if not settings.allow_app_ingestion:
-        logger.warning(
-            {
-                "event": "ingestion_blocked_from_app",
-                "chunk_id": chunk_id,
-                "path": http_request.url.path if hasattr(http_request, "url") else None,
-            }
-        )
-        raise HTTPException(
-            status_code=403,
-            detail="Summary regeneration is disabled in this environment."
-        )
     
     global rag_pipeline, query_summarizer
     
