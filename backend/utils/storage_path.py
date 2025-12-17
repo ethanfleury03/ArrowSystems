@@ -19,13 +19,13 @@ def resolve_storage_path() -> Optional[Path]:
     
     Priority order:
     1. RAG_INDEX_DIR environment variable (if set)
-    2. In prod: /app/latest_model (canonical Cloud Run path) - ALWAYS returned in prod
+    2. In prod: settings.RAG_INDEX_LOCAL_DIR (Cloud Run-safe local dir) - ALWAYS returned in prod
     3. Dev/local paths: latest_model, ../latest_model, /workspace/*, etc.
     
     Returns:
         Path to index directory, or None if not found
         
-    Note: In production, this ALWAYS returns /app/latest_model (even if directory doesn't exist).
+    Note: In production, this ALWAYS returns settings.RAG_INDEX_LOCAL_DIR (even if directory doesn't exist).
     This allows lazy initialization to attempt loading and provide better error messages.
     In dev, it only returns paths with valid index files.
     """
@@ -46,15 +46,37 @@ def resolve_storage_path() -> Optional[Path]:
                          resolved_path=str(path),
                          exists=path.exists())
     
-    # In production, /app/latest_model is the REQUIRED and ONLY path
-    # Index files are downloaded from GCS on startup (not mounted via gcsfuse)
-    # ALWAYS return it in prod, even if directory doesn't exist (download will create it)
+    # In production, use the configured local directory for index artifacts.
+    # On Cloud Run, this should be a writable path (prefer /tmp/latest_model).
+    # ALWAYS return it in prod, even if directory doesn't exist (download will create it).
     if settings.ENV in ("prod", "production", "cloud"):
-        prod_path = Path("/app/latest_model").resolve()  # Ensure absolute
+        configured = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+        prod_path = Path(configured).resolve()  # Ensure absolute
         exists = prod_path.exists()
         is_dir = prod_path.is_dir() if exists else False
+
+        # Ensure directory is writable; Cloud Run image filesystem may be read-only.
+        # If not writable, fall back to /tmp/latest_model.
+        try:
+            prod_path.mkdir(parents=True, exist_ok=True)
+            test_path = prod_path / ".write_test"
+            test_path.write_text("ok", encoding="utf-8")
+            test_path.unlink(missing_ok=True)
+        except Exception as e:
+            fallback = Path("/tmp/latest_model").resolve()
+            logger.warning(
+                "rag_storage_path_prod_not_writable",
+                requested=str(prod_path),
+                fallback=str(fallback),
+                error=str(e),
+                message="Production storage path not writable; falling back to /tmp/latest_model",
+            )
+            prod_path = fallback
+            exists = prod_path.exists()
+            is_dir = prod_path.is_dir() if exists else False
+            prod_path.mkdir(parents=True, exist_ok=True)
         
-        logger.info("[storage] Using production storage directory: /app/latest_model",
+        logger.info("[storage] Using production storage directory",
                    prod_path=str(prod_path),
                    exists=exists,
                    is_dir=is_dir,
