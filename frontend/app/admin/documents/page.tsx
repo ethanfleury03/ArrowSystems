@@ -569,15 +569,8 @@ export default function AdminDocumentsPage() {
       closeAllModals();
       setDeleteConfirmation("");
       
-      // Check for warning header (non-blocking)
-      const indexWarning = response.headers.get("X-Index-Warning");
-      if (indexWarning) {
-        showToast(`✅ Document deleted successfully. ${indexWarning}`, "success");
-      } else if (ALLOW_APP_INGESTION) {
-        showToast("✅ Document deleted successfully. The index is rebuilding in the background.", "success");
-      } else {
-        showToast("✅ Document deleted successfully.", "success");
-      }
+      // Show success message - deletion always succeeds, index cleanup is best-effort
+      showToast("✅ Document deleted successfully.", "success");
       await fetchDocuments();
     } catch (err) {
       console.error("Delete document failed:", err);
@@ -598,7 +591,7 @@ export default function AdminDocumentsPage() {
     setDiagnosticsLoading(true);
     setDiagnosticsError(null);
     try {
-      const response = await fetch(`${apiBaseUrl}/admin/documents/diagnostics`, {
+      const response = await fetch(`/api/admin/documents/diagnostics`, {
         credentials: "include",
       });
       if (!response.ok) {
@@ -616,13 +609,13 @@ export default function AdminDocumentsPage() {
     } finally {
       setDiagnosticsLoading(false);
     }
-  }, [apiBaseUrl, showToast]);
+  }, [showToast]);
 
   const viewOrphans = useCallback(async () => {
     setOrphansLoading(true);
     setOrphansError(null);
     try {
-      const response = await fetch(`${apiBaseUrl}/admin/documents/orphans`, {
+      const response = await fetch(`/api/admin/documents/orphans`, {
         credentials: "include",
       });
       if (!response.ok) {
@@ -639,12 +632,12 @@ export default function AdminDocumentsPage() {
     } finally {
       setOrphansLoading(false);
     }
-  }, [apiBaseUrl, showToast]);
+  }, [showToast]);
 
   const deleteAllOrphans = useCallback(async () => {
     setDeleteOrphansLoading(true);
     try {
-      const response = await fetch(`${apiBaseUrl}/admin/documents/orphans`, {
+      const response = await fetch(`/api/admin/documents/orphans`, {
         method: "DELETE",
         credentials: "include",
       });
@@ -680,7 +673,7 @@ export default function AdminDocumentsPage() {
     } finally {
       setDeleteOrphansLoading(false);
     }
-  }, [apiBaseUrl, showToast, fetchDocuments, isOrphansModalOpen, viewOrphans]);
+  }, [showToast, fetchDocuments, isOrphansModalOpen, viewOrphans]);
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 md:mx-0 md:px-6 xl:mx-auto">
