@@ -94,8 +94,10 @@ def delete_document_metadata_simple(metadata_id: str) -> dict:
         # If index cleanup fails, we continue with DB deletion anyway
         try:
             # Import here to avoid circular dependencies
-            from backend.rag_pipeline import rag_pipeline
+            # Use get_rag_pipeline() function instead of importing rag_pipeline symbol
+            from backend.rag_pipeline import get_rag_pipeline
             
+            rag_pipeline = get_rag_pipeline()
             if rag_pipeline and rag_pipeline.is_initialized():
                 index = rag_pipeline.orchestrator.index if (
                     rag_pipeline.orchestrator and 
@@ -429,8 +431,10 @@ def delete_document_chunks_by_document_id(document_id: int, force: bool = False)
     # Delete chunks from vector index (best-effort, never blocks)
     try:
         # Import here to avoid circular dependencies
-        from backend.rag_pipeline import rag_pipeline
+        # Use get_rag_pipeline() function instead of importing rag_pipeline symbol
+        from backend.rag_pipeline import get_rag_pipeline
         
+        rag_pipeline = get_rag_pipeline()
         if not rag_pipeline or not rag_pipeline.is_initialized():
             error_msg = "RAG pipeline not initialized - cannot delete chunks from index"
             if force:

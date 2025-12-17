@@ -3958,9 +3958,38 @@ async def delete_document_by_metadata_id(
         404 if metadata_id not found
         500 with detailed error message on failure
     """
-    from .logging_context import get_user_id, get_user_role
-    user_id = get_user_id()
-    user_role = get_user_role()
+    # Extract user context from X-User-Token header (set by frontend API routes)
+    # This ensures audit logs have the correct user_id
+    user_id = None
+    user_role = None
+    try:
+        token = http_request.headers.get("X-User-Token")
+        if token:
+            from .security import decode_access_token
+            from .logging_context import set_user_id, set_user_role, get_user_id, get_user_role
+            
+            payload = decode_access_token(token)
+            email = payload.get("email")
+            role = payload.get("role")
+            if email:
+                set_user_id(email)
+                user_id = email
+            if role:
+                set_user_role(role)
+                user_role = role
+    except Exception as e:
+        # Fallback to context if token extraction fails
+        from .logging_context import get_user_id, get_user_role
+        user_id = get_user_id()
+        user_role = get_user_role()
+        logger.debug(f"Could not extract user from token in delete endpoint: {e}")
+    
+    # Ensure we have user context from logging context if token extraction didn't work
+    if not user_id:
+        from .logging_context import get_user_id, get_user_role
+        user_id = get_user_id()
+        user_role = get_user_role()
+    
     request_id = http_request.headers.get("X-Request-ID", "unknown")
     
     # Validate metadata_id exists
@@ -3991,10 +4020,12 @@ async def delete_document_by_metadata_id(
         if deleted_index_nodes == 0 and deleted_index_ref_docs == 0:
             # Check if index was available but nothing was deleted
             try:
-                from backend.rag_pipeline import rag_pipeline
+                from backend.rag_pipeline import get_rag_pipeline
+                rag_pipeline = get_rag_pipeline()
                 if rag_pipeline and rag_pipeline.is_initialized():
                     warnings.append("Index deletion skipped or no chunks found in index")
-            except:
+            except Exception as e:
+                logger.debug(f"Could not check RAG pipeline status: {e}")
                 warnings.append("Index not available - chunks may remain in index until next rebuild")
         
         logger.info(
@@ -4027,8 +4058,20 @@ async def delete_document_by_metadata_id(
             request=http_request,
         )
         
-        # If force mode and we have warnings, return 200 with summary
-        if force and warnings:
+        # If we have warnings (index deletion issues), return 200 with summary
+        # This allows the client to see that deletion succeeded but index cleanup had issues
+        if warnings:
+            logger.warning(
+                {
+                    "event": "document_deleted_with_warnings",
+                    "metadata_id": metadata_id,
+                    "filename": filename,
+                    "request_id": request_id,
+                    "warnings": warnings,
+                    "deleted_index_nodes": deleted_index_nodes,
+                    "deleted_index_ref_docs": deleted_index_ref_docs,
+                }
+            )
             return {
                 "metadata_id": metadata_id,
                 "deleted_db": delete_result.get("deleted_metadata", False),
@@ -4038,7 +4081,7 @@ async def delete_document_by_metadata_id(
                 "warnings": warnings,
             }
         
-        # Return 204 No Content on success
+        # Return 204 No Content on complete success (DB + GCS + index all deleted)
         from fastapi.responses import Response
         return Response(status_code=204)
         
