@@ -4,7 +4,7 @@ import { extractJwtFromCookie } from '@/lib/authClient';
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { metadataId: string } }
+  { params }: { params: Promise<{ metadataId: string }> | { metadataId: string } }
 ) {
   try {
     // Extract JWT from cookie
@@ -17,9 +17,12 @@ export async function DELETE(
       );
     }
 
+    // Handle params (Next.js 15+ uses Promise, older versions use object)
+    const resolvedParams = params instanceof Promise ? await params : params;
+
     // Forward JWT in custom header to backend (X-User-Token)
     const response = await iamBackendDelete(
-      `/admin/documents/metadata/${encodeURIComponent(params.metadataId)}`,
+      `/admin/documents/metadata/${encodeURIComponent(resolvedParams.metadataId)}`,
       {
         'X-User-Token': token,
       }

@@ -548,10 +548,11 @@ export default function AdminDocumentsPage() {
       }
       
       // Use the reliable delete endpoint that works even if GCS object is missing
-      const response = await fetch(`${apiBaseUrl}/admin/documents/metadata/${metadataId}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
+      // Go through Next.js API route for proper authentication
+      const response = await fetch(`/api/admin/documents/metadata/${metadataId}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
       
       if (!response.ok) {
         let errorDetail = null;
@@ -570,7 +571,7 @@ export default function AdminDocumentsPage() {
       setDeleteConfirmation("");
       
       // Show success message - deletion always succeeds, index cleanup is best-effort
-      showToast("✅ Document deleted successfully.", "success");
+        showToast("✅ Document deleted successfully.", "success");
       await fetchDocuments();
     } catch (err) {
       console.error("Delete document failed:", err);
