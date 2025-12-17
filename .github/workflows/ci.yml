@@ -647,7 +647,7 @@ jobs:
             --region=us-central1 \
             --service-account="${{ secrets.WIF_SERVICE_ACCOUNT }}" \
             --image="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${GITHUB_SHA}" \
-            --update-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }},JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }},FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }},ENV=prod,HF_HOME=/app/.cache/huggingface,TRANSFORMERS_CACHE=/app/.cache/huggingface,SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface,ENABLE_INGESTION_ON_STARTUP=false,DOCS_GCS_BUCKET=arrow-rag-support-prod-docs,DOCS_GCS_PREFIX=documents/,DOCS_LOCAL_SAVE_ENABLED=false,PYTHONUNBUFFERED=1,GUNICORN_WORKERS=1,GUNICORN_TIMEOUT=600,CORS_ALLOWED_ORIGINS=https://support.arrsys.com,AUTH_COOKIE_SAMESITE=none,AUTH_COOKIE_SECURE=true,ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }},SMTP_HOST=${{ secrets.SMTP_HOST }},SMTP_PORT=${{ secrets.SMTP_PORT }},SMTP_USERNAME=${{ secrets.SMTP_USERNAME }},SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }},SMTP_USE_TLS=${{ secrets.SMTP_USE_TLS }},FRONTEND_BASE_URL=${{ secrets.FRONTEND_BASE_URL }},INVITE_FROM_EMAIL=${{ secrets.INVITE_FROM_EMAIL }},INVITE_FROM_NAME=${{ secrets.INVITE_FROM_NAME }}" \
+            --update-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }},JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }},FRONTEND_SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }},ENV=prod,HF_HOME=/app/.cache/huggingface,TRANSFORMERS_CACHE=/app/.cache/huggingface,SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface,ENABLE_INGESTION_ON_STARTUP=false,DOCS_GCS_BUCKET=arrow-rag-support-prod-docs,DOCS_GCS_PREFIX=documents/,DOCS_LOCAL_SAVE_ENABLED=false,RAG_INDEX_GCS_BUCKET=arrow-rag-support-prod-rag,RAG_INDEX_GCS_PREFIX=latest_model/,RAG_INDEX_LOCAL_DIR=/tmp/latest_model,PYTHONUNBUFFERED=1,GUNICORN_WORKERS=1,GUNICORN_TIMEOUT=600,CORS_ALLOWED_ORIGINS=https://support.arrsys.com,AUTH_COOKIE_SAMESITE=none,AUTH_COOKIE_SECURE=true,ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }},SMTP_HOST=${{ secrets.SMTP_HOST }},SMTP_PORT=${{ secrets.SMTP_PORT }},SMTP_USERNAME=${{ secrets.SMTP_USERNAME }},SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }},SMTP_USE_TLS=${{ secrets.SMTP_USE_TLS }},FRONTEND_BASE_URL=${{ secrets.FRONTEND_BASE_URL }},INVITE_FROM_EMAIL=${{ secrets.INVITE_FROM_EMAIL }},INVITE_FROM_NAME=${{ secrets.INVITE_FROM_NAME }}" \
             --set-cloudsql-instances="arrow-rag-support-prod:us-central1:rag-postgres" \
             --execution-environment=gen2 \
             --cpu=2 \
@@ -671,6 +671,76 @@ jobs:
             --quiet
           
           echo "✅ Traffic routed to latest revision!"
+
+      - name: Verify Cloud Run backend env vars (RAG index + docs)
+        run: |
+          echo "🔎 Verifying required Cloud Run env vars are present on the latest backend revision..."
+          python - <<'PY'
+          import json, subprocess, sys
+
+          project = "${{ secrets.GCP_PROJECT_ID }}"
+          region = "us-central1"
+          service = "arrow-rag-backend"
+
+          cmd = [
+              "gcloud","run","services","describe",service,
+              "--project",project,
+              "--region",region,
+              "--format=json",
+          ]
+          raw = subprocess.check_output(cmd, text=True)
+          data = json.loads(raw)
+
+          containers = (
+              data.get("spec", {})
+                  .get("template", {})
+                  .get("spec", {})
+                  .get("containers", [])
+          )
+          if not containers:
+              print("ERROR: No containers found in Cloud Run service spec", file=sys.stderr)
+              sys.exit(1)
+
+          env_list = containers[0].get("env", []) or []
+          env_map = {}
+          for item in env_list:
+              name = item.get("name")
+              if not name:
+                  continue
+              if "value" in item:
+                  env_map[name] = item.get("value")
+              elif "valueFrom" in item:
+                  env_map[name] = "<valueFrom>"
+
+          required = {
+              "RAG_INDEX_GCS_BUCKET": "arrow-rag-support-prod-rag",
+              "RAG_INDEX_GCS_PREFIX": "latest_model/",
+              "RAG_INDEX_LOCAL_DIR": "/tmp/latest_model",
+              "DOCS_GCS_BUCKET": "arrow-rag-support-prod-docs",
+              "DOCS_GCS_PREFIX": "documents/",
+          }
+
+          missing = [k for k in required.keys() if k not in env_map]
+          mismatched = [
+              (k, env_map.get(k), v)
+              for k, v in required.items()
+              if k in env_map and env_map.get(k) not in (v, "<valueFrom>")
+          ]
+
+          if missing:
+              print("ERROR: Missing required env vars:", ", ".join(missing), file=sys.stderr)
+          if mismatched:
+              print("ERROR: Env var values mismatched:", file=sys.stderr)
+              for k, got, want in mismatched:
+                  print(f"  - {k}: got={got!r} want={want!r}", file=sys.stderr)
+
+          if missing or mismatched:
+              sys.exit(1)
+
+          print("✅ Required env vars present.")
+          for k in sorted(required.keys()):
+              print(f"  - {k}={env_map.get(k)}")
+          PY
 
       - name: Get service URL
         id: get-service-url
