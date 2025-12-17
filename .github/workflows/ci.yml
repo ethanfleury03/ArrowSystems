@@ -948,11 +948,55 @@ jobs:
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           echo "🏥 Verifying backend health at $BACKEND_URL..."
           
-          if ! curl -f -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/health"; then
-            echo "❌ Backend health check failed!"
+          # Wait for service to be ready (cold start can take 30-60 seconds)
+          echo "⏳ Waiting 10 seconds for service to start..."
+          sleep 10
+          
+          # Retry health check with exponential backoff (max 3 attempts)
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          SUCCESS=false
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "🔍 Health check attempt $ATTEMPT of $MAX_ATTEMPTS..."
+            
+            # Generate fresh identity token for this attempt
+            if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+              echo "🔐 Generating identity token for health check..."
+              ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL" 2>/dev/null || echo "")
+            fi
+            
+            # Try health check with timeout
+            if curl -f -sS --max-time 10 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/health" > /tmp/health_response.json 2>&1; then
+              echo "✅ Backend health check passed!"
+              cat /tmp/health_response.json | jq '.' || cat /tmp/health_response.json
+              SUCCESS=true
+              break
+            else
+              HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/health" 2>/dev/null || echo "000")
+              echo "⚠️  Health check failed (HTTP $HTTP_CODE). Attempt $ATTEMPT of $MAX_ATTEMPTS"
+              
+              if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+                WAIT_TIME=$((ATTEMPT * 10))
+                echo "⏳ Waiting ${WAIT_TIME} seconds before retry..."
+                sleep $WAIT_TIME
+              fi
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          
+          if [ "$SUCCESS" = false ]; then
+            echo "❌ Backend health check failed after $MAX_ATTEMPTS attempts"
+            echo "Last response:"
+            cat /tmp/health_response.json 2>/dev/null || echo "(no response captured)"
+            echo ""
+            echo "This may indicate:"
+            echo "  - Service is still starting (cold start can take 60+ seconds)"
+            echo "  - Service is unhealthy (check Cloud Run logs)"
+            echo "  - Authentication issue (check IAM permissions)"
             exit 1
           fi
-          echo "✅ Backend health check passed"
 
       - name: Pre-warm Backend Service
         continue-on-error: true
