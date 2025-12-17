@@ -152,6 +152,10 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
                     "summary": summary,
                 }
                 
+                # Preserve document_id from chunk_metadata if present
+                if "document_id" in chunk_metadata:
+                    node_metadata["document_id"] = chunk_metadata["document_id"]
+                
                 # Preserve chunk_id if available
                 if "node_id" in chunk and chunk["node_id"]:
                     node_metadata["chunk_id"] = chunk["node_id"]

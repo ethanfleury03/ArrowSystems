@@ -13,11 +13,65 @@ from google.cloud.exceptions import NotFound
 from google.api_core import exceptions
 
 
+def clear_gcs_prefix(bucket_name: str, gcs_prefix: str) -> int:
+    """
+    Clear all objects under a GCS prefix before uploading.
+    
+    This ensures no stale files remain if the index structure changes.
+    
+    Args:
+        bucket_name: GCS bucket name
+        gcs_prefix: Prefix/path in bucket to clear
+    
+    Returns:
+        Number of objects deleted
+    """
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to connect to GCS bucket '{bucket_name}': {e}. "
+            "Ensure you have gcloud auth configured and the bucket exists."
+        )
+    
+    # List all blobs under the prefix
+    if gcs_prefix:
+        # Ensure prefix ends with / for proper matching
+        prefix_to_clear = gcs_prefix.rstrip('/') + '/'
+    else:
+        # If no prefix, we should NOT clear the entire bucket - this is a safety check
+        # However, if the user explicitly wants to clear root, they can set prefix to "/"
+        raise ValueError(
+            "Cannot clear bucket root (gcs_prefix is empty). "
+            "This is a safety measure. If you really want to clear the root, "
+            "set gcs_prefix to '/' explicitly."
+        )
+    
+    blobs = list(bucket.list_blobs(prefix=prefix_to_clear))
+    deleted_count = 0
+    
+    if blobs:
+        print(f"[CLEAR] Clearing {len(blobs)} objects from gs://{bucket_name}/{prefix_to_clear}")
+        for blob in blobs:
+            try:
+                blob.delete()
+                deleted_count += 1
+            except Exception as e:
+                print(f"   [WARN] Failed to delete {blob.name}: {e}")
+        print(f"   [OK] Deleted {deleted_count} objects")
+    else:
+        print(f"[CLEAR] No objects found at gs://{bucket_name}/{prefix_to_clear}")
+    
+    return deleted_count
+
+
 def upload_directory_to_gcs(
     local_dir: str,
     bucket_name: str,
     gcs_prefix: str = "latest_model",
-    overwrite: bool = True
+    overwrite: bool = True,
+    clear_before_upload: bool = False
 ) -> None:
     """
     Upload a local directory to a GCS bucket.
@@ -27,6 +81,7 @@ def upload_directory_to_gcs(
         bucket_name: GCS bucket name
         gcs_prefix: Prefix/path in bucket (default: "latest_model")
         overwrite: Whether to overwrite existing files
+        clear_before_upload: If True, clear all objects under gcs_prefix before uploading
     """
     local_path = Path(local_dir)
     
@@ -71,6 +126,16 @@ def upload_directory_to_gcs(
         print(f"[WARN] Cannot verify bucket '{bucket_name}' exists (missing storage.buckets.get permission)")
         print("         Attempting to upload anyway...")
         print()
+    
+    # Clear prefix before upload if requested
+    if clear_before_upload:
+        try:
+            deleted_count = clear_gcs_prefix(bucket_name, gcs_prefix)
+            print()
+        except Exception as e:
+            print(f"[WARN] Failed to clear prefix before upload: {e}")
+            print("         Continuing with upload anyway...")
+            print()
     
     # Upload all files in the directory
     uploaded_count = 0
@@ -150,6 +215,11 @@ def main():
         action="store_true",
         help="Skip files that already exist in bucket"
     )
+    parser.add_argument(
+        "--clear-before-upload",
+        action="store_true",
+        help="Clear all objects under the prefix before uploading (ensures no stale files)"
+    )
     
     args = parser.parse_args()
     
@@ -165,7 +235,8 @@ def main():
         local_dir=str(local_dir),
         bucket_name=args.bucket,
         gcs_prefix=args.prefix,
-        overwrite=not args.no_overwrite
+        overwrite=not args.no_overwrite,
+        clear_before_upload=args.clear_before_upload
     )
 
 

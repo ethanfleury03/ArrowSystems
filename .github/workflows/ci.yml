@@ -200,6 +200,7 @@ jobs:
     name: Docker Build
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -266,8 +267,9 @@ jobs:
           gcloud auth print-access-token --project=${{ secrets.GCP_PROJECT_ID }} | docker login -u oauth2accesstoken --password-stdin us-central1-docker.pkg.dev
           echo "Docker authentication successful"
 
-      - name: Build & Push Backend Image (attempt 1)
+      - name: Build & Push Backend Image (no cache export)
         id: build-backend
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
         continue-on-error: true
         uses: docker/build-push-action@v5
         with:
@@ -277,13 +279,14 @@ jobs:
           push: true
           tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
           cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
 
-      - name: Build & Push Backend Image (retry)
-        if: steps.build-backend.outcome == 'failure'
+      - name: Build & Push Backend Image (with cache export)
+        id: build-backend-cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
         uses: docker/build-push-action@v5
         with:
           builder: ${{ steps.buildx.outputs.name }}
@@ -292,7 +295,36 @@ jobs:
           push: true
           tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
           cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
+          cache-to: type=gha,mode=min,scope=backend
+          platforms: linux/amd64
+          build-args: |
+            BUILD_ENV=production
+
+      - name: Build & Push Backend Image (retry - no cache export)
+        if: (github.event_name != 'push' || github.ref != 'refs/heads/main') && steps.build-backend.outcome == 'failure'
+        uses: docker/build-push-action@v5
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: ./backend/Dockerfile.backend
+          push: true
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          platforms: linux/amd64
+          build-args: |
+            BUILD_ENV=production
+
+      - name: Build & Push Backend Image (retry - with cache export)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.build-backend-cache.outcome == 'failure'
+        uses: docker/build-push-action@v5
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: ./backend/Dockerfile.backend
+          push: true
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=min,scope=backend
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
