@@ -4021,6 +4021,106 @@ async def delete_document_by_metadata_id(
         )
 
 
+@app.delete("/admin/documents/{document_id}/chunks")
+async def delete_document_chunks_by_document_id(
+    http_request: Request,
+    document_id: int,
+    force: bool = False
+):
+    """
+    Delete all chunks/nodes for a document by document_id.
+    
+    This endpoint deletes all chunks from the vector index that belong to the given document_id.
+    It does NOT delete database records - only removes chunks from the index.
+    
+    This is useful when:
+    - A document has multiple DocumentIngestionMetadata records (re-uploads)
+    - You want to delete all chunks for a document in one operation
+    - You need to clean up chunks before re-ingesting a document
+    
+    Args:
+        document_id: Integer Document.id to delete chunks for
+        force: If True, continue even if index is unavailable (returns partial result with error)
+    
+    Returns:
+        JSON summary with deletion results:
+        {
+            "document_id": int,
+            "deleted_nodes": int,
+            "deleted_ref_docs": int,
+            "legacy_nodes_missing_document_id": int,
+            "error": str (optional, only if force=True and error occurred)
+        }
+    """
+    from .logging_context import get_user_id, get_user_role
+    user_id = get_user_id()
+    user_role = get_user_role()
+    
+    # Validate document_id exists
+    def _check_document():
+        with SessionLocal() as session:
+            from backend.utils.db import Document
+            doc = session.query(Document).filter(Document.id == document_id).first()
+            return doc is not None
+    
+    document_exists = await run_sync(_check_document)
+    if not document_exists:
+        raise HTTPException(status_code=404, detail=f"Document with id {document_id} not found")
+    
+    # Delete chunks using simple_delete function
+    from backend.utils.simple_delete import delete_document_chunks_by_document_id as delete_chunks
+    
+    try:
+        delete_result = await run_sync(delete_chunks, document_id, force)
+        
+        logger.info(
+            {
+                "event": "document_chunks_deleted_by_document_id",
+                "document_id": document_id,
+                "deleted_nodes": delete_result.get("deleted_nodes", 0),
+                "deleted_ref_docs": delete_result.get("deleted_ref_docs", 0),
+                "legacy_nodes_missing_document_id": delete_result.get("legacy_nodes_missing_document_id", 0),
+                "force": force,
+            }
+        )
+        
+        # Audit log
+        await audit_log(
+            "document_chunks_deleted",
+            level="info",
+            user_id=user_id,
+            role=user_role,
+            metadata={
+                "document_id": document_id,
+                "deleted_nodes": delete_result.get("deleted_nodes", 0),
+                "deleted_ref_docs": delete_result.get("deleted_ref_docs", 0),
+            },
+            request=http_request,
+        )
+        
+        # Return JSON response with deletion summary
+        return delete_result
+        
+    except Exception as e:
+        # Log full error details for debugging
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.error(
+            {
+                "event": "document_chunks_deletion_failed",
+                "document_id": document_id,
+                "error_type": error_type,
+                "error_message": error_msg,
+            },
+            exc_info=True
+        )
+        
+        raise HTTPException(
+            status_code=500,
+            detail=get_error_detail(e, f"An internal error occurred while deleting chunks for document_id {document_id}")
+        )
+
+
 @app.get("/admin/documents/diagnostics")
 async def get_document_diagnostics(request: Request):
     """

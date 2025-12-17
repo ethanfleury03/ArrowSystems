@@ -1295,25 +1295,46 @@ class DocumentLoader:
                     # Load document based on file type
                     file_path = Path(temp_file_path)
                     
+                    # Determine document_id and machine_model
+                    # Prefer Document.machine_model if populated; otherwise fallback to DocumentIngestionMetadata.machine_model
+                    document_id = db_doc.id if db_doc else None
+                    machine_model = None
+                    if db_doc and db_doc.machine_model:
+                        machine_model = db_doc.machine_model
+                    elif metadata.machine_model:
+                        machine_model = metadata.machine_model
+                    
                     if file_ext == '.pdf':
                         pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
                         for doc in pdf_docs:
                             doc.metadata['file_name'] = filename
                             doc.metadata['file_type'] = 'pdf'
                             doc.metadata['gcs_path'] = gcs_path
-                            doc.metadata['metadata_id'] = metadata.id
+                            doc.metadata['ingestion_metadata_id'] = metadata.id
+                            doc.metadata['metadata_id'] = metadata.id  # Keep for backward compatibility
+                            doc.metadata['document_id'] = document_id
+                            if machine_model:
+                                doc.metadata['machine_model'] = machine_model
                         documents.extend(pdf_docs)
                     elif file_ext == '.docx' and DOCX_AVAILABLE:
                         docx_docs = self._load_docx(file_path)
                         for doc in docx_docs:
                             doc.metadata['gcs_path'] = gcs_path
-                            doc.metadata['metadata_id'] = metadata.id
+                            doc.metadata['ingestion_metadata_id'] = metadata.id
+                            doc.metadata['metadata_id'] = metadata.id  # Keep for backward compatibility
+                            doc.metadata['document_id'] = document_id
+                            if machine_model:
+                                doc.metadata['machine_model'] = machine_model
                         documents.extend(docx_docs)
                     elif file_ext in {'.md', '.markdown'}:
                         md_docs = self._load_markdown(file_path)
                         for doc in md_docs:
                             doc.metadata['gcs_path'] = gcs_path
-                            doc.metadata['metadata_id'] = metadata.id
+                            doc.metadata['ingestion_metadata_id'] = metadata.id
+                            doc.metadata['metadata_id'] = metadata.id  # Keep for backward compatibility
+                            doc.metadata['document_id'] = document_id
+                            if machine_model:
+                                doc.metadata['machine_model'] = machine_model
                         documents.extend(md_docs)
                     
                 except Exception as e:
@@ -2485,14 +2506,24 @@ def main():
                 index_bucket = os.getenv("RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
                 index_prefix = os.getenv("RAG_INDEX_GCS_PREFIX", "")  # Empty = bucket root
                 
+                # Check if we should clear the remote prefix before upload
+                # Only clear if prefix is set (safety: don't clear entire bucket)
+                clear_before_upload = (
+                    os.getenv("INDEX_GCS_CLEAR_BEFORE_UPLOAD", "false").lower() == "true" and
+                    index_prefix  # Only clear if prefix is set
+                )
+                
                 storage_dir = "latest_model"
                 if os.path.exists(storage_dir):
+                    if clear_before_upload:
+                        print(f"   Clearing remote prefix gs://{index_bucket}/{index_prefix} before upload...")
                     print(f"   Uploading {storage_dir}/ to gs://{index_bucket}/{index_prefix}")
                     upload_directory_to_gcs(
                         local_dir=storage_dir,
                         bucket_name=index_bucket,
                         gcs_prefix=index_prefix,
-                        overwrite=True
+                        overwrite=True,
+                        clear_before_upload=clear_before_upload
                     )
                     print("\n" + "="*60)
                     print("✅ INDEX UPLOADED TO GCS SUCCESSFULLY")

@@ -261,11 +261,26 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
         
         # Filter nodes
         filtered_nodes = []
+        # Get document_id from Document table if available
+        document_id = doc_record.id if doc_record else None
+        # Prefer Document.machine_model if populated; otherwise fallback to DocumentIngestionMetadata.machine_model
+        machine_model = None
+        if doc_record and doc_record.machine_model:
+            machine_model = doc_record.machine_model
+        elif metadata.machine_model:
+            machine_model = metadata.machine_model
+        
         for node in text_nodes:
             should_skip, _ = text_preprocessor.should_skip_node(node.text, metadata=node.metadata)
             if not should_skip:
+                # Preserve document_id from upstream doc metadata if present, otherwise set from DB
+                if 'document_id' not in node.metadata and document_id is not None:
+                    node.metadata['document_id'] = document_id
                 # Add machine_model and metadata_id to node metadata
-                node.metadata['machine_model'] = metadata.machine_model
+                if machine_model:
+                    node.metadata['machine_model'] = machine_model
+                else:
+                    node.metadata['machine_model'] = metadata.machine_model
                 node.metadata['ingestion_metadata_id'] = metadata_id
                 filtered_nodes.append(node)
         
