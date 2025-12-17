@@ -1118,17 +1118,67 @@ class DocumentLoader:
         from backend.utils.gcs_client import download_to_file
         import tempfile
         
+        # Validate database connection matches expected configuration
+        from backend.config.env import settings
+        db_url = settings.DATABASE_URL if hasattr(settings, 'DATABASE_URL') else os.getenv('DATABASE_URL', 'NOT_SET')
+        
+        # Fail fast if SQLite detected (should never happen in production)
+        if db_url.startswith('sqlite'):
+            raise RuntimeError(
+                f"❌ CRITICAL: ingest.py detected SQLite database ({db_url[:50]}...). "
+                "This should NEVER happen in production. "
+                "Ensure DATABASE_URL points to PostgreSQL. "
+                "If ENV=prod but using SQLite, this is a configuration error."
+            )
+        
         session = SessionLocal()
         documents = []
         temp_dir = tempfile.mkdtemp(prefix="ingest_db_")
         self.temp_files.append(temp_dir)  # Track for cleanup
         
         try:
+            # Log database connection info (without secrets)
+            from backend.config.env import settings
+            db_url = settings.DATABASE_URL if hasattr(settings, 'DATABASE_URL') else os.getenv('DATABASE_URL', 'NOT_SET')
+            # Mask password in connection string for logging
+            import re
+            if db_url and db_url != 'NOT_SET':
+                db_url_safe = re.sub(r':([^:@]+)@', r':***@', db_url)
+                db_host = re.search(r'@([^:/]+)', db_url)
+                db_name = re.search(r'/([^?]+)', db_url)
+                logger.info(f"🔍 Ingest.py using DATABASE_URL: {db_url_safe}")
+                logger.info(f"   Database host: {db_host.group(1) if db_host else 'unknown'}")
+                logger.info(f"   Database name: {db_name.group(1) if db_name else 'unknown'}")
+            else:
+                logger.warning("⚠️ DATABASE_URL not set in ingest.py!")
+            
+            # Log GCS configuration
+            logger.info(f"🔍 GCS Bucket: {self.gcs_bucket}, Prefix: {self.gcs_prefix}")
+            
             # Query all DocumentIngestionMetadata records that have gcs_path
             # Join with Document table to get gcs_path
             # Only process documents that are active and have GCS paths
-            from sqlalchemy import or_
+            from sqlalchemy import or_, func
             
+            # First, get total counts for validation
+            total_metadata_count = session.query(func.count(DocumentIngestionMetadata.id)).scalar() or 0
+            total_document_count = session.query(func.count(DBDocument.id)).scalar() or 0
+            documents_with_gcs = session.query(func.count(DBDocument.id)).filter(
+                DBDocument.gcs_path.isnot(None)
+            ).scalar() or 0
+            metadata_with_gcs_path = session.query(func.count(DocumentIngestionMetadata.id)).filter(
+                DocumentIngestionMetadata.file_path.like('gs://%')
+            ).scalar() or 0
+            
+            logger.info(f"📊 Database counts:")
+            logger.info(f"   Total DocumentIngestionMetadata records: {total_metadata_count}")
+            logger.info(f"   Total Document records: {total_document_count}")
+            logger.info(f"   Document records with gcs_path: {documents_with_gcs}")
+            logger.info(f"   Metadata records with gs:// file_path: {metadata_with_gcs_path}")
+            
+            # Query all DocumentIngestionMetadata records that have gcs_path
+            # Join with Document table to get gcs_path
+            # Only process documents that are active and have GCS paths
             metadata_records = (
                 session.query(DocumentIngestionMetadata, DBDocument)
                 .outerjoin(DBDocument, DocumentIngestionMetadata.filename == DBDocument.file_name)
@@ -1150,7 +1200,66 @@ class DocumentLoader:
                 .all()
             )
             
-            logger.info(f"Found {len(metadata_records)} documents in database with GCS paths")
+            logger.info(f"✅ Found {len(metadata_records)} documents in database with GCS paths (matching ingest query)")
+            
+            # Validation: Check for orphaned records
+            # Documents in metadata but not matching query
+            all_metadata = session.query(DocumentIngestionMetadata).all()
+            matched_filenames = {meta.filename for meta, _ in metadata_records}
+            orphaned_metadata = [meta for meta in all_metadata if meta.filename not in matched_filenames]
+            
+            if orphaned_metadata:
+                logger.warning(f"⚠️ Found {len(orphaned_metadata)} DocumentIngestionMetadata records without GCS paths:")
+                for meta in orphaned_metadata[:10]:  # Log first 10
+                    has_doc = session.query(DBDocument).filter(DBDocument.file_name == meta.filename).first()
+                    doc_gcs = has_doc.gcs_path if has_doc else None
+                    logger.warning(f"   - {meta.filename}: status={meta.status}, file_path={meta.file_path}, doc_gcs_path={doc_gcs}")
+                if len(orphaned_metadata) > 10:
+                    logger.warning(f"   ... and {len(orphaned_metadata) - 10} more")
+            
+            # Validation: Compare with GCS storage (if available)
+            if self.gcs_bucket:
+                try:
+                    from backend.utils.gcs_client import list_objects
+                    gcs_objects = list_objects(self.gcs_bucket, self.gcs_prefix)
+                    gcs_filenames = set()
+                    for obj_name in gcs_objects:
+                        # Extract filename from GCS path (format: prefix/metadata_id/filename)
+                        # Remove prefix to get relative path
+                        rel_path = obj_name.replace(self.gcs_prefix, '').lstrip('/')
+                        parts = rel_path.split('/')
+                        if len(parts) >= 2:
+                            # Format: metadata_id/filename - last part is filename
+                            gcs_filenames.add(parts[-1])
+                    
+                    db_filenames = {meta.filename for meta, _ in metadata_records}
+                    orphaned_storage = gcs_filenames - db_filenames
+                    missing_storage = db_filenames - gcs_filenames
+                    
+                    logger.info(f"📊 Storage validation:")
+                    logger.info(f"   GCS objects found: {len(gcs_objects)}")
+                    logger.info(f"   Unique filenames in GCS: {len(gcs_filenames)}")
+                    logger.info(f"   Documents in DB with GCS paths: {len(db_filenames)}")
+                    
+                    if orphaned_storage:
+                        logger.warning(f"⚠️ Found {len(orphaned_storage)} ORPHANED STORAGE OBJECTS (in GCS but not in DB):")
+                        for filename in list(orphaned_storage)[:5]:
+                            logger.warning(f"   - {filename}")
+                        if len(orphaned_storage) > 5:
+                            logger.warning(f"   ... and {len(orphaned_storage) - 5} more")
+                        logger.warning("   These objects exist in GCS but have no matching database record.")
+                        logger.warning("   Run with --repair-orphans flag to create DB records (if safe).")
+                    
+                    if missing_storage:
+                        logger.warning(f"⚠️ Found {len(missing_storage)} documents in DB but missing from GCS:")
+                        for filename in list(missing_storage)[:5]:
+                            logger.warning(f"   - {filename}")
+                        if len(missing_storage) > 5:
+                            logger.warning(f"   ... and {len(missing_storage) - 5} more")
+                        logger.warning("   These database records reference GCS paths that don't exist.")
+                            
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not validate against GCS storage: {e}")
             
             for metadata, db_doc in tqdm(metadata_records, desc="Loading documents from database"):
                 try:

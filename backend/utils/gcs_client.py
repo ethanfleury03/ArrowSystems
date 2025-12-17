@@ -34,14 +34,23 @@ def get_gcs_client():
     global _gcs_client
     
     if not _check_gcs_available():
+        logger.error("Google Cloud Storage library not installed. Install with: pip install google-cloud-storage")
         return None
     
     if _gcs_client is None:
         try:
             from google.cloud import storage
+            # Check for credentials
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if not creds_path and not os.path.exists(os.path.expanduser("~/.config/gcloud/application_default_credentials.json")):
+                logger.warning("GCS credentials not found. Set GOOGLE_APPLICATION_CREDENTIALS or run 'gcloud auth application-default login'")
             _gcs_client = storage.Client()
         except Exception as e:
-            logger.error(f"Failed to initialize GCS client: {e}")
+            error_msg = str(e)
+            if "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in str(type(e).__name__):
+                logger.error("GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS environment variable or run 'gcloud auth application-default login'")
+            else:
+                logger.error(f"Failed to initialize GCS client: {e}", exc_info=True)
             return None
     
     return _gcs_client
@@ -204,18 +213,34 @@ def upload_bytes(bucket_name: str, object_name: str, content: bytes, content_typ
     """
     client = get_gcs_client()
     if not client:
-        logger.error("GCS client not available for upload")
+        logger.error("GCS client not available for upload. Check GCS credentials and configuration.")
         return None
     
     try:
         bucket = client.bucket(bucket_name)
+        # Check if bucket exists
+        if not bucket.exists():
+            logger.error(f"GCS bucket does not exist: {bucket_name}. Please create the bucket or check the bucket name.")
+            return None
+        
         blob = bucket.blob(object_name)
         blob.upload_from_string(content, content_type=content_type)
         gcs_uri = f"gs://{bucket_name}/{object_name}"
         logger.info(f"Successfully uploaded to GCS: {gcs_uri}")
         return gcs_uri
     except Exception as e:
-        logger.error(f"Failed to upload {object_name} to {bucket_name}: {e}", exc_info=True)
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        # Provide more specific error messages
+        if "403" in error_msg or "Forbidden" in error_msg or "PermissionDenied" in error_type:
+            logger.error(f"GCS permission denied. Service account needs 'storage.objects.create' permission on bucket {bucket_name}")
+        elif "404" in error_msg or "NotFound" in error_type:
+            logger.error(f"GCS bucket not found: {bucket_name}. Verify the bucket name and that it exists in your GCP project.")
+        elif "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in error_type:
+            logger.error("GCS authentication failed. Set GOOGLE_APPLICATION_CREDENTIALS or run 'gcloud auth application-default login'")
+        else:
+            logger.error(f"Failed to upload {object_name} to {bucket_name}: {e}", exc_info=True)
         return None
 
 
