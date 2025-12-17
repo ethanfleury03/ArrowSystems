@@ -3374,10 +3374,8 @@ async def get_all_documents(request: Request):
                         "PENDING_INGESTION", "CHUNKING", "READY_FOR_EMBEDDING",
                         "EMBEDDING", "REBUILDING_INDEX", "DELETING"
                     }
-                        if raw_status in PROGRESS_STATUSES:
-                            final_status = "COMPLETE"
-                        else:
-                            final_status = raw_status
+                    if raw_status in PROGRESS_STATUSES:
+                        final_status = "COMPLETE"
                     else:
                         final_status = raw_status
                     
