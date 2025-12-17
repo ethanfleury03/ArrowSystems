@@ -60,32 +60,35 @@ class Settings:
     
     def _load_ingestion_config(self) -> None:
         """
-        Load ingestion configuration flag.
+        Load ingestion configuration flags.
         
-        IMPORTANT: This flag controls whether the web app/API can trigger
-        document ingestion (chunking, embedding, index writes).
+        DEPRECATED: ARROW_ALLOW_APP_INGESTION is no longer used for gating single-document operations.
+        Single-document ingestion (upload -> chunking -> embedding) is always allowed.
         
-        Default: False (ingestion disabled from app)
-        Set ARROW_ALLOW_APP_INGESTION=true ONLY in dedicated GPU ingestion environments,
-        NOT in the main production frontend/backend.
+        NEW: ARROW_ENABLE_BULK_INGEST_ENDPOINTS controls bulk ingestion endpoints.
+        - Default: False (bulk endpoints disabled)
+        - Set to true ONLY if you need to expose bulk rebuild/ingest endpoints via API
+        - Full ingestion should normally be done via CLI: python ingest.py
         """
-        # Robust parsing: accept "true/false", "1/0", "yes/no", "on/off", case-insensitive
+        # DEPRECATED: Keep for backward compatibility but don't use for gating
         allow_ingestion_str = os.getenv("ARROW_ALLOW_APP_INGESTION", "false").lower().strip()
         self.allow_app_ingestion = allow_ingestion_str in {"true", "1", "yes", "on"}
         
+        # NEW: Bulk ingestion endpoints flag
+        bulk_endpoints_str = os.getenv("ARROW_ENABLE_BULK_INGEST_ENDPOINTS", "false").lower().strip()
+        self.enable_bulk_ingest_endpoints = bulk_endpoints_str in {"true", "1", "yes", "on"}
+        
         # Log configuration at startup
-        env_var_present = "ARROW_ALLOW_APP_INGESTION" in os.environ
         logger.info(
-            f"ARROW_ALLOW_APP_INGESTION configuration: "
-            f"env_var_present={env_var_present}, "
-            f"raw_value={os.getenv('ARROW_ALLOW_APP_INGESTION', 'NOT_SET')}, "
-            f"parsed_value={self.allow_app_ingestion}"
+            f"Ingestion configuration: "
+            f"ARROW_ALLOW_APP_INGESTION={self.allow_app_ingestion} (DEPRECATED - not used for gating), "
+            f"ARROW_ENABLE_BULK_INGEST_ENDPOINTS={self.enable_bulk_ingest_endpoints}"
         )
         
-        if self.allow_app_ingestion:
-            logger.warning("⚠️ WARNING: App-based ingestion is ENABLED. This should only be set in dedicated GPU ingestion environments.")
+        if self.enable_bulk_ingest_endpoints:
+            logger.warning("⚠️ WARNING: Bulk ingestion endpoints are ENABLED. Full index rebuilds are available via API.")
         else:
-            logger.info("✅ App-based ingestion is DISABLED (default). Ingestion must be triggered via external GPU pipeline.")
+            logger.info("✅ Bulk ingestion endpoints are DISABLED (default). Full ingestion must be done via CLI: python ingest.py")
     
     def _load_gcs_config(self) -> None:
         """

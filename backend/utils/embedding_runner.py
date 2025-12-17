@@ -28,7 +28,7 @@ from backend.utils.test_mode import get_chunks_dir, get_index_dir
 logger = get_logger(__name__)
 
 
-def run_embedding(metadata_id: str, request_id: Optional[str] = None, force: bool = False) -> None:
+def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
     """
     Run embedding for a document ingestion metadata record.
     
@@ -45,37 +45,13 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None, force: boo
     8. Sets status to COMPLETE on success
     9. Sets status to FAILED on error
     
+    IMPORTANT: This function is always allowed. There are no ingestion gates.
+    Single-document embedding runs automatically after chunking.
+    
     Args:
         metadata_id: The ID of the DocumentIngestionMetadata record
         request_id: Optional request ID for tracing
-        force: If True, bypass the allow_app_ingestion check (for upload-triggered ingestion)
     """
-    # Check if app-based ingestion is allowed (unless force=True)
-    from backend.config.env import settings
-    if not force and not settings.allow_app_ingestion:
-        logger.warning(
-            {
-                "event": "ingestion_blocked_from_app",
-                "metadata_id": metadata_id,
-                "request_id": request_id,
-                "function": "run_embedding",
-                "force_bypass": False,
-            }
-        )
-        raise RuntimeError(
-            "Ingestion is disabled in this environment. Embedding must be triggered via external GPU pipeline."
-        )
-    
-    if force:
-        logger.info(
-            {
-                "event": "ingestion_forced_bypass",
-                "metadata_id": metadata_id,
-                "request_id": request_id,
-                "function": "run_embedding",
-                "note": "Bypassing allow_app_ingestion check (force=True from upload endpoint)",
-            }
-        )
     
     session: Optional[Session] = None
     document = None

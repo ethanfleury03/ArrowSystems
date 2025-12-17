@@ -32,6 +32,12 @@ def run_delete_and_reindex(metadata_id: str) -> None:
     
     INDEX-WRITE PATH: rebuilds entire index after deletion
     
+    WARNING: This function performs a FULL INDEX REBUILD. It should NOT be called
+    from document deletion endpoints. Use simple_delete.py for incremental deletion instead.
+    
+    This function is intended for CLI/manual use only, or for bulk operations
+    that are explicitly enabled via ARROW_ENABLE_BULK_INGEST_ENDPOINTS.
+    
     This function:
     1. Loads all metadata records
     2. Deletes the target document's metadata, chunks, and files
@@ -41,19 +47,6 @@ def run_delete_and_reindex(metadata_id: str) -> None:
     Args:
         metadata_id: The ID of the DocumentIngestionMetadata record to delete
     """
-    # Check if app-based ingestion is allowed
-    from backend.config.env import settings
-    if not settings.allow_app_ingestion:
-        logger.warning(
-            {
-                "event": "ingestion_blocked_from_app",
-                "metadata_id": metadata_id,
-                "function": "run_delete_and_reindex",
-            }
-        )
-        raise RuntimeError(
-            "Ingestion is disabled in this environment. Index rebuild must be triggered via external GPU pipeline."
-        )
     
     session: Optional[Session] = None
     temp_index_dir = get_temp_index_dir()
