@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { getAuthCookieName } from './lib/auth-config';
 
 /**
  * Middleware to handle authentication and route protection.
@@ -58,12 +59,18 @@ export function middleware(request: NextRequest) {
   }
   
   // Protected routes - check for authentication token
-  const token = request.cookies.get('access_token');
+  const cookieName = getAuthCookieName();
+  const token = request.cookies.get(cookieName);
   
   if (!token) {
-    // No token, redirect to login
+    // For API routes, NEVER redirect with HTML (breaks callers expecting JSON).
+    // Return JSON 401 instead so the UI can handle it safely.
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json({ detail: 'Not authenticated' }, { status: 401 });
+    }
+
+    // For pages, redirect to login.
     const loginUrl = new URL('/login', request.url);
-    // Preserve the full original URL (path + query) as a redirect parameter
     const fullPath = request.nextUrl.pathname + request.nextUrl.search;
     loginUrl.searchParams.set('redirect', fullPath);
     return NextResponse.redirect(loginUrl);

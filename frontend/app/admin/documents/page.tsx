@@ -136,6 +136,52 @@ export default function AdminDocumentsPage() {
     window.setTimeout(() => setToastMessage(null), 3000);
   }, []);
 
+  // Robust response parsing: avoid blindly calling response.json() on HTML error pages.
+  // Always read text once; parse JSON only when content-type indicates JSON.
+  const readResponseBody = useCallback(async (response: Response) => {
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
+
+    const rawText = await response.text().catch(() => "");
+    const preview = rawText.slice(0, 300);
+
+    if (!isJson) {
+      return { contentType, isJson: false as const, text: preview };
+    }
+
+    try {
+      const json = rawText ? JSON.parse(rawText) : {};
+      return { contentType, isJson: true as const, json };
+    } catch {
+      return { contentType, isJson: false as const, text: preview };
+    }
+  }, []);
+
+  const [roleForPage, setRoleForPage] = useState<string | null>(null);
+
+  const requireAdminOrExplain = useCallback(async (): Promise<boolean> => {
+    // Extra safety: admin pages should be gated by layout, but don't assume.
+    try {
+      const meResp = await fetch(`/api/auth/me`, { credentials: "include" });
+      const body = await readResponseBody(meResp);
+      if (!meResp.ok) {
+        const msg =
+          body.isJson ? extractApiError(body.json) : `Not authenticated (${meResp.status}): ${body.text || body.contentType}`;
+        showToast(msg || "Not authenticated", "error");
+        return false;
+      }
+      const role = body.isJson ? (body.json as any)?.role : null;
+      if (role !== "ADMIN") {
+        showToast("Admin only: Diagnostics are restricted to ADMIN users.", "error");
+        return false;
+      }
+      return true;
+    } catch (err) {
+      showToast("Admin only: Unable to verify permissions.", "error");
+      return false;
+    }
+  }, [extractApiError, readResponseBody, showToast]);
+
   const extractApiError = (detail: unknown): string | null => {
     if (!detail) return null;
     if (typeof detail === "string") return detail;
@@ -185,10 +231,15 @@ export default function AdminDocumentsPage() {
           credentials: "include",
         });
         if (!response.ok) {
-          console.warn(`Failed to fetch machine models: ${response.status}`);
+          const body = await readResponseBody(response);
+          console.warn(`Failed to fetch machine models: ${response.status}`, body);
           return;
         }
-        const data = await response.json();
+        const body = await readResponseBody(response);
+        if (!body.isJson) {
+          throw new Error(`Failed to parse machine models response (${response.status}): ${body.text || body.contentType}`);
+        }
+        const data = body.json;
         // Extract machine names from the machines array
         // Handle both array format and object with machines property
         let machines: Array<{ name: string }> = [];
@@ -204,7 +255,7 @@ export default function AdminDocumentsPage() {
         // Fallback: try to get from documents response
       }
     },
-    [apiBaseUrl]
+    [apiBaseUrl, readResponseBody]
   );
 
   const fetchDocuments = useCallback(
@@ -217,9 +268,15 @@ export default function AdminDocumentsPage() {
           credentials: "include",
         });
         if (!response.ok) {
-          throw new Error(`Failed to load documents (${response.status})`);
+          const body = await readResponseBody(response);
+          const detail = body.isJson ? extractApiError(body.json) : body.text;
+          throw new Error(detail || `Failed to load documents (${response.status})`);
         }
-        const data = await response.json();
+        const body = await readResponseBody(response);
+        if (!body.isJson) {
+          throw new Error(`Documents API returned non-JSON (${response.status}): ${(body.text || body.contentType).slice(0, 200)}`);
+        }
+        const data = body.json;
         const docs = Array.isArray(data.documents) ? data.documents : [];
         setDocuments(docs);
         
@@ -242,7 +299,7 @@ export default function AdminDocumentsPage() {
         setLoadingTable(false);
       }
     },
-    [apiBaseUrl]
+    [apiBaseUrl, extractApiError, readResponseBody]
   );
 
   useEffect(() => {
@@ -251,6 +308,30 @@ export default function AdminDocumentsPage() {
     fetchDocuments();
     fetchAllowedMachineModels();
   }, [fetchDocuments, fetchAllowedMachineModels]);
+
+  // Defensive: determine role for UI gating (prevents CUSTOMER from seeing/calling admin diagnostics if routing misbehaves).
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const resp = await fetch(`/api/auth/me`, { credentials: "include" });
+        const body = await readResponseBody(resp);
+        if (!mounted) return;
+        if (!resp.ok || !body.isJson) {
+          setRoleForPage(null);
+          return;
+        }
+        const role = (body.json as any)?.role;
+        setRoleForPage(typeof role === "string" ? role : null);
+      } catch {
+        if (!mounted) return;
+        setRoleForPage(null);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [readResponseBody]);
 
   // Poll for documents with active ingestion status (only when ingestion is enabled and page is visible)
   useEffect(() => {
@@ -592,14 +673,24 @@ export default function AdminDocumentsPage() {
     setDiagnosticsLoading(true);
     setDiagnosticsError(null);
     try {
+      const isAdmin = await requireAdminOrExplain();
+      if (!isAdmin) return;
+
       const response = await fetch(`/api/admin/documents/diagnostics`, {
         credentials: "include",
       });
       if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(extractApiError(error) || `Failed to get diagnostics (${response.status})`);
+        const body = await readResponseBody(response);
+        const detail = body.isJson ? extractApiError(body.json) : body.text;
+        throw new Error(detail || `Diagnostics failed (${response.status}): ${(body.text || body.contentType).slice(0, 200)}`);
       }
-      const data = await response.json();
+      const body = await readResponseBody(response);
+      if (!body.isJson) {
+        throw new Error(
+          `Diagnostics returned non-JSON (${response.status}). ${body.text ? body.text.slice(0, 200) : body.contentType}`
+        );
+      }
+      const data = body.json;
       setDiagnosticsResult(data);
       setDiagnosticsLastRun(new Date());
       setIsDiagnosticsModalOpen(true);
@@ -610,20 +701,28 @@ export default function AdminDocumentsPage() {
     } finally {
       setDiagnosticsLoading(false);
     }
-  }, [showToast]);
+  }, [extractApiError, readResponseBody, requireAdminOrExplain, showToast]);
 
   const viewOrphans = useCallback(async () => {
     setOrphansLoading(true);
     setOrphansError(null);
     try {
+      const isAdmin = await requireAdminOrExplain();
+      if (!isAdmin) return;
+
       const response = await fetch(`/api/admin/documents/orphans`, {
         credentials: "include",
       });
       if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(extractApiError(error) || `Failed to get orphans (${response.status})`);
+        const body = await readResponseBody(response);
+        const detail = body.isJson ? extractApiError(body.json) : body.text;
+        throw new Error(detail || `Failed to get orphans (${response.status})`);
       }
-      const data = await response.json();
+      const body = await readResponseBody(response);
+      if (!body.isJson) {
+        throw new Error(`Orphans returned non-JSON (${response.status}): ${body.text || body.contentType}`);
+      }
+      const data = body.json;
       setOrphansList(data.orphans || []);
       setIsOrphansModalOpen(true);
     } catch (err) {
@@ -633,20 +732,28 @@ export default function AdminDocumentsPage() {
     } finally {
       setOrphansLoading(false);
     }
-  }, [showToast]);
+  }, [extractApiError, readResponseBody, requireAdminOrExplain, showToast]);
 
   const deleteAllOrphans = useCallback(async () => {
     setDeleteOrphansLoading(true);
     try {
+      const isAdmin = await requireAdminOrExplain();
+      if (!isAdmin) return;
+
       const response = await fetch(`/api/admin/documents/orphans`, {
         method: "DELETE",
         credentials: "include",
       });
       if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(extractApiError(error) || `Failed to delete orphans (${response.status})`);
+        const body = await readResponseBody(response);
+        const detail = body.isJson ? extractApiError(body.json) : body.text;
+        throw new Error(detail || `Failed to delete orphans (${response.status})`);
       }
-      const data = await response.json();
+      const body = await readResponseBody(response);
+      if (!body.isJson) {
+        throw new Error(`Delete orphans returned non-JSON (${response.status}): ${body.text || body.contentType}`);
+      }
+      const data = body.json;
       setDeleteOrphansResult(data);
       
       // Show success message
@@ -674,7 +781,7 @@ export default function AdminDocumentsPage() {
     } finally {
       setDeleteOrphansLoading(false);
     }
-  }, [showToast, fetchDocuments, isOrphansModalOpen, viewOrphans]);
+  }, [extractApiError, fetchDocuments, isOrphansModalOpen, readResponseBody, requireAdminOrExplain, showToast, viewOrphans]);
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 md:mx-0 md:px-6 xl:mx-auto">
@@ -697,67 +804,75 @@ export default function AdminDocumentsPage() {
             <h2 className="text-lg font-semibold">Maintenance</h2>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={runDiagnostics}
-              disabled={diagnosticsLoading}
-            >
-              {diagnosticsLoading ? (
-                <>
-                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  Running...
-                </>
-              ) : (
-                <>
-                  <Database className="mr-2 h-4 w-4" />
-                  Diagnostics
-                </>
-              )}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={viewOrphans}
-              disabled={orphansLoading}
-            >
-              {orphansLoading ? (
-                <>
-                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  Loading...
-                </>
-              ) : (
-                <>
-                  <AlertTriangle className="mr-2 h-4 w-4" />
-                  View Orphans
-                </>
-              )}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={async () => {
-                // Load orphans first to show count in confirmation
-                if (orphansList.length === 0) {
-                  await viewOrphans();
-                }
-                setIsDeleteOrphansConfirmOpen(true);
-              }}
-              disabled={deleteOrphansLoading || orphansLoading}
-              className="text-destructive hover:text-destructive"
-            >
-              {deleteOrphansLoading ? (
-                <>
-                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  Deleting...
-                </>
-              ) : (
-                <>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Delete All Orphans
-                </>
-              )}
-            </Button>
+            {roleForPage !== null && roleForPage !== "ADMIN" ? (
+              <div className="text-sm text-muted-foreground">
+                Admin only: Diagnostics and maintenance tools are disabled for your account.
+              </div>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={runDiagnostics}
+                  disabled={diagnosticsLoading}
+                >
+                  {diagnosticsLoading ? (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                      Running...
+                    </>
+                  ) : (
+                    <>
+                      <Database className="mr-2 h-4 w-4" />
+                      Diagnostics
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={viewOrphans}
+                  disabled={orphansLoading}
+                >
+                  {orphansLoading ? (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                      Loading...
+                    </>
+                  ) : (
+                    <>
+                      <AlertTriangle className="mr-2 h-4 w-4" />
+                      View Orphans
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    // Load orphans first to show count in confirmation
+                    if (orphansList.length === 0) {
+                      await viewOrphans();
+                    }
+                    setIsDeleteOrphansConfirmOpen(true);
+                  }}
+                  disabled={deleteOrphansLoading || orphansLoading}
+                  className="text-destructive hover:text-destructive"
+                >
+                  {deleteOrphansLoading ? (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Delete All Orphans
+                    </>
+                  )}
+                </Button>
+              </>
+            )}
             <Button
               variant="outline"
               size="sm"

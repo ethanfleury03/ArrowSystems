@@ -4473,6 +4473,20 @@ async def get_document_diagnostics(request: Request):
             status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token payload"
         )
 
+    # Request tracing / debugging: confirm diagnostics is actually being called and with what role
+    try:
+        from .logging_context import get_request_id
+        logger.info(
+            {
+                "event": "documents_diagnostics_called",
+                "email": email,
+                "role": role,
+                "request_id": get_request_id(),
+            }
+        )
+    except Exception:
+        logger.info({"event": "documents_diagnostics_called", "email": email, "role": role})
+
     user = await db_manager.get_user_by_email(email)
     if not user or user.get("role") != "ADMIN":
         raise HTTPException(
