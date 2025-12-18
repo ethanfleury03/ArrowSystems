@@ -31,6 +31,13 @@ OPTIONAL_FILES = [
 
 FALLBACK_ROOT_FILENAMES = REQUIRED_FILES + OPTIONAL_FILES
 
+# Last download error for observability (surfaced via /rag/status and /query errors)
+_last_download_error: Optional[str] = None
+
+
+def get_last_download_error() -> Optional[str]:
+    return _last_download_error
+
 
 def _is_cloud_run() -> bool:
     return bool(os.getenv("K_SERVICE") or os.getenv("K_REVISION"))
@@ -91,10 +98,14 @@ def download_index_from_gcs() -> bool:
     Source: gs://<RAG_INDEX_GCS_BUCKET>/<RAG_INDEX_GCS_PREFIX>
     Local:  <RAG_INDEX_LOCAL_DIR>
     """
+    global _last_download_error
+    _last_download_error = None
+
     try:
         from google.cloud import storage
     except ImportError:
         logger.error("[RAG] google-cloud-storage not installed - cannot download index from GCS", exc_info=True)
+        _last_download_error = "ImportError: google-cloud-storage not installed"
         return False
 
     bucket_name = settings.RAG_INDEX_GCS_BUCKET
@@ -121,6 +132,7 @@ def download_index_from_gcs() -> bool:
     except Exception as e:
         print(f"[RAG] ❌ Failed to initialize GCS client: {type(e).__name__}: {str(e)}", flush=True)
         logger.error("[RAG] Failed to initialize GCS client", bucket=bucket_name, error=str(e), exc_info=True)
+        _last_download_error = f"{type(e).__name__}: {str(e)}"
         return False
 
     # Track download results
@@ -157,8 +169,7 @@ def download_index_from_gcs() -> bool:
         local_file_path = local_path / filename
         try:
             blob = bucket.blob(gcs_obj)
-            if not blob.exists():
-                return False
+            # Avoid explicit exists() checks where possible; download will raise NotFound if missing.
             print(f"[RAG] Downloading {filename} from gs://{bucket_name}/{gcs_obj}...", flush=True)
             logger.info("[RAG] Downloading file...", filename=filename, gcs_path=gcs_obj)
             blob.download_to_filename(str(local_file_path))
@@ -208,6 +219,11 @@ def download_index_from_gcs() -> bool:
             local_dir=str(local_path),
             message=f"Failed to download {len(required_failures)} required file(s): {', '.join(required_failures)}",
         )
+        _last_download_error = (
+            f"Missing required index files after download. "
+            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} missing={required_failures} "
+            f"local_dir={str(local_path)}"
+        )
         return False
 
     # Verify all required files are present locally
@@ -226,6 +242,10 @@ def download_index_from_gcs() -> bool:
             prefix=index_prefix,
             prefixes_tried=prefixes_to_try,
             message=f"Files not found locally after download: {', '.join(missing_locally)}",
+        )
+        _last_download_error = (
+            f"Validation failed: required files missing locally after download: {missing_locally}. "
+            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} local_dir={str(local_path)}"
         )
         return False
 
