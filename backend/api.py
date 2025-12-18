@@ -5597,6 +5597,7 @@ async def upload_document(
                 import json as _json
                 from backend.utils.db import DocumentIngestionMetadata, Document, MachineModel
                 from backend.utils.gcs_client import upload_bytes, get_gcs_client, delete_object, blob_exists, parse_gcs_path
+                from backend.utils.docs_gcs_paths import choose_docs_upload_object_name
 
                 # Legacy string field for backwards compatibility
                 # Document.machine_model is a string column; it historically held a single name,
@@ -5630,9 +5631,14 @@ async def upload_document(
                     }
                 )
                 
-                # Step 2: Upload to GCS using metadata_id in path
-                # NOTE: DOCS_GCS_PREFIX may be "" (bucket root). It must remain empty (no implicit "documents/").
-                gcs_object_name = f"{settings.DOCS_GCS_PREFIX}{metadata.id}/{sanitized_filename}"
+                # Step 2: Upload to GCS (bucket root key by default; no "<metadata_id>/" folder)
+                # NOTE: DOCS_GCS_PREFIX may be ""/"ROOT" (bucket root). It must remain empty (no implicit "documents/").
+                gcs_object_name = choose_docs_upload_object_name(
+                    docs_prefix=settings.DOCS_GCS_PREFIX,
+                    sanitized_filename=sanitized_filename,
+                    metadata_id=str(metadata.id),
+                    object_exists=lambda obj_name: blob_exists(settings.DOCS_GCS_BUCKET, obj_name),
+                )
                 gcs_path = None
                 
                 if not settings.DOCS_GCS_BUCKET:
@@ -5724,6 +5730,7 @@ async def upload_document(
                         "event": "document_uploaded_to_gcs",
                         "filename": file.filename,
                         "size_bytes": file_size,
+                        "gcs_object_name": gcs_object_name,
                         "gcs_path": gcs_path,
                         "request_id": request_id,
                     }
@@ -5800,6 +5807,8 @@ async def upload_document(
                     "machine_model_ids": selected_machine_model_ids,
                     "machine_model_names": selected_machine_model_names,
                     "status": metadata.status,
+                    "gcs_path": gcs_path,
+                    "gcs_object_name": gcs_object_name,
                     "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
                 }
             except Exception as e:
@@ -6010,7 +6019,9 @@ async def upload_document(
             "status": "success",
             "message": f"File {file.filename} uploaded successfully. Chunking started in background.",
             "metadata": metadata_result,
-            "file_path": original_path,
+            # Prefer the authoritative GCS URI for UI clarity/debugging.
+            "gcs_path": metadata_result.get("gcs_path") if isinstance(metadata_result, dict) else None,
+            "file_path": (metadata_result.get("gcs_path") if isinstance(metadata_result, dict) else None) or original_path,
             "size_bytes": file_size,
         }
         
