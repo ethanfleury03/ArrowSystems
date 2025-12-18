@@ -9,7 +9,9 @@ via the metadata server, or via GOOGLE_APPLICATION_CREDENTIALS in local dev.
 
 import os
 import logging
-from typing import Optional, BinaryIO, List
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional, BinaryIO, List, Dict, Any, Iterable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -168,6 +170,22 @@ def get_gcs_last_init_error() -> Optional[str]:
 
 class GCSUploadError(RuntimeError):
     """Raised when a GCS upload fails. Message preserves the underlying exception details."""
+
+
+@dataclass(frozen=True)
+class BlobInfo:
+    """
+    Lightweight blob info for list operations.
+
+    Notes:
+    - `metadata` is custom object metadata if available (may be None if not returned by list).
+    - `updated` may be None for some list responses depending on fields returned.
+    """
+
+    name: str
+    size: int | None = None
+    updated: datetime | None = None
+    metadata: Dict[str, Any] | None = None
 
 
 def parse_gcs_path(gcs_path: str) -> tuple[Optional[str], Optional[str]]:
@@ -474,31 +492,199 @@ def upload_file(bucket_name: str, object_name: str, local_path: str, content_typ
         raise GCSUploadError(f"GCS upload failed: {type(e).__name__}: {e} (bucket={bucket_name}, object={object_name})") from e
 
 
-def list_objects(bucket_name: str, prefix: str = "") -> List[str]:
+def list_objects(bucket_name: str, prefix: str = "") -> List[BlobInfo]:
     """
-    List all objects in a GCS bucket with the given prefix.
-    
-    Args:
-        bucket_name: GCS bucket name
-        prefix: Object name prefix to filter (default: empty string for all objects)
-    
+    List objects in a GCS bucket under a prefix.
+
     Returns:
-        List of object names (full paths within bucket)
+        List[BlobInfo] with (name, size, updated, metadata if available).
     """
     client = get_gcs_client()
     if not client:
         logger.error("GCS client not available for listing")
         return []
-    
+
     try:
         bucket = client.bucket(bucket_name)
         blobs = bucket.list_blobs(prefix=prefix)
-        object_names = [blob.name for blob in blobs]
-        logger.debug(f"Listed {len(object_names)} objects from {bucket_name} with prefix '{prefix}'")
-        return object_names
+        infos: list[BlobInfo] = []
+        for blob in blobs:
+            infos.append(
+                BlobInfo(
+                    name=blob.name,
+                    size=getattr(blob, "size", None),
+                    updated=getattr(blob, "updated", None),
+                    metadata=getattr(blob, "metadata", None),
+                )
+            )
+        logger.debug(f"Listed {len(infos)} objects from {bucket_name} with prefix '{prefix}'")
+        return infos
     except Exception as e:
         logger.error(f"Failed to list objects from {bucket_name} with prefix '{prefix}': {e}", exc_info=True)
         return []
+
+
+def list_object_names(bucket_name: str, prefix: str = "") -> List[str]:
+    """
+    Backwards-compatible helper that returns only blob names (strings).
+    """
+    return [b.name for b in list_objects(bucket_name, prefix)]
+
+
+def get_object_metadata(bucket_name: str, object_name: str) -> Dict[str, Any] | None:
+    """
+    Fetch object custom metadata (best-effort).
+
+    Returns:
+        dict if found, None if missing/unavailable.
+    """
+    client = get_gcs_client()
+    if not client:
+        return None
+    try:
+        bucket = client.bucket(bucket_name)
+        blob = bucket.get_blob(object_name)  # API call
+        if not blob:
+            return None
+        return getattr(blob, "metadata", None)
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch object metadata",
+            extra={"bucket": bucket_name, "object_name": object_name, "error": str(e)},
+        )
+        return None
+
+
+def exists_prefix(bucket_name: str, prefix: str) -> bool:
+    """
+    Check if any object exists under a prefix.
+    """
+    client = get_gcs_client()
+    if not client:
+        return False
+    try:
+        bucket = client.bucket(bucket_name)
+        it = bucket.list_blobs(prefix=prefix, max_results=1)
+        for _ in it:
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to check prefix existence gs://{bucket_name}/{prefix}: {e}", exc_info=True)
+        return False
+
+
+def download_to_path(bucket_name: str, object_name: str, local_path: str) -> bool:
+    """
+    Download a GCS object (bucket + object_name) to a local filesystem path.
+    """
+    client = get_gcs_client()
+    if not client:
+        logger.error("GCS client not available for download_to_path")
+        return False
+
+    try:
+        dest_dir = os.path.dirname(local_path)
+        if dest_dir:
+            os.makedirs(dest_dir, exist_ok=True)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        blob.download_to_filename(local_path)
+        return True
+    except Exception as e:
+        logger.error(
+            f"Failed to download gs://{bucket_name}/{object_name} to {local_path}: {e}",
+            exc_info=True,
+        )
+        return False
+
+
+def upload_dir(local_dir: str, bucket_name: str, prefix: str, ignore_names: Optional[set[str]] = None) -> List[str]:
+    """
+    Upload a directory recursively to GCS, preserving relative paths.
+
+    Args:
+        local_dir: local directory to upload
+        bucket_name: destination bucket
+        prefix: destination prefix (e.g., "latest_model/"). Can be "" for bucket root.
+
+    Returns:
+        List of gs:// URIs uploaded (best-effort).
+    """
+    local_dir_path = Path(local_dir).resolve()
+    if not local_dir_path.exists() or not local_dir_path.is_dir():
+        raise ValueError(f"upload_dir local_dir is not a directory: {local_dir}")
+
+    normalized_prefix = (prefix or "").lstrip("/")
+    if normalized_prefix and not normalized_prefix.endswith("/"):
+        normalized_prefix += "/"
+
+    ignore_names = ignore_names or {
+        ".DS_Store",
+        "Thumbs.db",
+        ".gitkeep",
+        ".keep",
+    }
+
+    uploaded: list[str] = []
+    for file_path in local_dir_path.rglob("*"):
+        if not file_path.is_file():
+            continue
+        # Skip dotfiles / transient OS junk
+        if file_path.name in ignore_names:
+            continue
+        if any(part.startswith(".") for part in file_path.relative_to(local_dir_path).parts):
+            continue
+        rel = file_path.relative_to(local_dir_path).as_posix()
+        object_name = f"{normalized_prefix}{rel}" if normalized_prefix else rel
+        uri = upload_file(bucket_name=bucket_name, object_name=object_name, local_path=str(file_path), content_type="application/octet-stream")
+        if uri:
+            uploaded.append(uri)
+    return uploaded
+
+
+def delete_prefix(bucket_name: str, prefix: str) -> int:
+    """
+    Delete all objects under a prefix.
+
+    Returns:
+        Number of objects deleted (best-effort).
+    """
+    client = get_gcs_client()
+    if not client:
+        raise RuntimeError("GCS client not available for delete_prefix")
+
+    bucket = client.bucket(bucket_name)
+    deleted = 0
+    for blob in bucket.list_blobs(prefix=prefix):
+        blob.delete()
+        deleted += 1
+    return deleted
+
+
+def copy_prefix(bucket_name: str, src_prefix: str, dst_prefix: str) -> int:
+    """
+    Copy all objects from src_prefix to dst_prefix within the same bucket.
+
+    Returns:
+        Number of objects copied.
+    """
+    client = get_gcs_client()
+    if not client:
+        raise RuntimeError("GCS client not available for copy_prefix")
+
+    if src_prefix and not src_prefix.endswith("/"):
+        src_prefix = src_prefix + "/"
+    if dst_prefix and not dst_prefix.endswith("/"):
+        dst_prefix = dst_prefix + "/"
+
+    bucket = client.bucket(bucket_name)
+    copied = 0
+    for blob in bucket.list_blobs(prefix=src_prefix):
+        rel = blob.name[len(src_prefix):] if blob.name.startswith(src_prefix) else blob.name
+        dst_name = f"{dst_prefix}{rel}" if dst_prefix else rel
+        bucket.copy_blob(blob, bucket, new_name=dst_name)
+        copied += 1
+    return copied
 
 
 def download_to_file(gcs_uri: str, dest_path: str) -> bool:

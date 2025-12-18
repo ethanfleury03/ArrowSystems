@@ -26,6 +26,7 @@ from sqlalchemy import (
     inspect,
     text,
     CheckConstraint,
+    Table,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, declarative_base, relationship, scoped_session, sessionmaker
@@ -284,6 +285,14 @@ class MachineModel(Base):
         ),
     )
 
+    # Many-to-many: documents tagged with this machine model
+    documents = relationship(
+        "Document",
+        secondary="document_machine_models",
+        back_populates="machine_models",
+        lazy="selectin",
+    )
+
 
 class DocumentIngestionMetadata(Base):
     """Document ingestion metadata table for tracking ingestion status."""
@@ -327,6 +336,24 @@ class Document(Base):
         Index('ix_documents_is_active', 'is_active'),
         Index('ix_documents_machine_model', 'machine_model'),
     )
+
+    # Many-to-many: machine models associated with this document (canonical source)
+    machine_models = relationship(
+        "MachineModel",
+        secondary="document_machine_models",
+        back_populates="documents",
+        lazy="selectin",
+    )
+
+
+# Association table: documents ↔ machine_models
+document_machine_models = Table(
+    "document_machine_models",
+    Base.metadata,
+    Column("document_id", Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False),
+    Column("machine_model_id", Integer, ForeignKey("machine_models.id", ondelete="CASCADE"), nullable=False),
+    UniqueConstraint("document_id", "machine_model_id", name="uq_document_machine_models"),
+)
 
 
 class GlossaryTerm(Base):

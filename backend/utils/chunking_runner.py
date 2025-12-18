@@ -252,12 +252,30 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
         filtered_nodes = []
         # Get document_id from Document table if available
         document_id = doc_record.id if doc_record else None
-        # Prefer Document.machine_model if populated; otherwise fallback to DocumentIngestionMetadata.machine_model
-        machine_model = None
-        if doc_record and doc_record.machine_model:
-            machine_model = doc_record.machine_model
-        elif metadata.machine_model:
-            machine_model = metadata.machine_model
+        # Machine models (canonical): Document↔MachineModel join table
+        machine_model_ids: list[int] = []
+        machine_model_names: list[str] = []
+        try:
+            if doc_record and hasattr(doc_record, "machine_models") and doc_record.machine_models:
+                machine_model_ids = [int(m.id) for m in doc_record.machine_models]
+                machine_model_names = [m.name for m in doc_record.machine_models if getattr(m, "name", None)]
+        except Exception:
+            machine_model_ids = []
+            machine_model_names = []
+
+        # Fallback: resolve single name from ingestion metadata into an ID (best-effort)
+        if not machine_model_ids and metadata.machine_model:
+            try:
+                from backend.utils.db import MachineModel
+                from sqlalchemy import func
+                mm = session.query(MachineModel).filter(
+                    func.upper(MachineModel.name) == " ".join(metadata.machine_model.upper().split())
+                ).first()
+                if mm:
+                    machine_model_ids = [int(mm.id)]
+                    machine_model_names = [mm.name]
+            except Exception:
+                pass
         
         for node in text_nodes:
             should_skip, _ = text_preprocessor.should_skip_node(node.text, metadata=node.metadata)
@@ -265,11 +283,12 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
                 # Preserve document_id from upstream doc metadata if present, otherwise set from DB
                 if 'document_id' not in node.metadata and document_id is not None:
                     node.metadata['document_id'] = document_id
-                # Add machine_model and metadata_id to node metadata
-                if machine_model:
-                    node.metadata['machine_model'] = machine_model
-                else:
-                    node.metadata['machine_model'] = metadata.machine_model
+                # Machine model metadata MUST reflect the document's current join-table values.
+                # Overwrite any stale values that may already exist on the node.
+                node.metadata["machine_model_ids"] = machine_model_ids
+                node.metadata["machine_model_names"] = machine_model_names
+                # Backward-compat key used elsewhere for filtering (list[str] preferred)
+                node.metadata["machine_model"] = machine_model_names if machine_model_names else metadata.machine_model
                 node.metadata['ingestion_metadata_id'] = metadata_id
                 filtered_nodes.append(node)
         
@@ -304,7 +323,9 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
         chunks_data = {
             "metadata_id": metadata_id,
             "filename": metadata.filename,
-            "machine_model": metadata.machine_model,
+            "machine_model": machine_model_names if machine_model_names else metadata.machine_model,
+            "machine_model_ids": machine_model_ids,
+            "machine_model_names": machine_model_names,
             "created_at": datetime.utcnow().isoformat(),
             "chunks": [
                 {

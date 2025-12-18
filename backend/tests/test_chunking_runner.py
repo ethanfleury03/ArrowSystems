@@ -129,6 +129,16 @@ def test_chunking_success_transition(sample_metadata, temp_dir):
                 chunks_data = json.load(f)
                 assert chunks_data["metadata_id"] == metadata_id
                 assert len(chunks_data["chunks"]) > 0
+                # New: machine_model_ids are always present (may be empty for legacy tests)
+                assert "machine_model_ids" in chunks_data
+                assert isinstance(chunks_data["machine_model_ids"], list)
+                assert "machine_model_names" in chunks_data
+                assert isinstance(chunks_data["machine_model_names"], list)
+
+                first_chunk = chunks_data["chunks"][0]
+                assert "metadata" in first_chunk
+                assert "machine_model_ids" in first_chunk["metadata"]
+                assert isinstance(first_chunk["metadata"]["machine_model_ids"], list)
         finally:
             session.close()
             # Cleanup

@@ -1073,10 +1073,17 @@ class DocumentLoader:
     Can load from local directory or GCS bucket.
     """
     
-    def __init__(self, data_dir: str = None, gcs_bucket: str = None, gcs_prefix: str = None):
+    def __init__(
+        self,
+        data_dir: str = None,
+        gcs_bucket: str = None,
+        gcs_prefix: str = None,
+        manifest_path: str | None = None,
+    ):
         self.data_dir = Path(data_dir) if data_dir else None
         self.gcs_bucket = gcs_bucket
         self.gcs_prefix = gcs_prefix or ""
+        self.manifest_path = manifest_path
         self.supported_extensions = {'.pdf', '.docx', '.md', '.markdown'}
         self.temp_files = []  # Track temp files for cleanup
     
@@ -1090,6 +1097,12 @@ class DocumentLoader:
                          Only processes documents that exist in the database.
         """
         documents = []
+
+        # Highest priority: explicit manifest (deterministic ingestion inputs)
+        if self.manifest_path:
+            documents = self._load_from_manifest(self.manifest_path)
+            logger.info(f"Loaded {len(documents)} document sections from manifest: {self.manifest_path}")
+            return documents
         
         # Priority 1: Load from database (if enabled and GCS is configured)
         if use_database:
@@ -1112,6 +1125,126 @@ class DocumentLoader:
         else:
             raise ValueError("Either data_dir or gcs_bucket must be provided, or use_database=True with database records")
         
+        return documents
+
+    def _load_from_manifest(self, manifest_path: str) -> List[Document]:
+        """
+        Load documents from a staging manifest written by the production ingestion flow.
+
+        Manifest format:
+            { "documents": [ { document_id, gcs_object_name, local_path, machine_models, ... } ] }
+
+        This loader is responsible for injecting REQUIRED per-chunk metadata via doc.metadata, so that
+        the SmartChunkSplitter will propagate them into every node:
+          - document_id (MUST be a stable, non-empty string; DB-native id preferred; UUID5 fallback if missing)
+          - machine_models (list[str])
+          - source_gcs (gs://...)
+        """
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f) or {}
+        entries = manifest.get("documents", [])
+        if not isinstance(entries, list):
+            raise ValueError(f"Invalid manifest format (documents must be a list): {manifest_path}")
+
+        documents: list[Document] = []
+        for entry in tqdm(entries, desc="Loading documents from manifest"):
+            try:
+                local_path = entry.get("local_path")
+                if not local_path:
+                    logger.warning("Skipping manifest entry with missing local_path", extra={"entry": entry})
+                    continue
+                file_path = Path(local_path)
+                if not file_path.exists():
+                    logger.warning("Skipping manifest entry (local file missing)", extra={"local_path": local_path})
+                    continue
+
+                filename = entry.get("filename") or file_path.name
+                file_ext = file_path.suffix.lower()
+                if file_ext not in self.supported_extensions:
+                    continue
+
+                # REQUIRED metadata for every chunk/node
+                document_id = entry.get("document_id")
+                machine_models = entry.get("machine_models") or entry.get("machine_model_names") or []
+                machine_model_names = entry.get("machine_model_names") or machine_models or []
+                machine_model_ids = entry.get("machine_model_ids") or []
+                source_gcs = entry.get("source_gcs") or entry.get("gcs_uri") or entry.get("gcs_path")
+                ingestion_metadata_id = entry.get("ingestion_metadata_id") or entry.get("metadata_id")
+
+                # Normalize machine_models
+                if isinstance(machine_models, str):
+                    try:
+                        machine_models = json.loads(machine_models)
+                    except Exception:
+                        machine_models = [m.strip() for m in machine_models.split(",") if m.strip()]
+                if not isinstance(machine_models, list):
+                    machine_models = []
+                machine_models = [m for m in machine_models if isinstance(m, str) and m.strip()]
+
+                if isinstance(machine_model_names, str):
+                    try:
+                        machine_model_names = json.loads(machine_model_names)
+                    except Exception:
+                        machine_model_names = [m.strip() for m in machine_model_names.split(",") if m.strip()]
+                if not isinstance(machine_model_names, list):
+                    machine_model_names = []
+                machine_model_names = [m for m in machine_model_names if isinstance(m, str) and m.strip()]
+
+                if isinstance(machine_model_ids, str):
+                    try:
+                        machine_model_ids = json.loads(machine_model_ids)
+                    except Exception:
+                        machine_model_ids = [m.strip() for m in machine_model_ids.split(",") if m.strip()]
+                if not isinstance(machine_model_ids, list):
+                    machine_model_ids = []
+                machine_model_ids = [m for m in machine_model_ids if isinstance(m, str) and m.strip()]
+
+                if document_id is None:
+                    logger.warning(
+                        "Manifest entry missing document_id; setting to 0 (will break document_id-based deletion)",
+                        extra={"filename": filename, "source_gcs": source_gcs},
+                    )
+                    document_id = "0"
+                document_id = str(document_id)
+
+                base_meta = {
+                    "file_name": filename,
+                    "file_type": file_ext.lstrip(".") if file_ext else "unknown",
+                    "gcs_path": source_gcs,  # historical key used elsewhere
+                    "source_gcs": source_gcs,
+                    "local_path": str(file_path.resolve()),
+                    "document_id": document_id,
+                    # Best-practice: store both ids + names, plus backwards-compat aliases
+                    "machine_model_ids": machine_model_ids,
+                    "machine_model_names": machine_model_names or machine_models,
+                    "machine_models": machine_model_names or machine_models,
+                    # Backwards compatibility: orchestrator uses machine_model (string|list). Use list[str].
+                    "machine_model": machine_model_names or machine_models,
+                }
+                if ingestion_metadata_id:
+                    base_meta["ingestion_metadata_id"] = ingestion_metadata_id
+                    base_meta["metadata_id"] = ingestion_metadata_id  # legacy alias
+
+                # Load document based on type, and inject base metadata onto every produced section
+                if file_ext == ".pdf":
+                    pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
+                    for doc in pdf_docs:
+                        doc.metadata = {**base_meta, **(doc.metadata or {})}
+                    documents.extend(pdf_docs)
+                elif file_ext == ".docx" and DOCX_AVAILABLE:
+                    docx_docs = self._load_docx(file_path)
+                    for doc in docx_docs:
+                        doc.metadata = {**base_meta, **(doc.metadata or {})}
+                    documents.extend(docx_docs)
+                elif file_ext in {".md", ".markdown"}:
+                    md_docs = self._load_markdown(file_path)
+                    for doc in md_docs:
+                        doc.metadata = {**base_meta, **(doc.metadata or {})}
+                    documents.extend(md_docs)
+            except Exception as e:
+                logger.error(f"Error loading manifest entry: {e}", exc_info=True)
+                continue
+
         return documents
     
     def _load_from_database(self) -> List[Document]:
@@ -1225,8 +1358,8 @@ class DocumentLoader:
             # Validation: Compare with GCS storage (if available)
             if self.gcs_bucket:
                 try:
-                    from backend.utils.gcs_client import list_objects
-                    gcs_objects = list_objects(self.gcs_bucket, self.gcs_prefix)
+                    from backend.utils.gcs_client import list_object_names
+                    gcs_objects = list_object_names(self.gcs_bucket, self.gcs_prefix)
                     gcs_filenames = set()
                     for obj_name in gcs_objects:
                         # Extract filename from GCS path (format: prefix/metadata_id/filename)
@@ -1300,14 +1433,41 @@ class DocumentLoader:
                     # Load document based on file type
                     file_path = Path(temp_file_path)
                     
-                    # Determine document_id and machine_model
-                    # Prefer Document.machine_model if populated; otherwise fallback to DocumentIngestionMetadata.machine_model
+                    # Determine document_id and machine models (names + IDs)
                     document_id = db_doc.id if db_doc else None
-                    machine_model = None
-                    if db_doc and db_doc.machine_model:
-                        machine_model = db_doc.machine_model
-                    elif metadata.machine_model:
-                        machine_model = metadata.machine_model
+
+                    machine_model_names: list[str] = []
+                    machine_model_ids: list[int] = []
+
+                    try:
+                        if db_doc and hasattr(db_doc, "machine_models") and db_doc.machine_models:
+                            machine_model_names = [m.name for m in db_doc.machine_models if getattr(m, "name", None)]
+                            machine_model_ids = [int(m.id) for m in db_doc.machine_models if getattr(m, "id", None) is not None]
+                    except Exception:
+                        machine_model_names = []
+                        machine_model_ids = []
+
+                    # Fallback to legacy string fields
+                    if not machine_model_names:
+                        raw = None
+                        if db_doc and db_doc.machine_model:
+                            raw = db_doc.machine_model
+                        elif metadata.machine_model:
+                            raw = metadata.machine_model
+                        # Use the shared helper below in this file
+                        try:
+                            machine_model_names = _parse_machine_models(raw)
+                        except Exception:
+                            machine_model_names = []
+
+                    # Resolve IDs from names (best-effort)
+                    if machine_model_names and not machine_model_ids:
+                        try:
+                            from backend.utils.db import MachineModel as DBMachineModel
+                            rows = session.query(DBMachineModel).filter(DBMachineModel.name.in_(machine_model_names)).all()
+                            machine_model_ids = [int(r.id) for r in rows if getattr(r, "id", None) is not None]
+                        except Exception:
+                            machine_model_ids = []
                     
                     if file_ext == '.pdf':
                         pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
@@ -1318,8 +1478,10 @@ class DocumentLoader:
                             doc.metadata['ingestion_metadata_id'] = metadata.id
                             doc.metadata['metadata_id'] = metadata.id  # Keep for backward compatibility
                             doc.metadata['document_id'] = document_id
-                            if machine_model:
-                                doc.metadata['machine_model'] = machine_model
+                            doc.metadata['machine_model_ids'] = machine_model_ids
+                            doc.metadata['machine_model_names'] = machine_model_names
+                            if machine_model_names:
+                                doc.metadata['machine_model'] = machine_model_names
                         documents.extend(pdf_docs)
                     elif file_ext == '.docx' and DOCX_AVAILABLE:
                         docx_docs = self._load_docx(file_path)
@@ -1328,8 +1490,10 @@ class DocumentLoader:
                             doc.metadata['ingestion_metadata_id'] = metadata.id
                             doc.metadata['metadata_id'] = metadata.id  # Keep for backward compatibility
                             doc.metadata['document_id'] = document_id
-                            if machine_model:
-                                doc.metadata['machine_model'] = machine_model
+                            doc.metadata['machine_model_ids'] = machine_model_ids
+                            doc.metadata['machine_model_names'] = machine_model_names
+                            if machine_model_names:
+                                doc.metadata['machine_model'] = machine_model_names
                         documents.extend(docx_docs)
                     elif file_ext in {'.md', '.markdown'}:
                         md_docs = self._load_markdown(file_path)
@@ -1338,8 +1502,10 @@ class DocumentLoader:
                             doc.metadata['ingestion_metadata_id'] = metadata.id
                             doc.metadata['metadata_id'] = metadata.id  # Keep for backward compatibility
                             doc.metadata['document_id'] = document_id
-                            if machine_model:
-                                doc.metadata['machine_model'] = machine_model
+                            doc.metadata['machine_model_ids'] = machine_model_ids
+                            doc.metadata['machine_model_names'] = machine_model_names
+                            if machine_model_names:
+                                doc.metadata['machine_model'] = machine_model_names
                         documents.extend(md_docs)
                     
                 except Exception as e:
@@ -1361,7 +1527,8 @@ class DocumentLoader:
         logger.info(f"Loading documents from GCS bucket: {self.gcs_bucket}, prefix: {self.gcs_prefix}")
         
         # List all objects in GCS bucket with prefix
-        object_names = list_objects(self.gcs_bucket, self.gcs_prefix)
+        object_infos = list_objects(self.gcs_bucket, self.gcs_prefix)
+        object_names = [o.name for o in object_infos]
         
         # Filter to PDFs (case-insensitive)
         pdf_objects = [
@@ -1649,11 +1816,17 @@ class TechnicalRAGPipeline:
     def __init__(self, cache_dir="/root/.cache/huggingface/hub", config_path="config.yaml"):
         self.cache_dir = cache_dir
         self.embed_model = None
+        self.embedding_model_name: str | None = None
         self.reranker = None
         self.index = None
         self.non_text_extractor = NonTextExtractor()
         self.text_preprocessor = TextPreprocessor()
         self.config = self._load_config(config_path)
+
+        # Optional: when ingesting from a staging manifest, we populate this mapping so that
+        # all non-text nodes (tables/images/captions) can include REQUIRED metadata fields.
+        # Key: absolute local file path (string). Value: dict with document_id/machine_models/source_gcs.
+        self._required_meta_by_local_path: dict[str, dict[str, Any]] = {}
         
         # Initialize Claude semantic rewriter (optional)
         claude_config = self.config.get("claude_rewriting", {})
@@ -1772,6 +1945,7 @@ class TechnicalRAGPipeline:
                         trust_remote_code=True,
                         device=device
                     )
+                    self.embedding_model_name = model_name
                     logger.info(f"✅ Successfully loaded: {display_name} on {device}")
                     break
                 except Exception as e1:
@@ -1787,6 +1961,7 @@ class TechnicalRAGPipeline:
                                 trust_remote_code=True,
                                 device=device
                             )
+                            self.embedding_model_name = full_name
                             logger.info(f"✅ Successfully loaded: {display_name} on {device}")
                             break
                         except Exception as e2:
@@ -1804,6 +1979,7 @@ class TechnicalRAGPipeline:
             # Emergency fallback - use any available model
             try:
                 self.embed_model = HuggingFaceEmbedding(model_name="all-MiniLM-L6-v2")
+                self.embedding_model_name = "all-MiniLM-L6-v2"
                 logger.info("✅ Loaded with emergency fallback")
             except:
                 raise RuntimeError("Could not load any embedding model. Check internet connection and HuggingFace access.")
@@ -1861,8 +2037,8 @@ class TechnicalRAGPipeline:
         all_images = []
         all_captions = []
         
-        # Find all PDF files
-        pdf_files = list(Path(data_dir).glob("*.pdf"))
+        # Find all PDF files (recursive; GCS staging uses nested directories like documents/<metadata_id>/<file>.pdf)
+        pdf_files = list(Path(data_dir).rglob("*.pdf"))
         logger.info(f"Found {len(pdf_files)} PDF files to process")
         
         for pdf_path in pdf_files:
@@ -1894,6 +2070,30 @@ class TechnicalRAGPipeline:
     def create_non_text_nodes(self, tables: List[Dict], images: List[Dict], captions: List[Dict]) -> List[TextNode]:
         """Create TextNode objects for non-text content to be embedded."""
         nodes = []
+
+        def _required_meta_for_source_path(source_path: str) -> dict[str, Any]:
+            try:
+                key = str(Path(source_path).resolve())
+            except Exception:
+                key = source_path
+            meta = self._required_meta_by_local_path.get(key)
+            if meta:
+                return meta
+            # Loud fallback: stable UUID5 derived from the local source_path string.
+            stable_id = _stable_uuid5_from_string(str(source_path))
+            logger.warning(
+                "Non-text node missing required metadata mapping; using deterministic fallback",
+                extra={"source_path": source_path, "fallback_document_id": stable_id},
+            )
+            return {
+                "document_id": stable_id,
+                "machine_model_ids": [],
+                "machine_model_names": [],
+                "machine_models": [],
+                "machine_model": [],
+                "source_gcs": None,
+                "gcs_path": None,
+            }
         
         # Process tables
         for table in tables:
@@ -1909,7 +2109,8 @@ class TechnicalRAGPipeline:
                     "table_index": table["table_index"],
                     "row_count": table["row_count"],
                     "column_count": table["column_count"],
-                    "table_json": table["table_json"]
+                    "table_json": table["table_json"],
+                    **_required_meta_for_source_path(table.get("source_path")),
                 }
             )
             nodes.append(node)
@@ -1925,7 +2126,8 @@ class TechnicalRAGPipeline:
                         "content_type": "figure_caption",
                         "source_path": caption["source_path"],
                         "page_number": caption["page_number"],
-                        "line_number": caption["line_number"]
+                        "line_number": caption["line_number"],
+                        **_required_meta_for_source_path(caption.get("source_path")),
                     }
                 )
                 nodes.append(node)
@@ -1944,7 +2146,8 @@ class TechnicalRAGPipeline:
                     "width": image["width"],
                     "height": image["height"],
                     "saved_path": image.get("saved_path"),
-                    "bbox": str(image.get("bbox")) if image.get("bbox") else None
+                    "bbox": str(image.get("bbox")) if image.get("bbox") else None,
+                    **_required_meta_for_source_path(image.get("source_path")),
                 }
             )
             nodes.append(node)
@@ -2014,26 +2217,66 @@ class TechnicalRAGPipeline:
         # Step 1: Load Documents (PDF, DOCX, Markdown)
         print("\n[Step 1/7] 📄 Loading documents (PDF, DOCX, Markdown)...")
         
-        # Check if GCS is configured for document storage
-        from backend.config.env import settings
-        use_gcs = bool(settings.DOCS_GCS_BUCKET)
-        
-        # Always try to load from database first (only processes documents in DB)
-        # Falls back to GCS/local if database loading fails or returns no documents
-        loader = None
-        if use_gcs:
-            print(f"   📦 Loading from database (documents with GCS paths)...")
-            loader = DocumentLoader(
-                gcs_bucket=settings.DOCS_GCS_BUCKET,
-                gcs_prefix=settings.DOCS_GCS_PREFIX
-            )
+        # Optional: deterministic ingestion input via staging manifest
+        manifest_path = os.getenv("INGEST_DOC_MANIFEST_PATH")
+        if manifest_path and os.path.exists(manifest_path):
+            print(f"   📋 Loading documents from staging manifest: {manifest_path}")
+            loader = DocumentLoader(data_dir=data_dir, manifest_path=manifest_path)
+            documents = loader.load_documents(use_database=False)
+            use_gcs = False
+            # Populate non-text metadata mapping for tables/images/captions
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f) or {}
+                entries = manifest.get("documents", []) if isinstance(manifest, dict) else []
+                mapping: dict[str, dict[str, Any]] = {}
+                for entry in entries if isinstance(entries, list) else []:
+                    try:
+                        lp = entry.get("local_path")
+                        if not lp:
+                            continue
+                        mm_names = entry.get("machine_model_names") or entry.get("machine_models") or []
+                        mm_ids = entry.get("machine_model_ids") or []
+                        if not isinstance(mm_names, list):
+                            mm_names = []
+                        if not isinstance(mm_ids, list):
+                            mm_ids = []
+                        mapping[str(Path(lp).resolve())] = {
+                            "document_id": str(entry.get("document_id")) if entry.get("document_id") is not None else "0",
+                            "machine_model_ids": [str(x) for x in mm_ids if isinstance(x, str) and x.strip()],
+                            "machine_model_names": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
+                            "machine_models": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
+                            "source_gcs": entry.get("source_gcs"),
+                            "gcs_path": entry.get("source_gcs"),
+                            # Orchestrator filter uses machine_model as list[str]
+                            "machine_model": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
+                        }
+                    except Exception:
+                        continue
+                self._required_meta_by_local_path = mapping
+            except Exception as e:
+                logger.warning(f"Failed to load manifest for non-text metadata propagation: {e}")
         else:
-            print(f"   📁 Loading from database (documents with GCS paths)...")
-            loader = DocumentLoader(data_dir=data_dir)
-        
-        # Load from database (preferred) - only processes documents in database
-        # This ensures we only ingest documents that are tracked in the database
-        documents = loader.load_documents(use_database=True)
+            # Check if GCS is configured for document storage
+            from backend.config.env import settings
+            use_gcs = bool(settings.DOCS_GCS_BUCKET)
+
+            # Always try to load from database first (only processes documents in DB)
+            # Falls back to GCS/local if database loading fails or returns no documents
+            loader = None
+            if use_gcs:
+                print(f"   📦 Loading from database (documents with GCS paths)...")
+                loader = DocumentLoader(
+                    gcs_bucket=settings.DOCS_GCS_BUCKET,
+                    gcs_prefix=settings.DOCS_GCS_PREFIX
+                )
+            else:
+                print(f"   📁 Loading from database (documents with GCS paths)...")
+                loader = DocumentLoader(data_dir=data_dir)
+
+            # Load from database (preferred) - only processes documents in database
+            # This ensures we only ingest documents that are tracked in the database
+            documents = loader.load_documents(use_database=True)
 
         # Safety: never build/upload an empty index unless explicitly allowed
         allow_empty = os.getenv("ALLOW_EMPTY_INDEX", "false").lower() in {"1", "true", "yes", "on"}
@@ -2236,6 +2479,38 @@ class TechnicalRAGPipeline:
             self.index.storage_context.persist(persist_dir=storage_dir)
             print(f"   ✅ Index saved to: {storage_dir}")
             logger.info("✅ Index created and saved locally")
+
+            # Write a build manifest for verification + promotion workflows
+            try:
+                from datetime import datetime, timezone
+                build_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+
+                # Best-effort document count
+                docs_count = None
+                manifest_path = os.getenv("INGEST_DOC_MANIFEST_PATH")
+                if manifest_path and os.path.exists(manifest_path):
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        m = json.load(f) or {}
+                    entries = m.get("documents", []) if isinstance(m, dict) else []
+                    if isinstance(entries, list):
+                        docs_count = len(entries)
+                if docs_count is None:
+                    docs_count = len({d.metadata.get("file_name") for d in documents if hasattr(d, "metadata") and d.metadata})
+
+                chunk_count = len(all_nodes) if "all_nodes" in locals() else None
+
+                manifest = {
+                    "build_timestamp": build_ts,
+                    "embedding_model": self.embedding_model_name or self.config.get("models", {}).get("embedding"),
+                    "num_documents": docs_count,
+                    "num_chunks": chunk_count,
+                }
+                manifest_path_out = Path(storage_dir) / "index_manifest.json"
+                with open(manifest_path_out, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2, sort_keys=True)
+                logger.info(f"Wrote index manifest to {manifest_path_out}")
+            except Exception as e:
+                logger.warning(f"Failed to write index_manifest.json: {e}", exc_info=True)
         else:
             print(f"   ✅ Index saved to: Qdrant")
             logger.info("✅ Index created and saved to Qdrant")
@@ -2502,95 +2777,567 @@ def _sync_gcs_documents_to_db(documents: List[Document], loader: DocumentLoader)
         session.close()
 
 
-def main():
-    """Main function to build the RAG index with non-text content support."""
-    
-    # Initialize pipeline
-    pipeline = TechnicalRAGPipeline()
-    
-    # Build or load index (set use_qdrant=True for Qdrant storage)
-    use_qdrant = os.getenv("USE_QDRANT", "false").lower() == "true"
-    index = pipeline.build_index(
-        data_dir=DEFAULT_DATA_DIR,
-        storage_dir=DEFAULT_STORAGE_DIR,
-        use_qdrant=use_qdrant,
-    )
-    
-    print("\n" + "="*60)
-    print("✅ INGESTION COMPLETED SUCCESSFULLY")
-    print("="*60)
-    if use_qdrant:
-        print("🗄️ Index saved to: Qdrant")
-    else:
-        print(f"📁 Index saved to: {DEFAULT_STORAGE_DIR}")
-        
-        # Automatically upload index to GCS after ingestion
-        print("\n" + "="*60)
-        print("📤 UPLOADING INDEX TO GCS...")
-        print("="*60)
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_prefix(prefix: str) -> str:
+    p = (prefix or "").strip()
+    if not p:
+        return ""
+    p = p.lstrip("/")
+    return p if p.endswith("/") else f"{p}/"
+
+
+def _stable_uuid5_from_string(s: str) -> str:
+    """
+    Deterministic, stable UUID string derived from an input string.
+
+    Used as a fallback when DB doesn't provide a canonical document_id.
+    """
+    import uuid
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, s))
+
+
+def _safe_rel_from_gcs_object(docs_prefix: str, object_name: str) -> str:
+    """
+    Convert a GCS object name into a safe relative path under docs_prefix.
+
+    Prevents path traversal / absolute paths from being interpreted as filesystem paths.
+    If unsafe, falls back to a deterministic hashed filename under "__unsafe__/".
+    """
+    from pathlib import PurePosixPath
+    import hashlib
+
+    rel = object_name
+    if docs_prefix and rel.startswith(docs_prefix):
+        rel = rel[len(docs_prefix):].lstrip("/")
+
+    p = PurePosixPath(rel)
+    parts = p.parts
+    if not parts or p.is_absolute() or any(seg in {"..", ""} for seg in parts):
+        ext = PurePosixPath(object_name).suffix.lower()
+        h = hashlib.sha1(object_name.encode("utf-8")).hexdigest()[:16]
+        return f"__unsafe__/{h}{ext}"
+    return p.as_posix()
+
+
+def _parse_machine_models(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [m for m in raw if isinstance(m, str) and m.strip()]
+    if isinstance(raw, str):
+        r = raw.strip()
+        if not r:
+            return []
         try:
-            # Import upload function directly
-            import importlib.util
-            from pathlib import Path
-            
-            # Load the upload script as a module
-            script_path = Path(__file__).parent / "scripts" / "upload_index_to_gcs.py"
-            if script_path.exists():
-                spec = importlib.util.spec_from_file_location("upload_index_to_gcs", script_path)
-                upload_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(upload_module)
-                upload_directory_to_gcs = upload_module.upload_directory_to_gcs
-                
-                # Get bucket name from environment or use default
-                index_bucket = os.getenv("RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
-                # Default to latest_model (Cloud Run default) to avoid accidentally overwriting bucket root
-                index_prefix = os.getenv("RAG_INDEX_GCS_PREFIX", "latest_model").strip()
-                # Normalize prefix: allow "" only if explicitly opted-in
-                allow_root_upload = os.getenv("ALLOW_BUCKET_ROOT_INDEX_UPLOAD", "false").lower() in {"1", "true", "yes", "on"}
-                if index_prefix in {"", "/"} and not allow_root_upload:
-                    raise RuntimeError(
-                        "Refusing to upload index to bucket root (RAG_INDEX_GCS_PREFIX is empty). "
-                        "Set RAG_INDEX_GCS_PREFIX=latest_model (recommended) or set ALLOW_BUCKET_ROOT_INDEX_UPLOAD=true to override."
-                    )
-                if index_prefix == "/":
-                    index_prefix = ""
-                
-                # Check if we should clear the remote prefix before upload
-                # Only clear if prefix is set (safety: don't clear entire bucket)
-                clear_before_upload = (
-                    os.getenv("INDEX_GCS_CLEAR_BEFORE_UPLOAD", "false").lower() == "true" and
-                    index_prefix  # Only clear if prefix is set
-                )
-                
-                storage_dir = DEFAULT_STORAGE_DIR
-                if os.path.exists(storage_dir):
-                    if clear_before_upload:
-                        print(f"   Clearing remote prefix gs://{index_bucket}/{index_prefix} before upload...")
-                    print(f"   Uploading {storage_dir}/ to gs://{index_bucket}/{index_prefix}")
-                    upload_directory_to_gcs(
-                        local_dir=storage_dir,
-                        bucket_name=index_bucket,
-                        gcs_prefix=index_prefix,
-                        overwrite=True,
-                        clear_before_upload=clear_before_upload
-                    )
-                    print("\n" + "="*60)
-                    print("✅ INDEX UPLOADED TO GCS SUCCESSFULLY")
-                    print(f"   📦 Bucket: gs://{index_bucket}/{index_prefix}")
-                    print("   🔄 Cloud Run will download the new index on next restart")
-                    print("="*60)
-                else:
-                    print(f"   ⚠️  Warning: Index directory {storage_dir} not found, skipping upload")
-            else:
-                print(f"   ⚠️  Warning: Upload script not found at {script_path}")
+            parsed = json.loads(r)
+            if isinstance(parsed, list):
+                return [m for m in parsed if isinstance(m, str) and m.strip()]
+        except Exception:
+            pass
+        # Comma-separated fallback
+        return [m.strip() for m in r.split(",") if m.strip()]
+    return []
+
+
+def _resolve_authoritative_doc_metadata(
+    session,
+    docs_bucket: str,
+    docs_prefix: str,
+    object_name: str,
+    object_custom_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Resolve document_id (non-empty string) and machine model metadata for a GCS object.
+
+    Source of truth order:
+    1) DB Document (match by gcs_path)
+    2) DB DocumentIngestionMetadata (match by metadata_id parsed from object path, or file_path)
+    3) GCS object custom metadata (document_id, machine_model_ids, machine_model_names / machine_models)
+    4) Deterministic fallback (UUID5(gs://bucket/object); machine_models=[])
+    """
+    source_gcs = f"gs://{docs_bucket}/{object_name}"
+
+    db_doc_id: str | None = None
+    machine_model_names: list[str] = []
+    machine_model_ids: list[str] = []
+    ingestion_metadata_id: str | None = None
+
+    # Parse metadata_id from conventional object structure: <prefix><metadata_id>/<filename>
+    rel = object_name
+    if docs_prefix and rel.startswith(docs_prefix):
+        rel = rel[len(docs_prefix):].lstrip("/")
+    parts = [p for p in rel.split("/") if p]
+    if len(parts) >= 2:
+        ingestion_metadata_id = parts[0]
+
+    if session is not None:
+        try:
+            from backend.utils.db import Document as DBDocument, DocumentIngestionMetadata, MachineModel
+
+            doc = session.query(DBDocument).filter(DBDocument.gcs_path == source_gcs).first()
+            if not doc and parts:
+                # Best-effort fallback: match by filename (not ideal, but helps recover older rows)
+                doc = session.query(DBDocument).filter(DBDocument.file_name == parts[-1]).first()
+
+            if doc and doc.id is not None:
+                # Note: DB doc.id is integer in this repo; keep as string without enforcing a specific shape.
+                db_doc_id = str(doc.id)
+                machine_model_names = _parse_machine_models(doc.machine_model)
+
+            # If machine models missing, try ingestion metadata
+            meta = None
+            if ingestion_metadata_id:
+                meta = session.query(DocumentIngestionMetadata).filter(DocumentIngestionMetadata.id == ingestion_metadata_id).first()
+            if not meta:
+                meta = session.query(DocumentIngestionMetadata).filter(DocumentIngestionMetadata.file_path == source_gcs).first()
+
+            if meta and not machine_model_names:
+                machine_model_names = _parse_machine_models(meta.machine_model)
+
+            # Best-effort: resolve machine model IDs from the registry table using names
+            if machine_model_names:
+                rows = session.query(MachineModel).filter(MachineModel.name.in_(machine_model_names)).all()
+                machine_model_ids = [str(r.id) for r in rows if getattr(r, "id", None) is not None]
         except Exception as e:
-            logger.error(f"Failed to upload index to GCS: {e}", exc_info=True)
-            print(f"\n   ⚠️  Warning: Failed to upload index to GCS: {e}")
-            print("   You can manually upload using: python backend/scripts/upload_index_to_gcs.py")
-    
-    print("\n🔍 Use query.py to search the documents")
-    print("📊 Non-text content extracted to: extracted_content/")
-    print("="*60)
+            logger.warning(f"DB lookup failed for {source_gcs}: {e}")
+
+    # Fallback: GCS object custom metadata
+    if object_custom_metadata:
+        if not machine_model_names:
+            machine_model_names = _parse_machine_models(
+                object_custom_metadata.get("machine_model_names")
+                or object_custom_metadata.get("machineModelNames")
+                or object_custom_metadata.get("machine_models")
+                or object_custom_metadata.get("machineModels")
+            )
+
+        if not machine_model_ids:
+            raw_ids = object_custom_metadata.get("machine_model_ids") or object_custom_metadata.get("machineModelIds")
+            machine_model_ids = _parse_machine_models(raw_ids)
+
+        if db_doc_id is None:
+            raw_doc_id = object_custom_metadata.get("document_id") or object_custom_metadata.get("documentId")
+            if raw_doc_id is not None:
+                v = str(raw_doc_id).strip()
+                db_doc_id = v if v else None
+
+    # Deterministic fallback for document_id: UUID5(gs://bucket/object)
+    if db_doc_id is None:
+        fallback_id = _stable_uuid5_from_string(source_gcs)
+        logger.warning(
+            "Missing DB/GCS document_id; using deterministic UUID5 fallback (check DB metadata alignment!)",
+            extra={"source_gcs": source_gcs, "fallback_document_id": fallback_id},
+        )
+        db_doc_id = str(fallback_id)
+
+    return {
+        "document_id": db_doc_id,
+        "machine_model_names": machine_model_names,
+        "machine_model_ids": machine_model_ids,
+        "source_gcs": source_gcs,
+        "ingestion_metadata_id": ingestion_metadata_id,
+    }
+
+
+def stage_gcs_documents_to_workdir(
+    docs_bucket: str,
+    docs_prefix: str,
+    workdir: Path,
+) -> tuple[Path, Path, list[dict[str, Any]]]:
+    """
+    Download all documents from GCS into workdir/documents and write workdir/doc_manifest.json.
+
+    Returns:
+        (documents_dir, manifest_path, manifest_entries)
+    """
+    from backend.utils.gcs_client import list_objects, download_to_path, get_object_metadata
+
+    docs_prefix = _normalize_prefix(docs_prefix)
+    documents_dir = (workdir / "documents").resolve()
+    documents_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = (workdir / "doc_manifest.json").resolve()
+
+    supported = {".pdf", ".docx", ".md", ".markdown"}
+
+    logger.info(f"Listing docs from gs://{docs_bucket}/{docs_prefix}")
+    blobs = list_objects(docs_bucket, docs_prefix)
+
+    # Best-effort DB session (optional)
+    session = None
+    try:
+        from backend.utils.db import SessionLocal
+        session = SessionLocal()
+    except Exception as e:
+        logger.warning(f"DB not available for metadata resolution; will use GCS metadata/fallbacks only: {e}")
+        session = None
+
+    entries: list[dict[str, Any]] = []
+    try:
+        for b in tqdm(blobs, desc="Staging GCS documents"):
+            object_name = b.name
+            if object_name.endswith("/"):
+                continue
+            ext = Path(object_name).suffix.lower()
+            if ext not in supported:
+                continue
+
+            rel = _safe_rel_from_gcs_object(docs_prefix, object_name)
+            local_path = (documents_dir / rel).resolve()
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Resolve authoritative metadata (DB → GCS custom metadata → deterministic fallback)
+            custom_md = b.metadata
+            if custom_md is None:
+                # Only fetch metadata if we need it later; but it’s cheap enough for docs-scale runs.
+                custom_md = get_object_metadata(docs_bucket, object_name)
+
+            resolved = _resolve_authoritative_doc_metadata(
+                session=session,
+                docs_bucket=docs_bucket,
+                docs_prefix=docs_prefix,
+                object_name=object_name,
+                object_custom_metadata=custom_md,
+            )
+
+            # Idempotent download: skip if local file exists and size matches
+            should_download = True
+            if local_path.exists() and b.size is not None:
+                try:
+                    if local_path.stat().st_size == int(b.size):
+                        should_download = False
+                except Exception:
+                    should_download = True
+
+            if should_download:
+                ok = download_to_path(docs_bucket, object_name, str(local_path))
+                if not ok:
+                    raise RuntimeError(f"Failed to download gs://{docs_bucket}/{object_name} to {local_path}")
+
+            entries.append(
+                {
+                    "document_id": resolved["document_id"],
+                    # Backwards compat (existing filtering uses node.metadata["machine_model"]):
+                    # - machine_models: list[str] of names
+                    # - machine_model_names: list[str] of names
+                    # - machine_model_ids: list[str] of ids (best-effort; may be empty)
+                    "machine_models": resolved["machine_model_names"],
+                    "machine_model_names": resolved["machine_model_names"],
+                    "machine_model_ids": resolved["machine_model_ids"],
+                    "source_gcs": resolved["source_gcs"],
+                    "gcs_object_name": object_name,
+                    "filename": Path(object_name).name,
+                    "local_path": str(local_path),
+                    "file_size_bytes": int(b.size) if b.size is not None else (local_path.stat().st_size if local_path.exists() else None),
+                    "updated": b.updated.isoformat() if getattr(b, "updated", None) else None,
+                    "ingestion_metadata_id": resolved.get("ingestion_metadata_id"),
+                }
+            )
+    finally:
+        try:
+            if session is not None:
+                session.close()
+        except Exception:
+            pass
+
+    # Write manifest deterministically
+    manifest_obj = {
+        "docs_bucket": docs_bucket,
+        "docs_prefix": docs_prefix,
+        "generated_at": time.strftime("%Y-%m-%dT%H-%M-%SZ", time.gmtime()),
+        "documents": entries,
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest_obj, f, indent=2, sort_keys=True)
+
+    logger.info(f"Wrote doc manifest: {manifest_path} (documents={len(entries)})")
+    return documents_dir, manifest_path, entries
+
+
+def verify_local_index_artifact(index_dir: Path) -> dict[str, Any]:
+    """
+    Verify local index directory is present, non-empty, and contains required files + metadata.
+    """
+    index_dir = index_dir.resolve()
+    required_files = ["docstore.json", "index_store.json", "default__vector_store.json", "index_manifest.json"]
+
+    if not index_dir.exists() or not index_dir.is_dir():
+        raise RuntimeError(f"Index directory does not exist: {index_dir}")
+
+    missing = [f for f in required_files if not (index_dir / f).exists()]
+    if missing:
+        raise RuntimeError(f"Index verification failed: missing required files: {missing} in {index_dir}")
+
+    for f in required_files:
+        p = index_dir / f
+        if p.stat().st_size <= 0:
+            raise RuntimeError(f"Index verification failed: file is empty: {p}")
+
+    # Validate manifest counts
+    with open(index_dir / "index_manifest.json", "r", encoding="utf-8") as f:
+        manifest = json.load(f) or {}
+    chunk_count = manifest.get("num_chunks")
+    if chunk_count is None or int(chunk_count) <= 0:
+        raise RuntimeError(f"Index verification failed: num_chunks must be > 0 in index_manifest.json (got {chunk_count})")
+
+    # Deep check: ensure required per-chunk metadata keys exist on every docstore node
+    with open(index_dir / "docstore.json", "r", encoding="utf-8") as f:
+        docstore = json.load(f)
+    nodes = (docstore.get("docstore/data") or {})
+    if not isinstance(nodes, dict) or len(nodes) == 0:
+        raise RuntimeError("Index verification failed: docstore/data is empty")
+
+    required_keys = {"document_id", "machine_models", "source_gcs", "machine_model", "machine_model_ids", "machine_model_names"}
+    missing_key_counts = {k: 0 for k in required_keys}
+    invalid_counts = {
+        "document_id": 0,
+        "machine_models": 0,
+        "machine_model": 0,
+        "machine_model_ids": 0,
+        "machine_model_names": 0,
+        "source_gcs": 0,
+    }
+    total = 0
+    for _, wrapped in nodes.items():
+        total += 1
+        data = (wrapped or {}).get("__data__") if isinstance(wrapped, dict) else None
+        meta = (data or {}).get("metadata") if isinstance(data, dict) else None
+        if not isinstance(meta, dict):
+            for k in required_keys:
+                missing_key_counts[k] += 1
+            continue
+        for k in required_keys:
+            if k not in meta:
+                missing_key_counts[k] += 1
+
+        # Validate value types/shape
+        if "document_id" in meta:
+            v = meta.get("document_id")
+            if not (isinstance(v, str) and v.strip()):
+                invalid_counts["document_id"] += 1
+        if "machine_models" in meta:
+            mm = meta.get("machine_models")
+            if not isinstance(mm, list) or any((not isinstance(x, str)) for x in mm):
+                invalid_counts["machine_models"] += 1
+        if "machine_model_names" in meta:
+            mmn = meta.get("machine_model_names")
+            if not isinstance(mmn, list) or any((not isinstance(x, str)) for x in mmn):
+                invalid_counts["machine_model_names"] += 1
+        if "machine_model_ids" in meta:
+            mid = meta.get("machine_model_ids")
+            if not isinstance(mid, list) or any((not isinstance(x, str)) for x in mid):
+                invalid_counts["machine_model_ids"] += 1
+        if "machine_model" in meta:
+            m = meta.get("machine_model")
+            # Orchestrator supports str or list[str], but we enforce list[str] for consistency.
+            if not isinstance(m, list) or any((not isinstance(x, str)) for x in m):
+                invalid_counts["machine_model"] += 1
+        if "source_gcs" in meta:
+            sg = meta.get("source_gcs")
+            if not (isinstance(sg, str) and sg.startswith("gs://")):
+                invalid_counts["source_gcs"] += 1
+
+    if any(v > 0 for v in missing_key_counts.values()) or any(v > 0 for v in invalid_counts.values()):
+        raise RuntimeError(
+            "Index verification failed: per-node metadata validation failed. "
+            f"missing_keys={missing_key_counts} invalid_values={invalid_counts} (total_nodes={total})"
+        )
+
+    return {
+        "index_dir": str(index_dir),
+        "required_files": required_files,
+        "num_nodes": total,
+        "num_chunks": int(chunk_count),
+        "manifest": manifest,
+    }
+
+
+def promote_index_to_gcs(
+    local_index_dir: Path,
+    rag_bucket: str,
+    latest_prefix: str,
+    old_prefix: str,
+) -> dict[str, Any]:
+    """
+    Safe promotion: backup latest_model → verify backup → clear latest_model → upload new → verify.
+
+    SAFETY GUARANTEE:
+    - Never deletes latest_prefix until local index verification passes AND backup verification passes.
+    - If upload fails, backup remains intact.
+    """
+    from datetime import datetime, timezone
+    from backend.utils.gcs_client import list_objects, copy_prefix, delete_prefix, upload_dir, exists_prefix
+
+    latest_prefix = _normalize_prefix(latest_prefix)
+    old_prefix = _normalize_prefix(old_prefix)
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    backup_prefix = f"{old_prefix}{ts}/"
+    # Ensure uniqueness if rerun within the same second (idempotent backups)
+    suffix = 1
+    while exists_prefix(rag_bucket, backup_prefix):
+        backup_prefix = f"{old_prefix}{ts}-{suffix}/"
+        suffix += 1
+
+    # Snapshot current latest contents (exact file list)
+    latest_objs = list_objects(rag_bucket, latest_prefix)
+    latest_names = [o.name for o in latest_objs]
+    latest_rel = [n[len(latest_prefix):] if latest_prefix and n.startswith(latest_prefix) else n for n in latest_names]
+
+    logger.info(f"[PROMOTE] Backing up gs://{rag_bucket}/{latest_prefix} -> gs://{rag_bucket}/{backup_prefix}")
+    copied = copy_prefix(rag_bucket, latest_prefix, backup_prefix)
+
+    # Verify backup: exact relative keys + count match latest snapshot
+    backup_objs = list_objects(rag_bucket, backup_prefix)
+    backup_names = [o.name for o in backup_objs]
+    backup_rel = set([n[len(backup_prefix):] if n.startswith(backup_prefix) else n for n in backup_names])
+    latest_rel_set = set(latest_rel)
+    if backup_rel != latest_rel_set or len(backup_rel) != len(latest_rel):
+        raise RuntimeError(
+            "[PROMOTE] Backup verification failed: backup does not exactly match latest snapshot. "
+            f"latest_count={len(latest_rel)} backup_count={len(backup_rel)} "
+            f"missing={sorted(list(latest_rel_set - backup_rel))[:10]} "
+            f"extra={sorted(list(backup_rel - latest_rel_set))[:10]}"
+        )
+
+    # Only now clear latest
+    logger.info(f"[PROMOTE] Clearing gs://{rag_bucket}/{latest_prefix} (objects={len(latest_names)})")
+    deleted = delete_prefix(rag_bucket, latest_prefix)
+
+    # Upload new artifact (skip dotfiles/transient OS junk)
+    logger.info(f"[PROMOTE] Uploading local index {str(local_index_dir)} -> gs://{rag_bucket}/{latest_prefix}")
+    ignore_names = {".DS_Store", "Thumbs.db", ".gitkeep", ".keep"}
+    uploaded = upload_dir(str(local_index_dir), rag_bucket, latest_prefix, ignore_names=ignore_names)
+
+    # Verify remote latest matches local artifact (exact file list) and required files are present & non-empty
+    local_files: set[str] = set()
+    for p in Path(local_index_dir).rglob("*"):
+        if p.is_file():
+            if p.name in ignore_names:
+                continue
+            rel_parts = p.relative_to(local_index_dir).parts
+            if any(part.startswith(".") for part in rel_parts):
+                continue
+            local_files.add(p.relative_to(local_index_dir).as_posix())
+
+    new_latest = list_objects(rag_bucket, latest_prefix)
+    remote_rel = {o.name[len(latest_prefix):] if o.name.startswith(latest_prefix) else o.name for o in new_latest}
+
+    if remote_rel != local_files:
+        raise RuntimeError(
+            "[PROMOTE] Remote verification failed: remote latest_model does not match local artifact file list. "
+            f"local_count={len(local_files)} remote_count={len(remote_rel)} "
+            f"missing={sorted(list(local_files - remote_rel))[:10]} "
+            f"extra={sorted(list(remote_rel - local_files))[:10]}"
+        )
+
+    # Runtime-required files (matches backend/rag/startup_downloader.py expectations)
+    required_rel = {"index_manifest.json", "docstore.json", "index_store.json", "default__vector_store.json"}
+    missing_required = sorted(list(required_rel - remote_rel))
+    if missing_required:
+        raise RuntimeError(f"[PROMOTE] Remote verification failed: missing required objects in latest_model: {missing_required}")
+
+    # Ensure required objects are non-empty remotely (size>0)
+    sizes_by_rel = { (o.name[len(latest_prefix):] if o.name.startswith(latest_prefix) else o.name): o.size for o in new_latest }
+    empty_required = [r for r in required_rel if not sizes_by_rel.get(r) or int(sizes_by_rel.get(r) or 0) <= 0]
+    if empty_required:
+        raise RuntimeError(f"[PROMOTE] Remote verification failed: required objects have empty size: {empty_required}")
+
+    return {
+        "backup_prefix": backup_prefix,
+        "backup_copied": copied,
+        "latest_deleted": deleted,
+        "uploaded": len(uploaded),
+        "latest_objects": len(new_latest),
+    }
+
+
+def main():
+    """
+    Production ingestion flow:
+      GCS docs -> local staging + doc_manifest.json -> chunk/embed/build local index -> verify -> (optional) promote.
+    """
+    # Env/config (supports both new and existing env names)
+    docs_bucket = os.getenv("GCS_DOCS_BUCKET") or os.getenv("DOCS_GCS_BUCKET") or "arrow-rag-support-prod-docs"
+    docs_prefix = os.getenv("GCS_DOCS_PREFIX") or os.getenv("DOCS_GCS_PREFIX") or "documents/"
+
+    rag_bucket = os.getenv("GCS_RAG_BUCKET") or os.getenv("RAG_INDEX_GCS_BUCKET") or "arrow-rag-support-prod-rag"
+    latest_prefix = os.getenv("GCS_RAG_LATEST_PREFIX") or os.getenv("RAG_INDEX_GCS_PREFIX") or "latest_model/"
+    old_prefix = os.getenv("GCS_RAG_OLD_PREFIX") or "old_model/"
+
+    default_workdir = str(Path(REPO_ROOT) / "ingest_work") if os.name == "nt" else "/workspace/ingest_work"
+    workdir = Path(os.getenv("INGEST_WORKDIR", default_workdir)).resolve()
+
+    promote = _env_bool("PROMOTE_INDEX", default=False)
+
+    index_out_dir = (workdir / "index_artifact").resolve()
+    # Keep extracted content in the same workdir for deterministic debugging
+    os.environ.setdefault("EXTRACTED_CONTENT_DIR", str(workdir / "extracted_content"))
+
+    print("\n" + "=" * 80)
+    print("Arrow Production Ingestion + (Optional) Index Promotion")
+    print("=" * 80)
+    print(f"Docs source:  gs://{docs_bucket}/{_normalize_prefix(docs_prefix)}")
+    print(f"Workdir:      {str(workdir)}")
+    print(f"Index out:    {str(index_out_dir)}")
+    print(f"Promote:      {promote} (PROMOTE_INDEX)")
+    print(f"RAG bucket:   gs://{rag_bucket}/")
+    print(f"Latest pref:  {_normalize_prefix(latest_prefix)}")
+    print(f"Old pref:     {_normalize_prefix(old_prefix)}")
+
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    # Stage docs + write manifest
+    docs_dir, doc_manifest_path, entries = stage_gcs_documents_to_workdir(
+        docs_bucket=docs_bucket,
+        docs_prefix=docs_prefix,
+        workdir=workdir,
+    )
+
+    # Build index from staged docs
+    os.environ["INGEST_DOC_MANIFEST_PATH"] = str(doc_manifest_path)
+    pipeline = TechnicalRAGPipeline()
+    use_qdrant = _env_bool("USE_QDRANT", default=False)
+    if use_qdrant:
+        raise RuntimeError("Production promotion flow requires local index artifacts; USE_QDRANT must be false.")
+
+    pipeline.build_index(
+        data_dir=str(docs_dir),
+        storage_dir=str(index_out_dir),
+        use_qdrant=False,
+    )
+
+    # Verify local artifact
+    verification = verify_local_index_artifact(index_out_dir)
+    print("\n" + "=" * 80)
+    print("✅ Local index verification passed")
+    print(f"- Index dir: {verification['index_dir']}")
+    print(f"- Num nodes: {verification['num_nodes']}")
+    print(f"- Num chunks (manifest): {verification['num_chunks']}")
+
+    # Promote to GCS (backup + swap + upload) only when PROMOTE_INDEX=true
+    if promote:
+        promote_result = promote_index_to_gcs(
+            local_index_dir=index_out_dir,
+            rag_bucket=rag_bucket,
+            latest_prefix=latest_prefix,
+            old_prefix=old_prefix,
+        )
+        print("\n" + "=" * 80)
+        print("✅ Promotion completed")
+        print(f"- Backup:   gs://{rag_bucket}/{promote_result['backup_prefix']}")
+        print(f"- Uploaded: {promote_result['uploaded']} objects")
+        print(f"- Latest objects: {promote_result['latest_objects']}")
+    else:
+        print("\n" + "=" * 80)
+        print("ℹ️ PROMOTE_INDEX is false; skipping GCS backup/swap/upload")
+        print(f"Local artifact ready at: {str(index_out_dir)}")
 
 
 if __name__ == "__main__":
