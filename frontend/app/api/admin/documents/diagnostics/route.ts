@@ -17,10 +17,19 @@ export async function GET(_request: NextRequest) {
       'X-User-Token': token,
     });
 
+    const contentType = response.headers.get('content-type') || '';
+    console.info('[api/admin/documents/diagnostics] proxy response', {
+      status: response.status,
+      ok: response.ok,
+      contentType,
+    });
+
     if (!response.ok) {
       let detail = 'Failed to fetch diagnostics';
       try {
-        const error = await response.json();
+        const error = contentType.includes('application/json')
+          ? await response.json()
+          : { detail: (await response.text()).slice(0, 300) };
         if (error && typeof error === 'object' && 'detail' in error) {
           detail = (error as any).detail ?? detail;
         }
@@ -29,6 +38,15 @@ export async function GET(_request: NextRequest) {
       }
 
       return NextResponse.json({ detail }, { status: response.status });
+    }
+
+    // Defensive: never throw HTML at the client; if backend returned non-JSON, return a JSON error.
+    if (!contentType.includes('application/json')) {
+      const text = (await response.text()).slice(0, 300);
+      return NextResponse.json(
+        { detail: `Diagnostics backend returned non-JSON (${response.status}): ${text}` },
+        { status: 502 },
+      );
     }
 
     const data = await response.json();
