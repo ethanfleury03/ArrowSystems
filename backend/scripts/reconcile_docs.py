@@ -74,13 +74,27 @@ class DbRow:
                 if obj:
                     candidates.append(obj)
 
-        # Fallbacks: derive conventional object name: <prefix><metadata_id>/<sanitized_filename>
+        # Fallbacks when DB did not store a gs://... path.
+        #
+        # New canonical scheme (root/prefix filename-only):
+        #   <prefix><sanitized_filename>   OR   <sanitized_filename> (bucket root)
+        #
+        # Legacy scheme (older uploads):
+        #   <prefix><metadata_id>/<sanitized_filename> OR <metadata_id>/<sanitized_filename>
         if self.metadata_id and self.filename:
             sanitized = _sanitize_filename(self.filename)
             if configured_prefix:
+                # New canonical
+                candidates.append(f"{configured_prefix}{sanitized}")
+                candidates.append(f"{configured_prefix}{self.filename}")
+                # Legacy
                 candidates.append(f"{configured_prefix}{self.metadata_id}/{sanitized}")
                 candidates.append(f"{configured_prefix}{self.metadata_id}/{self.filename}")
             else:
+                # New canonical (bucket root)
+                candidates.append(sanitized)
+                candidates.append(self.filename)
+                # Legacy
                 candidates.append(f"{self.metadata_id}/{sanitized}")
                 candidates.append(f"{self.metadata_id}/{self.filename}")
 
@@ -112,8 +126,10 @@ def main() -> int:
     if args.apply:
         args.dry_run = False
 
-    bucket = os.getenv("GCS_DOCS_BUCKET", "arrow-rag-support-prod-docs").strip()
+    bucket = (os.getenv("GCS_DOCS_BUCKET") or os.getenv("DOCS_GCS_BUCKET") or "arrow-rag-support-prod-docs").strip()
     raw_prefix = os.environ.get("GCS_DOCS_PREFIX")
+    if raw_prefix is None:
+        raw_prefix = os.environ.get("DOCS_GCS_PREFIX")
     prefix = normalize_gcs_prefix(raw_prefix)
 
     if not os.getenv("DATABASE_URL"):
