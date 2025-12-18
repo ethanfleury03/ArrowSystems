@@ -1467,6 +1467,8 @@ async def rag_status_public():
     missing_files = _missing_index_files(storage_path_for_check) if storage_path_for_check else []
     if settings.is_prod and storage_path_for_check and missing_files:
         # fire-and-forget; state machine prevents duplication
+        if rag_download_state.get("status") == "not_started":
+            rag_download_state["status"] = "downloading"
         asyncio.create_task(ensure_rag_index_downloaded())
 
     # Trigger background initialization if needed (non-blocking)
@@ -1725,6 +1727,7 @@ class RAGIndexValidationResponse(BaseModel):
     directory_exists: bool
     files_validated: dict[str, dict[str, Any]]
     all_valid: bool
+    missing_files: list[str] = []
     corrupted_files: list[str]
 
 
@@ -1768,7 +1771,8 @@ async def rag_validate_index():
             directory_exists=False,
             files_validated={},
             all_valid=False,
-            corrupted_files=required_files,
+            missing_files=required_files,
+            corrupted_files=[],
         )
     
     path = Path(storage_path)
@@ -1780,10 +1784,12 @@ async def rag_validate_index():
             directory_exists=False,
             files_validated={},
             all_valid=False,
-            corrupted_files=required_files,
+            missing_files=required_files,
+            corrupted_files=[],
         )
     
     files_validated = {}
+    missing_files: list[str] = []
     corrupted_files = []
     
     # Validate each required file
@@ -1828,20 +1834,24 @@ async def rag_validate_index():
         else:
             file_info["json_valid"] = False
             file_info["json_error"] = "File does not exist"
-            corrupted_files.append(filename)
+            missing_files.append(filename)
         
         files_validated[filename] = file_info
     
     # Check all valid
-    all_valid = len(corrupted_files) == 0
+    all_valid = (len(corrupted_files) == 0) and (len(missing_files) == 0)
     
     # Log results
     if not all_valid:
         logger.error("rag_index_validation_failed",
                     storage_path=str(path),
+                    missing_files=missing_files,
                     corrupted_files=corrupted_files,
                     files_validated=files_validated,
-                    message=f"Index validation failed. Corrupted files: {', '.join(corrupted_files)}")
+                    message=(
+                        "Index validation failed. "
+                        f"missing_files={missing_files} corrupted_files={corrupted_files}"
+                    ))
     else:
         logger.info("rag_index_validation_passed",
                    storage_path=str(path),
@@ -1852,6 +1862,7 @@ async def rag_validate_index():
         directory_exists=True,
         files_validated=files_validated,
         all_valid=all_valid,
+        missing_files=missing_files,
         corrupted_files=corrupted_files,
     )
 
@@ -2429,6 +2440,8 @@ async def query_knowledge_base(request: Request):
     # If index files are missing in prod, kick off download and return warming
     missing = _missing_index_files(storage_path)
     if settings.is_prod and missing:
+        if rag_download_state.get("status") == "not_started":
+            rag_download_state["status"] = "downloading"
         asyncio.create_task(ensure_rag_index_downloaded())
         raise HTTPException(
             status_code=503,

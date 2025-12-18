@@ -22,6 +22,11 @@ parent_dir = script_dir.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
+# Repo-root defaults (makes ingest resilient to being run from backend/ vs repo root)
+REPO_ROOT = parent_dir
+DEFAULT_DATA_DIR = str(REPO_ROOT / "data")
+DEFAULT_STORAGE_DIR = str(REPO_ROOT / "latest_model")
+
 # Set ingestion-safe mode by default (disable metadata updates)
 os.environ["DISABLE_METADATA_UPDATE"] = os.environ.get("DISABLE_METADATA_UPDATE", "1")
 
@@ -1810,20 +1815,33 @@ class TechnicalRAGPipeline:
             # Use CPU if CUDA was incompatible
             reranker_device = device if device == "cpu" else device
             try:
-                self.reranker = CrossEncoder(
-                    reranker_model,
-                    cache_folder=self.cache_dir,
-                    device=reranker_device
-                )
+                try:
+                    # Newer sentence-transformers CrossEncoder may not support cache_folder
+                    self.reranker = CrossEncoder(
+                        reranker_model,
+                        cache_folder=self.cache_dir,
+                        device=reranker_device
+                    )
+                except TypeError:
+                    self.reranker = CrossEncoder(
+                        reranker_model,
+                        device=reranker_device
+                    )
                 logger.info(f"✅ Re-ranker loaded successfully on {reranker_device}")
             except RuntimeError as cuda_error:
                 if "CUDA" in str(cuda_error) or "cuda" in str(cuda_error).lower():
                     logger.warning(f"⚠️ CUDA incompatible for reranker, using CPU: {cuda_error}")
-                    self.reranker = CrossEncoder(
-                        reranker_model,
-                        cache_folder=self.cache_dir,
-                        device="cpu"
-                    )
+                    try:
+                        self.reranker = CrossEncoder(
+                            reranker_model,
+                            cache_folder=self.cache_dir,
+                            device="cpu"
+                        )
+                    except TypeError:
+                        self.reranker = CrossEncoder(
+                            reranker_model,
+                            device="cpu"
+                        )
                     logger.info(f"✅ Re-ranker loaded successfully on CPU")
                 else:
                     raise
@@ -1964,6 +1982,12 @@ class TechnicalRAGPipeline:
     
     def build_index(self, data_dir="data", storage_dir="latest_model", use_qdrant=False):
         """Build or load vector index with optimized chunking and non-text content."""
+
+        # Make relative paths resilient to current working directory
+        if data_dir == "data":
+            data_dir = DEFAULT_DATA_DIR
+        if storage_dir == "latest_model":
+            storage_dir = DEFAULT_STORAGE_DIR
         
         # Initialize models
         self.initialize_models()
@@ -2010,6 +2034,17 @@ class TechnicalRAGPipeline:
         # Load from database (preferred) - only processes documents in database
         # This ensures we only ingest documents that are tracked in the database
         documents = loader.load_documents(use_database=True)
+
+        # Safety: never build/upload an empty index unless explicitly allowed
+        allow_empty = os.getenv("ALLOW_EMPTY_INDEX", "false").lower() in {"1", "true", "yes", "on"}
+        if len(documents) == 0 and not allow_empty:
+            raise RuntimeError(
+                "No documents loaded (0). Refusing to build/upload an empty index. "
+                "Fix by either: (a) run from repo root so data/ is found, "
+                "(b) set DOCS_GCS_BUCKET/DOCS_GCS_PREFIX to load from GCS, "
+                "and/or (c) run Cloud SQL Auth Proxy + set a TCP DATABASE_URL if loading from DB. "
+                "If you truly want an empty index, set ALLOW_EMPTY_INDEX=true."
+            )
         
         # Note: No need to sync to database since we're loading FROM database
         # Documents are already tracked in DocumentIngestionMetadata and Document tables
@@ -2475,7 +2510,11 @@ def main():
     
     # Build or load index (set use_qdrant=True for Qdrant storage)
     use_qdrant = os.getenv("USE_QDRANT", "false").lower() == "true"
-    index = pipeline.build_index(use_qdrant=use_qdrant)
+    index = pipeline.build_index(
+        data_dir=DEFAULT_DATA_DIR,
+        storage_dir=DEFAULT_STORAGE_DIR,
+        use_qdrant=use_qdrant,
+    )
     
     print("\n" + "="*60)
     print("✅ INGESTION COMPLETED SUCCESSFULLY")
@@ -2483,7 +2522,7 @@ def main():
     if use_qdrant:
         print("🗄️ Index saved to: Qdrant")
     else:
-        print("📁 Index saved to: latest_model/")
+        print(f"📁 Index saved to: {DEFAULT_STORAGE_DIR}")
         
         # Automatically upload index to GCS after ingestion
         print("\n" + "="*60)
@@ -2504,7 +2543,17 @@ def main():
                 
                 # Get bucket name from environment or use default
                 index_bucket = os.getenv("RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
-                index_prefix = os.getenv("RAG_INDEX_GCS_PREFIX", "")  # Empty = bucket root
+                # Default to latest_model (Cloud Run default) to avoid accidentally overwriting bucket root
+                index_prefix = os.getenv("RAG_INDEX_GCS_PREFIX", "latest_model").strip()
+                # Normalize prefix: allow "" only if explicitly opted-in
+                allow_root_upload = os.getenv("ALLOW_BUCKET_ROOT_INDEX_UPLOAD", "false").lower() in {"1", "true", "yes", "on"}
+                if index_prefix in {"", "/"} and not allow_root_upload:
+                    raise RuntimeError(
+                        "Refusing to upload index to bucket root (RAG_INDEX_GCS_PREFIX is empty). "
+                        "Set RAG_INDEX_GCS_PREFIX=latest_model (recommended) or set ALLOW_BUCKET_ROOT_INDEX_UPLOAD=true to override."
+                    )
+                if index_prefix == "/":
+                    index_prefix = ""
                 
                 # Check if we should clear the remote prefix before upload
                 # Only clear if prefix is set (safety: don't clear entire bucket)
@@ -2513,7 +2562,7 @@ def main():
                     index_prefix  # Only clear if prefix is set
                 )
                 
-                storage_dir = "latest_model"
+                storage_dir = DEFAULT_STORAGE_DIR
                 if os.path.exists(storage_dir):
                     if clear_before_upload:
                         print(f"   Clearing remote prefix gs://{index_bucket}/{index_prefix} before upload...")
