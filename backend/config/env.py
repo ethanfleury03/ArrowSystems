@@ -12,6 +12,28 @@ from typing import List, Optional
 # Module-level logger - must be defined before Settings() instantiation
 logger = logging.getLogger(__name__)
 
+def normalize_gcs_prefix(prefix: Optional[str]) -> str:
+    """
+    Normalize a GCS "folder prefix" used for object naming and list_blobs(prefix=...).
+
+    Rules (per production requirement):
+    - None -> ""
+    - "" -> ""
+    - "ROOT" -> ""  (sentinel meaning bucket root)
+    - otherwise:
+      - strip leading "/" (object names must not start with "/")
+      - ensure it ends with "/"
+    """
+    if prefix is None:
+        return ""
+    p = str(prefix).strip()
+    if not p:
+        return ""
+    if p.upper() == "ROOT":
+        return ""
+    p = p.lstrip("/")
+    return p if p.endswith("/") else f"{p}/"
+
 
 class Settings:
     """
@@ -101,7 +123,8 @@ class Settings:
         - DOCS_GCS_BUCKET: GCS bucket name for storing documents
         
         Optional:
-        - DOCS_GCS_PREFIX: Prefix/path within bucket (default: "documents/")
+        - DOCS_GCS_PREFIX: Prefix/path within bucket (default: bucket root "")
+          - Use "" or "ROOT" to indicate bucket root.
         - DOCS_LOCAL_SAVE_ENABLED: Whether to also save files locally (default: false)
         """
         # Required: GCS bucket name
@@ -115,17 +138,19 @@ class Settings:
             else:
                 logger.warning("⚠️ DOCS_GCS_BUCKET not set. Document uploads will fail unless configured.")
         
-        # Optional: GCS prefix (default: "documents/")
-        self.DOCS_GCS_PREFIX = os.getenv("DOCS_GCS_PREFIX", "documents/").rstrip("/")
-        if not self.DOCS_GCS_PREFIX.endswith("/"):
-            self.DOCS_GCS_PREFIX += "/"
+        # Optional: GCS prefix (default: bucket root)
+        # IMPORTANT: empty prefix is valid and must remain empty (bucket root).
+        # We use os.environ.get (not os.getenv default) to preserve explicit empty string.
+        raw_prefix = os.environ.get("DOCS_GCS_PREFIX")
+        self.DOCS_GCS_PREFIX = normalize_gcs_prefix(raw_prefix)
         
         # Optional: Local save fallback (default: false)
         local_save_str = os.getenv("DOCS_LOCAL_SAVE_ENABLED", "false").lower()
         self.DOCS_LOCAL_SAVE_ENABLED = local_save_str in {"true", "1", "yes", "on"}
         
         if self.DOCS_GCS_BUCKET:
-            logger.info(f"GCS document storage configured: gs://{self.DOCS_GCS_BUCKET}/{self.DOCS_GCS_PREFIX} (local_save={self.DOCS_LOCAL_SAVE_ENABLED})")
+            gcs_location = f"gs://{self.DOCS_GCS_BUCKET}/{self.DOCS_GCS_PREFIX}" if self.DOCS_GCS_PREFIX else f"gs://{self.DOCS_GCS_BUCKET}/"
+            logger.info(f"GCS document storage configured: {gcs_location} (local_save={self.DOCS_LOCAL_SAVE_ENABLED})")
             
             # Log GCS authentication info if available
             try:

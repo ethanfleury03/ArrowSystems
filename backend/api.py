@@ -4713,9 +4713,9 @@ async def get_document_diagnostics(request: Request):
             all_metadata = session.query(DocumentIngestionMetadata).all()
             all_documents = session.query(Document).all()
             
-            # Check GCS objects
+            # Check GCS objects (empty prefix is valid: bucket root)
             gcs_objects = []
-            if settings.DOCS_GCS_BUCKET and settings.DOCS_GCS_PREFIX:
+            if settings.DOCS_GCS_BUCKET:
                 gcs_objects = list_object_names(settings.DOCS_GCS_BUCKET, settings.DOCS_GCS_PREFIX)
             
             count_gcs_objects = len(gcs_objects)
@@ -5631,6 +5631,7 @@ async def upload_document(
                 )
                 
                 # Step 2: Upload to GCS using metadata_id in path
+                # NOTE: DOCS_GCS_PREFIX may be "" (bucket root). It must remain empty (no implicit "documents/").
                 gcs_object_name = f"{settings.DOCS_GCS_PREFIX}{metadata.id}/{sanitized_filename}"
                 gcs_path = None
                 
@@ -6165,12 +6166,11 @@ async def admin_gcs_smoke_upload(request: Request):
     from datetime import datetime
     from backend.utils.gcs_client import upload_bytes
 
-    prefix = (getattr(settings, "DOCS_GCS_PREFIX", "") or "").lstrip("/")
-    if prefix and not prefix.endswith("/"):
-        prefix = prefix + "/"
+    from backend.config.env import normalize_gcs_prefix
+    prefix = normalize_gcs_prefix(getattr(settings, "DOCS_GCS_PREFIX", ""))
 
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    object_name = f"{prefix}_smoke/{ts}.txt"
+    object_name = f"{prefix}_smoke/{ts}.txt" if prefix else f"_smoke/{ts}.txt"
     content = f"smoke test {ts}\n".encode("utf-8")
 
     try:
