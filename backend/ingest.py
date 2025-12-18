@@ -3301,8 +3301,16 @@ def main():
       GCS docs -> local staging + doc_manifest.json -> chunk/embed/build local index -> verify -> (optional) promote.
     """
     # Env/config (supports both new and existing env names)
+    from backend.config.env import normalize_gcs_prefix
+
     docs_bucket = os.getenv("GCS_DOCS_BUCKET") or os.getenv("DOCS_GCS_BUCKET") or "arrow-rag-support-prod-docs"
-    docs_prefix = os.getenv("GCS_DOCS_PREFIX") or os.getenv("DOCS_GCS_PREFIX") or "documents/"
+
+    # IMPORTANT: empty prefix is valid and must remain empty (bucket root).
+    # Use os.environ.get to preserve explicit empty strings.
+    raw_docs_prefix = os.environ.get("GCS_DOCS_PREFIX")
+    if raw_docs_prefix is None:
+        raw_docs_prefix = os.environ.get("DOCS_GCS_PREFIX")
+    docs_prefix = normalize_gcs_prefix(raw_docs_prefix)
 
     rag_bucket = os.getenv("GCS_RAG_BUCKET") or os.getenv("RAG_INDEX_GCS_BUCKET") or "arrow-rag-support-prod-rag"
     latest_prefix = os.getenv("GCS_RAG_LATEST_PREFIX") or os.getenv("RAG_INDEX_GCS_PREFIX") or "latest_model/"

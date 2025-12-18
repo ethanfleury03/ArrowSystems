@@ -4,7 +4,7 @@ Unit tests for backend configuration (Settings class).
 
 import os
 import pytest
-from backend.config.env import Settings
+from backend.config.env import Settings, normalize_gcs_prefix
 
 
 def test_settings_loads_with_default_env():
@@ -89,4 +89,37 @@ def test_settings_dev_defaults():
         os.environ["ENV"] = original_env
     elif "ENV" in os.environ:
         del os.environ["ENV"]
+
+
+def test_normalize_gcs_prefix_rules():
+    assert normalize_gcs_prefix(None) == ""
+    assert normalize_gcs_prefix("") == ""
+    assert normalize_gcs_prefix("   ") == ""
+    assert normalize_gcs_prefix("ROOT") == ""
+    assert normalize_gcs_prefix("root") == ""
+    assert normalize_gcs_prefix("documents") == "documents/"
+    assert normalize_gcs_prefix("documents/") == "documents/"
+    assert normalize_gcs_prefix("/foo/bar") == "foo/bar/"
+
+
+def test_docs_prefix_empty_does_not_prepend_documents(monkeypatch):
+    # Ensure Settings can load in dev mode
+    monkeypatch.setenv("ENV", "dev")
+    # Provide a non-sqlite DATABASE_URL to satisfy Settings._load_secrets
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/testdb")
+
+    # Explicit empty prefix should remain empty (bucket root)
+    monkeypatch.setenv("DOCS_GCS_BUCKET", "arrow-rag-support-prod-docs")
+    monkeypatch.setenv("DOCS_GCS_PREFIX", "")
+
+    import importlib
+    import backend.config.env
+    importlib.reload(backend.config.env)
+    s = backend.config.env.Settings()
+
+    assert s.DOCS_GCS_PREFIX == ""
+
+    # Upload endpoint builds object_name like: f"{prefix}{metadata_id}/{filename}"
+    object_name = f"{s.DOCS_GCS_PREFIX}abc-123/hello.pdf"
+    assert object_name.startswith("documents/") is False
 
