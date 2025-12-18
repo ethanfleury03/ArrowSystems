@@ -136,7 +136,10 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
                 # Create TextNode with metadata
                 node_metadata = {
                     **chunk_metadata,
-                    "machine_model": metadata.machine_model,
+                    # Prefer machine model metadata from chunk (canonical) and keep backward compat
+                    "machine_model": chunk_metadata.get("machine_model") or chunk_metadata.get("machine_model_names") or metadata.machine_model,
+                    "machine_model_ids": chunk_metadata.get("machine_model_ids"),
+                    "machine_model_names": chunk_metadata.get("machine_model_names"),
                     "ingestion_metadata_id": metadata_id,
                     "summary": summary,
                 }

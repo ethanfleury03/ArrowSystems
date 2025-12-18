@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { resolveApiBaseUrl, ALLOW_APP_INGESTION } from "@/config/api";
+import { resolveApiBaseUrl } from "@/config/api";
 import { Upload, FileText, Trash2, Edit, Eye, EyeOff, X, Check, ExternalLink, RefreshCw, AlertTriangle, Database, Cloud, Wrench } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
@@ -17,6 +17,8 @@ interface Document {
   file_type: string | null;
   is_active: boolean;
   machine_model?: string | null | string[];
+  machine_model_ids?: number[] | null;
+  machine_models?: Array<{ id: number; name: string; machine_kind?: string | null }> | null;
   missing_machine_model?: boolean;
   requires_admin_review?: boolean;
   category?: string | null;
@@ -29,6 +31,12 @@ interface Document {
   display_name?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+}
+
+interface MachineModelOption {
+  id: number;
+  name: string;
+  machine_kind?: string | null;
 }
 
 type SortField = keyof Pick<Document, "filename" | "page_count" | "is_active">;
@@ -44,12 +52,6 @@ const formatFileSize = (bytes: number): string => {
 
 // Helper function to get status label
 const getStatusLabel = (status: string | null | undefined, chunkCount?: number): string => {
-  // When ingestion is disabled, always show "Managed externally" regardless of status
-  // This prevents showing misleading "Rebuilding index..." messages
-  if (!ALLOW_APP_INGESTION) {
-    return 'Managed externally';
-  }
-  
   // When ingestion is enabled, show actual status
   if (!status) {
     return chunkCount !== undefined && chunkCount > 0 ? 'Complete' : '';
@@ -78,9 +80,6 @@ const getStatusLabel = (status: string | null | undefined, chunkCount?: number):
 };
 
 export default function AdminDocumentsPage() {
-  // Log ingestion configuration for debugging
-  console.log('[Admin Documents] ALLOW_APP_INGESTION:', ALLOW_APP_INGESTION);
-  
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loadingTable, setLoadingTable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,13 +102,13 @@ export default function AdminDocumentsPage() {
   const [toastType, setToastType] = useState<"success" | "error">("success");
   
   // Edit form state
-  const [editMachineModel, setEditMachineModel] = useState<string[]>([]);  // Changed to array
+  const [editMachineModelIds, setEditMachineModelIds] = useState<number[]>([]);
   const [editCategory, setEditCategory] = useState("");
   const [editProductFamily, setEditProductFamily] = useState("");
   const [editIsActive, setEditIsActive] = useState(true);
   
   // Allowed machine models for dropdown
-  const [allowedMachineModels, setAllowedMachineModels] = useState<string[]>([]);
+  const [allowedMachineModels, setAllowedMachineModels] = useState<MachineModelOption[]>([]);
 
   // Maintenance/Diagnostics state
   const [diagnosticsResult, setDiagnosticsResult] = useState<any>(null);
@@ -240,16 +239,18 @@ export default function AdminDocumentsPage() {
           throw new Error(`Failed to parse machine models response (${response.status}): ${body.text || body.contentType}`);
         }
         const data = body.json;
-        // Extract machine names from the machines array
+        // Extract machine models from the machines array
         // Handle both array format and object with machines property
-        let machines: Array<{ name: string }> = [];
+        let machines: MachineModelOption[] = [];
         if (Array.isArray(data)) {
-          machines = data;
+          machines = data as MachineModelOption[];
         } else if (data.machines && Array.isArray(data.machines)) {
-          machines = data.machines;
+          machines = data.machines as MachineModelOption[];
         }
-        const machineNames = machines.map((m: { name: string }) => m.name).filter(Boolean);
-        setAllowedMachineModels(machineNames);
+        const cleaned = machines
+          .filter((m) => typeof m?.id === "number" && typeof m?.name === "string" && m.name.trim().length > 0)
+          .map((m) => ({ id: m.id, name: m.name, machine_kind: m.machine_kind ?? null }));
+        setAllowedMachineModels(cleaned);
       } catch (err) {
         console.warn("Failed to fetch machine models:", err);
         // Fallback: try to get from documents response
@@ -279,19 +280,6 @@ export default function AdminDocumentsPage() {
         const data = body.json;
         const docs = Array.isArray(data.documents) ? data.documents : [];
         setDocuments(docs);
-        
-        // Log sample document status for debugging
-        if (docs.length > 0 && !ALLOW_APP_INGESTION) {
-          const sampleDoc = docs[0];
-          console.log('[Admin Documents] Sample document status:', {
-            filename: sampleDoc.filename,
-            ingestion_status: sampleDoc.ingestion_status,
-            chunk_count: sampleDoc.chunk_count,
-          });
-        }
-        
-        // Fallback: if machines endpoint failed, try to get from documents response
-        // This is a fallback only - primary source should be /admin/machines
       } catch (err) {
         console.error("Failed to fetch documents:", err);
         setError(err instanceof Error ? err.message : "Unable to load documents.");
@@ -333,13 +321,8 @@ export default function AdminDocumentsPage() {
     };
   }, [readResponseBody]);
 
-  // Poll for documents with active ingestion status (only when ingestion is enabled and page is visible)
+  // Poll for documents with active ingestion status (only when page is visible)
   useEffect(() => {
-    // When ingestion is disabled, don't poll at all
-    if (!ALLOW_APP_INGESTION) {
-      return;
-    }
-    
     const activeStatuses = ['PENDING_INGESTION', 'CHUNKING', 'READY_FOR_EMBEDDING', 'EMBEDDING', 'DELETING', 'REBUILDING_INDEX'];
     
     // Check if there are any active ingestions
@@ -356,7 +339,7 @@ export default function AdminDocumentsPage() {
       return;
     }
 
-    // Poll every 5 seconds when ingestion is enabled and there are active ingestions
+    // Poll every 5 seconds when there are active ingestions
     const interval = setInterval(() => {
       // Only poll if page is visible
       if (document.hidden) {
@@ -409,7 +392,7 @@ export default function AdminDocumentsPage() {
     setUploadFile(null);
     setUploadProgress("");
     setDeleteConfirmation("");
-    setEditMachineModel([]);
+    setEditMachineModelIds([]);
     setEditCategory("");
     setEditProductFamily("");
     setEditIsActive(true);
@@ -436,11 +419,23 @@ export default function AdminDocumentsPage() {
 
   const handleEdit = (doc: Document) => {
     setSelectedDocument(doc);
-    // Normalize machine_model to array (handle both string and array formats)
-    const machineModels = doc.machine_model 
-      ? (Array.isArray(doc.machine_model) ? doc.machine_model : [doc.machine_model])
-      : [];
-    setEditMachineModel(machineModels);
+    // Prefer ids from API; fall back to resolving names against allowedMachineModels
+    const directIds =
+      doc.machine_model_ids && Array.isArray(doc.machine_model_ids)
+        ? doc.machine_model_ids.filter((x): x is number => typeof x === "number")
+        : doc.machine_models && Array.isArray(doc.machine_models)
+          ? doc.machine_models.map((m) => m.id).filter((x): x is number => typeof x === "number")
+          : [];
+    if (directIds.length > 0) {
+      setEditMachineModelIds(directIds);
+    } else {
+      const names = doc.machine_model
+        ? (Array.isArray(doc.machine_model) ? doc.machine_model : [doc.machine_model])
+        : [];
+      const nameToId = new Map(allowedMachineModels.map((m) => [m.name, m.id]));
+      const resolved = names.map((n) => nameToId.get(n)).filter((x): x is number => typeof x === "number");
+      setEditMachineModelIds(resolved);
+    }
     setEditCategory(doc.category || "");
     setEditProductFamily(doc.product_family || "");
     setEditIsActive(doc.is_active);
@@ -489,7 +484,7 @@ export default function AdminDocumentsPage() {
     if (!uploadFile) return;
     
     // Validate machine model is selected
-    if (!editMachineModel || editMachineModel.length === 0) {
+    if (!editMachineModelIds || editMachineModelIds.length === 0) {
       showToast("Please select at least one machine model", "error");
       return;
     }
@@ -500,11 +495,15 @@ export default function AdminDocumentsPage() {
       const formData = new FormData();
       formData.append("file", uploadFile);
       
-      // Append machine model (use first one if array, or the string value)
-      const machineModelValue = Array.isArray(editMachineModel) 
-        ? editMachineModel[0] 
-        : editMachineModel;
-      formData.append("machine_model", machineModelValue);
+      // Canonical: send machine_model_ids as repeated fields
+      editMachineModelIds.forEach((id) => formData.append("machine_model_ids", String(id)));
+
+      // Legacy compatibility: include machine_model (first selected name) if available
+      const idToName = new Map(allowedMachineModels.map((m) => [m.id, m.name]));
+      const firstName = idToName.get(editMachineModelIds[0]);
+      if (firstName) {
+        formData.append("machine_model", firstName);
+      }
       
       // Append description if provided
       if (editProductFamily && editProductFamily.trim()) {
@@ -524,22 +523,13 @@ export default function AdminDocumentsPage() {
         throw new Error(extractApiError(detail) || "Failed to upload document");
       }
 
-      if (ALLOW_APP_INGESTION) {
-        setUploadProgress("Ingesting document into index (this may take a moment)...");
-      } else {
-        setUploadProgress("Saving document metadata...");
-      }
+      setUploadProgress("Ingesting document into index (this may take a moment)...");
       const result = await response.json();
       
-      if (ALLOW_APP_INGESTION) {
-        setUploadProgress(
-          `✅ Complete! Processed ${result.page_count || 0} pages. Reloading index...`
-        );
-        showToast(`✅ Document uploaded and ingested successfully`);
-      } else {
-        setUploadProgress(`✅ Document uploaded. Metadata saved. Ingestion must be triggered via external GPU pipeline.`);
-        showToast(`✅ Document uploaded. Ingestion will be handled externally.`);
-      }
+      setUploadProgress(
+        `✅ Complete! Processed ${result.page_count || 0} pages. Reloading index...`
+      );
+      showToast(`✅ Document uploaded and ingested successfully`);
       await fetchDocuments();
       
       // Small delay to show completion message
@@ -562,19 +552,25 @@ export default function AdminDocumentsPage() {
     try {
       const encodedFilename = encodeURIComponent(selectedDocument.filename);
       
-      // Compare machine models (handle both array and string formats)
-      const currentMachineModels = selectedDocument.machine_model 
-        ? (Array.isArray(selectedDocument.machine_model) 
-            ? selectedDocument.machine_model 
-            : [selectedDocument.machine_model])
-        : [];
-      const modelsEqual = editMachineModel.length === currentMachineModels.length &&
-        editMachineModel.every((model, idx) => model === currentMachineModels[idx]);
+      // Compare machine model ids (preferred)
+      const currentIds =
+        selectedDocument.machine_model_ids && Array.isArray(selectedDocument.machine_model_ids)
+          ? selectedDocument.machine_model_ids.filter((x): x is number => typeof x === "number")
+          : selectedDocument.machine_models && Array.isArray(selectedDocument.machine_models)
+            ? selectedDocument.machine_models.map((m) => m.id).filter((x): x is number => typeof x === "number")
+            : [];
+
+      const normalize = (ids: number[]) => [...new Set(ids)].sort((a, b) => a - b);
+      const modelsEqual = (() => {
+        const a = normalize(currentIds);
+        const b = normalize(editMachineModelIds);
+        return a.length === b.length && a.every((v, i) => v === b[i]);
+      })();
       
       // Build update body
       const body: Record<string, unknown> = {};
       if (!modelsEqual) {
-        body.machine_model = editMachineModel.length > 0 ? editMachineModel : null;
+        body.machine_model_ids = editMachineModelIds.length > 0 ? editMachineModelIds : [];
       }
       if (editCategory !== (selectedDocument.category || "")) {
         body.category = editCategory || null;
@@ -603,7 +599,11 @@ export default function AdminDocumentsPage() {
         }
       }
       
-      showToast("✅ Document metadata updated");
+      if (!modelsEqual) {
+        showToast("✅ Machine models updated. Re-ingest is required for search results to reflect this change.");
+      } else {
+        showToast("✅ Document metadata updated");
+      }
       await fetchDocuments();
       closeAllModals();
     } catch (err) {
@@ -1043,10 +1043,8 @@ export default function AdminDocumentsPage() {
                           return <span className="text-muted-foreground text-xs">—</span>;
                         }
                         
-                        // When ingestion is disabled, always use neutral outline style
-                        const badgeClass = !ALLOW_APP_INGESTION
-                          ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
-                          : doc.ingestion_status === 'FAILED'
+                        const badgeClass =
+                          doc.ingestion_status === 'FAILED'
                           ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400'
                           : doc.ingestion_status === 'PENDING_INGESTION'
                           ? 'border-gray-500/30 bg-gray-500/10 text-gray-700 dark:text-gray-400'
@@ -1059,7 +1057,7 @@ export default function AdminDocumentsPage() {
                             <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeClass}`}>
                               {statusLabel}
                             </span>
-                            {doc.ingestion_error && ALLOW_APP_INGESTION && (
+                            {doc.ingestion_error && (
                               <span className="text-xs text-red-600 dark:text-red-400 truncate max-w-xs" title={doc.ingestion_error}>
                                 {doc.ingestion_error.substring(0, 40)}...
                               </span>
@@ -1133,24 +1131,27 @@ export default function AdminDocumentsPage() {
                   disabled={actionSubmitting}
                 />
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {ALLOW_APP_INGESTION 
-                    ? "The document will be automatically ingested into the index after upload."
-                    : "The document will be saved for metadata. Ingestion must be triggered via external GPU pipeline."}
+                  The document will be automatically ingested into the index after upload.
                 </p>
               </div>
               <div>
                 <label className="mb-2 block text-sm font-medium">Machine Model *</label>
                 <select
-                  value={Array.isArray(editMachineModel) && editMachineModel.length > 0 ? editMachineModel[0] : ""}
-                  onChange={(e) => setEditMachineModel([e.target.value])}
+                  multiple
+                  value={editMachineModelIds.map(String)}
+                  onChange={(e) => {
+                    const selected = Array.from(e.target.selectedOptions, (option) => Number(option.value)).filter(
+                      (v) => Number.isFinite(v)
+                    );
+                    setEditMachineModelIds(selected);
+                  }}
                   className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   disabled={actionSubmitting || allowedMachineModels.length === 0}
                   required
                 >
-                  <option value="">Select a machine model</option>
                   {allowedMachineModels.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
+                    <option key={model.id} value={String(model.id)}>
+                      {model.name}
                     </option>
                   ))}
                 </select>
@@ -1182,7 +1183,7 @@ export default function AdminDocumentsPage() {
                 </Button>
                 <Button 
                   onClick={submitUpload} 
-                  disabled={!uploadFile || !editMachineModel || (Array.isArray(editMachineModel) && editMachineModel.length === 0) || actionSubmitting}
+                  disabled={!uploadFile || editMachineModelIds.length === 0 || actionSubmitting}
                 >
                   {actionSubmitting ? "Uploading..." : "Upload"}
                 </Button>
@@ -1223,25 +1224,29 @@ export default function AdminDocumentsPage() {
                 <div className="space-y-2">
                   <select
                     multiple
-                    value={editMachineModel}
+                    value={editMachineModelIds.map(String)}
                     onChange={(e) => {
-                      const selected = Array.from(e.target.selectedOptions, option => option.value);
-                      setEditMachineModel(selected);
+                      const selected = Array.from(e.target.selectedOptions, (option) => Number(option.value)).filter(
+                        (v) => Number.isFinite(v)
+                      );
+                      setEditMachineModelIds(selected);
                     }}
                     size={Math.min(allowedMachineModels.length + 1, 8)}
                     className="w-full rounded-md border border-border bg-muted/70 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                     disabled={actionSubmitting}
                   >
                     {allowedMachineModels.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
+                      <option key={model.id} value={String(model.id)}>
+                        {model.name}
                       </option>
                     ))}
                   </select>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Select one or more machine models. Hold Ctrl/Cmd to select multiple. 
-                    Select &quot;GENERAL&quot; if this document applies to all users regardless of machine.
-                    {editMachineModel.length > 0 && ` (${editMachineModel.length} selected)`}
+                    Select one or more machine models. Hold Ctrl/Cmd to select multiple.
+                    {editMachineModelIds.length > 0 && ` (${editMachineModelIds.length} selected)`}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Note: changing machine models affects future ingestion. Existing indexed chunks won’t change until this document is re-ingested.
                   </p>
                   {selectedDocument.requires_admin_review && (
                     <p className="mt-1 text-xs text-orange-600 dark:text-orange-400">

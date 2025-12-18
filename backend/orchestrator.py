@@ -1675,6 +1675,36 @@ class HybridRetriever:
     def _matches_filters(self, node: NodeWithScore, filters: Dict[str, Any]) -> bool:
         """Check if node matches metadata filters."""
         for key, value in filters.items():
+            # Special-case: machine_model_ids overlap filter (ANY match)
+            if key == "machine_model_ids":
+                if value is None:
+                    continue
+                if not isinstance(value, list):
+                    # If caller passes a single id, normalize
+                    value = [value]
+                try:
+                    requested = {int(v) for v in value if v is not None and str(v).strip() != ""}
+                except Exception:
+                    requested = set()
+                if not requested:
+                    continue  # no filtering requested
+
+                node_value = node.metadata.get("machine_model_ids")
+                if node_value is None:
+                    return False
+                if not isinstance(node_value, list):
+                    node_value = [node_value]
+                try:
+                    present = {int(v) for v in node_value if v is not None and str(v).strip() != ""}
+                except Exception:
+                    present = set()
+                # If account has models selected, chunks with empty list must not match
+                if not present:
+                    return False
+                if not requested.intersection(present):
+                    return False
+                continue
+
             node_value = node.metadata.get(key)
             if node_value != value:
                 return False

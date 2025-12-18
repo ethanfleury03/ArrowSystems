@@ -1,12 +1,12 @@
 """
-Global Machine Models Configuration
+Machine model naming helpers (DB-backed).
 
-This module defines the allowed machine models for the system.
-All machine_model values must be one of the models in ALLOWED_MACHINE_MODELS.
-
-To update the list:
-1. Add new models to ALLOWED_MACHINE_MODELS below
-2. Restart the backend server
+IMPORTANT:
+- The machine model registry lives in the database table `machine_models`.
+- This module must NOT maintain a hardcoded list of machine model names.
+- Two reserved tokens are still supported for backward compatibility in filtering:
+  - GENERAL (always included)
+  - Any (document applies to any machine)
 """
 
 # Special value indicating document applies to any machine
@@ -15,24 +15,14 @@ ANY_MACHINE = "Any"
 # Special value indicating document applies to all users (always included)
 GENERAL_MACHINE = "GENERAL"
 
-# TODO: Populate this list with the final machine models
-ALLOWED_MACHINE_MODELS: list[str] = [
-    ANY_MACHINE,  # Special option for documents that apply to any machine
-    GENERAL_MACHINE,  # Special option for documents that apply to all users (always included)
-    "2800 Series Mini Laser Pro",
-    "Duraflex",
-    "Anycut",
-    "anyCutII",
-    "anyCutIII",
-    "Anytron AnyJet",
-    "ANYTRON Any-002",
-    "Digital Die Cutter VR350",
-    "DuraLink",
-    "DuraBolt",
-    "DuraCore",
-    "EZCut 330",
-    "EZCut 350R"
-]
+from typing import Optional
+
+
+def _get_db_machine_model_names() -> list[str]:
+    """Load machine model names from the DB (source of truth)."""
+    from backend.utils.db import SessionLocal, MachineModel
+    with SessionLocal() as session:
+        return [m.name for m in session.query(MachineModel).order_by(MachineModel.name.asc()).all() if m.name]
 
 
 def is_valid_machine_model(model: str | None) -> bool:
@@ -47,7 +37,18 @@ def is_valid_machine_model(model: str | None) -> bool:
     """
     if model is None:
         return False
-    return model in ALLOWED_MACHINE_MODELS
+    m = str(model).strip()
+    if not m:
+        return False
+    if m in {ANY_MACHINE, GENERAL_MACHINE}:
+        return True
+    # Case-insensitive compare against DB
+    try:
+        names = _get_db_machine_model_names()
+        normalized = " ".join(m.upper().split())
+        return any(" ".join(n.upper().split()) == normalized for n in names)
+    except Exception:
+        return False
 
 
 def is_valid_machine_model_list(models: list[str] | None) -> bool:
@@ -65,7 +66,6 @@ def is_valid_machine_model_list(models: list[str] | None) -> bool:
     # If "Any" is in the list, it should be the only item
     if ANY_MACHINE in models and len(models) > 1:
         return False
-    # Check all models are valid
     return all(is_valid_machine_model(model) for model in models)
 
 
@@ -76,7 +76,11 @@ def get_allowed_machine_models() -> list[str]:
     Returns:
         List of allowed machine model strings
     """
-    return ALLOWED_MACHINE_MODELS.copy()
+    try:
+        return _get_db_machine_model_names() + [GENERAL_MACHINE, ANY_MACHINE]
+    except Exception:
+        # In very early startup or broken DB scenarios, fall back to reserved tokens only
+        return [GENERAL_MACHINE, ANY_MACHINE]
 
 
 def get_machine_models_for_selection() -> list[str]:
@@ -87,7 +91,7 @@ def get_machine_models_for_selection() -> list[str]:
     Returns:
         List of selectable machine model strings (excludes GENERAL and Any)
     """
-    return [m for m in ALLOWED_MACHINE_MODELS if m not in [GENERAL_MACHINE, ANY_MACHINE]]
+    return [m for m in get_allowed_machine_models() if m not in [GENERAL_MACHINE, ANY_MACHINE]]
 
 
 def normalize_machine_models(raw) -> list[str]:
@@ -115,8 +119,11 @@ def normalize_machine_models(raw) -> list[str]:
     
     # Handle list
     if isinstance(raw, list):
-        # Filter to only valid models
-        normalized = [m for m in raw if isinstance(m, str) and is_valid_machine_model(m)]
+        try:
+            allowed = set(get_allowed_machine_models())
+        except Exception:
+            allowed = {GENERAL_MACHINE, ANY_MACHINE}
+        normalized = [m for m in raw if isinstance(m, str) and m in allowed]
         return normalized
     
     return []
@@ -145,7 +152,7 @@ def get_effective_machines_for_user(role: str, user_machine_models: list[str]) -
     """
     role_upper = role.upper() if role else ""
     
-    # Normalize user_machine_models
+    # Normalize user_machine_models (filters to DB-known names + reserved tokens)
     user_machine_models = normalize_machine_models(user_machine_models)
     
     # If user has machine_models assigned, use those (for all roles including ADMIN)
@@ -155,14 +162,14 @@ def get_effective_machines_for_user(role: str, user_machine_models: list[str]) -
         # User has no machine_models assigned
         if role_upper in ["ADMIN", "TECHNICIAN"]:
             # Admins and technicians without assigned machines get full access
-            effective_machines = ALLOWED_MACHINE_MODELS.copy()
+            effective_machines = get_allowed_machine_models()
         else:
             # Customers without assigned machines get no machine access (only GENERAL)
             effective_machines = []
     
     # Always ensure GENERAL is included for ALL users (even customers with no other machines)
     # GENERAL doesn't need to be selected by admin - it's automatically included
-    if GENERAL_MACHINE in ALLOWED_MACHINE_MODELS and GENERAL_MACHINE not in effective_machines:
+    if GENERAL_MACHINE not in effective_machines:
         effective_machines.append(GENERAL_MACHINE)
     
     # Remove duplicates while preserving order

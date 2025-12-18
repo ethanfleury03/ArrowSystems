@@ -14,28 +14,74 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from .db import Document, SessionLocal
-try:
-    from ..config.machine_models import (
-        is_valid_machine_model,
-        is_valid_machine_model_list,
-        get_allowed_machine_models,
-        ANY_MACHINE,
-        GENERAL_MACHINE
-    )
-except ImportError:
-    # Fallback if config not available (shouldn't happen in production)
-    def is_valid_machine_model(model: str | None) -> bool:
-        return model is not None
-    
-    def is_valid_machine_model_list(models: list[str] | None) -> bool:
-        return models is not None and len(models) > 0
-    
-    def get_allowed_machine_models() -> list[str]:
-        return []
-    
-    ANY_MACHINE = "Any"
-    GENERAL_MACHINE = "GENERAL"
+from .db import Document, MachineModel, SessionLocal
+
+# Special values historically used by orchestrator for "global" docs.
+# These are not MachineModel table rows; treat them as reserved tokens.
+ANY_MACHINE = "Any"
+GENERAL_MACHINE = "GENERAL"
+
+
+def get_allowed_machine_models(session: Optional[Session] = None) -> list[str]:
+    """
+    Return allowed machine model names from the database (source of truth),
+    plus reserved tokens (GENERAL/Any) for backward compatibility.
+    """
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    try:
+        names = [row.name for row in session.query(MachineModel).order_by(MachineModel.name.asc()).all() if row.name]
+        # Include reserved tokens at the end (kept for legacy filtering behavior)
+        return names + [GENERAL_MACHINE, ANY_MACHINE]
+    finally:
+        if close_session:
+            session.close()
+
+
+def is_valid_machine_model(model: str | None, session: Optional[Session] = None) -> bool:
+    """Validate a machine model name against machine_models table (case-insensitive), allowing reserved tokens."""
+    if model is None:
+        return False
+    m = str(model).strip()
+    if not m:
+        return False
+    if m in {ANY_MACHINE, GENERAL_MACHINE}:
+        return True
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    try:
+        from sqlalchemy import func
+        return (
+            session.query(MachineModel.id)
+            .filter(func.upper(MachineModel.name) == " ".join(m.upper().split()))
+            .first()
+            is not None
+        )
+    finally:
+        if close_session:
+            session.close()
+
+
+def is_valid_machine_model_list(models: list[str] | None, session: Optional[Session] = None) -> bool:
+    if models is None:
+        return False
+    filtered = [m for m in models if m and isinstance(m, str) and m.strip()]
+    if len(filtered) == 0:
+        return False
+    # Validate all
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    try:
+        return all(is_valid_machine_model(m, session=session) for m in filtered)
+    finally:
+        if close_session:
+            session.close()
 
 logger = logging.getLogger(__name__)
 
@@ -102,15 +148,22 @@ def get_document_metadata(filename: str, session: Optional[Session] = None) -> D
                 "requires_admin_review": False
             }
         
-        # Parse machine_model if it's a JSON string
-        machine_model = doc.machine_model
-        if machine_model and isinstance(machine_model, str):
-            try:
-                # Try to parse as JSON array
-                machine_model = json.loads(machine_model)
-            except (json.JSONDecodeError, TypeError):
-                # If not JSON, treat as single string
-                machine_model = [machine_model] if machine_model else None
+        # Prefer many-to-many mapping; fallback to legacy string field
+        machine_model = None
+        try:
+            if hasattr(doc, "machine_models") and doc.machine_models:
+                machine_model = [m.name for m in doc.machine_models if getattr(m, "name", None)]
+        except Exception:
+            machine_model = None
+
+        if not machine_model:
+            # Parse legacy machine_model if it's a JSON string
+            machine_model = doc.machine_model
+            if machine_model and isinstance(machine_model, str):
+                try:
+                    machine_model = json.loads(machine_model)
+                except (json.JSONDecodeError, TypeError):
+                    machine_model = [machine_model] if machine_model else None
         
         return {
             "is_active": doc.is_active,
@@ -158,12 +211,12 @@ def upsert_document(
     Returns:
         Document object
     """
-    # Normalize machine_model to JSON string
+    # Normalize machine_model to JSON string (legacy column) and update M2M join table.
     machine_model_str = None
     if machine_model is not None:
         if isinstance(machine_model, list):
             # Validate all models
-            if is_valid_machine_model_list(machine_model):
+            if is_valid_machine_model_list(machine_model, session=session):
                 machine_model_str = json.dumps(machine_model)
             else:
                 invalid_models = [m for m in machine_model if not is_valid_machine_model(m)]
@@ -172,7 +225,7 @@ def upsert_document(
                 if requires_admin_review is None:
                     requires_admin_review = True
         elif isinstance(machine_model, str):
-            if is_valid_machine_model(machine_model):
+            if is_valid_machine_model(machine_model, session=session):
                 machine_model_str = machine_model
             else:
                 logger.warning(f"Invalid machine_model '{machine_model}' for {file_name}")
@@ -219,6 +272,27 @@ def upsert_document(
         doc.is_active = is_active
         doc.updated_at = datetime.utcnow()
     
+    # Update many-to-many join table if machine_model provided and valid
+    if machine_model is not None and machine_model_str is not None:
+        # Convert to list of names
+        names: list[str]
+        if isinstance(machine_model, list):
+            names = [m.strip() for m in machine_model if isinstance(m, str) and m.strip()]
+        else:
+            names = [str(machine_model).strip()]
+
+        # Resolve to MachineModel rows (excluding reserved tokens)
+        from sqlalchemy import func
+        normalized = [" ".join(n.upper().split()) for n in names if n not in {ANY_MACHINE, GENERAL_MACHINE}]
+        mm_rows = []
+        if normalized:
+            mm_rows = session.query(MachineModel).filter(func.upper(MachineModel.name).in_(normalized)).all()
+        # Attach relationship (canonical). Reserved tokens remain only in legacy string column.
+        try:
+            doc.machine_models = mm_rows
+        except Exception as e:
+            logger.warning(f"Failed to set document machine_models relationship for {file_name}: {e}")
+
     session.commit()
     session.refresh(doc)
     return doc
@@ -438,15 +512,21 @@ def load_metadata(session: Optional[Session] = None) -> Dict[str, Dict[str, Any]
         metadata_dict = {}
         
         for doc in documents:
-            # Parse machine_model if it's a JSON string
-            machine_model = doc.machine_model
-            if machine_model and isinstance(machine_model, str):
-                try:
-                    # Try to parse as JSON array
-                    machine_model = json.loads(machine_model)
-                except (json.JSONDecodeError, TypeError):
-                    # If not JSON, treat as single string
-                    machine_model = machine_model if machine_model else None
+            # Prefer many-to-many mapping; fallback to legacy string field
+            machine_model = None
+            try:
+                if hasattr(doc, "machine_models") and doc.machine_models:
+                    machine_model = [m.name for m in doc.machine_models if getattr(m, "name", None)]
+            except Exception:
+                machine_model = None
+
+            if not machine_model:
+                machine_model = doc.machine_model
+                if machine_model and isinstance(machine_model, str):
+                    try:
+                        machine_model = json.loads(machine_model)
+                    except (json.JSONDecodeError, TypeError):
+                        machine_model = machine_model if machine_model else None
             
             metadata_dict[doc.file_name] = {
                 "is_active": doc.is_active,

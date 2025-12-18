@@ -22,7 +22,7 @@ backend_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(backend_dir.parent))
 
 from backend.utils.db import SessionLocal, DocumentIngestionMetadata, Document
-from backend.utils.gcs_client import list_objects, object_exists, get_gcs_client
+from backend.utils.gcs_client import list_object_names, object_exists, get_gcs_client
 from backend.config.env import settings
 
 
@@ -62,7 +62,7 @@ def main():
     
     try:
         prefix = settings.DOCS_GCS_PREFIX or ""
-        gcs_objects = list_objects(settings.DOCS_GCS_BUCKET, prefix)
+        gcs_objects = list_object_names(settings.DOCS_GCS_BUCKET, prefix)
         print(f"   Bucket: {settings.DOCS_GCS_BUCKET}")
         print(f"   Prefix: {prefix}")
         print(f"   Objects found: {len(gcs_objects)}")

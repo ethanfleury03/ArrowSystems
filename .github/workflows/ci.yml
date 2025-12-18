@@ -633,6 +633,55 @@ jobs:
           echo "Length:"
           printf "%s" "${{ secrets.WIF_SERVICE_ACCOUNT }}" | wc -c
 
+      - name: Run database migrations (Cloud Run Job)
+        run: |
+          set -euo pipefail
+          PROJECT="${{ secrets.GCP_PROJECT_ID }}"
+          REGION="us-central1"
+          SERVICE_ACCOUNT="${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          IMAGE="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${GITHUB_SHA}"
+          JOB="arrow-rag-backend-migrate"
+          CLOUDSQL_INSTANCE="arrow-rag-support-prod:us-central1:rag-postgres"
+          
+          echo "🗄️ Running DB migrations using Cloud Run Job '$JOB'..."
+          echo "Image: $IMAGE"
+          
+          # Create the job once (idempotent)
+          if gcloud run jobs describe "$JOB" --project="$PROJECT" --region="$REGION" >/dev/null 2>&1; then
+            echo "✅ Migration job exists; updating to latest image..."
+            gcloud run jobs update "$JOB" \
+              --project="$PROJECT" \
+              --region="$REGION" \
+              --image="$IMAGE" \
+              --service-account="$SERVICE_ACCOUNT" \
+              --set-cloudsql-instances="$CLOUDSQL_INSTANCE" \
+              --set-env-vars="ENV=dev,DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+              --command="python" \
+              --args="-m,alembic,-c,backend/migrations/alembic.ini,upgrade,head" \
+              --quiet
+          else
+            echo "🆕 Migration job not found; creating..."
+            gcloud run jobs create "$JOB" \
+              --project="$PROJECT" \
+              --region="$REGION" \
+              --image="$IMAGE" \
+              --service-account="$SERVICE_ACCOUNT" \
+              --set-cloudsql-instances="$CLOUDSQL_INSTANCE" \
+              --set-env-vars="ENV=dev,DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+              --command="python" \
+              --args="-m,alembic,-c,backend/migrations/alembic.ini,upgrade,head" \
+              --quiet
+          fi
+          
+          echo "▶️ Executing migration job..."
+          gcloud run jobs execute "$JOB" \
+            --project="$PROJECT" \
+            --region="$REGION" \
+            --wait \
+            --quiet
+          
+          echo "✅ Migrations complete."
+
       - name: Deploy backend to Cloud Run
         run: |
           # SAFETY CHECK – do not allow accidental GCS mounts

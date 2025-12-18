@@ -40,6 +40,8 @@ def chunks_file(temp_dir):
         "metadata_id": "test-metadata-id",
         "filename": "test.pdf",
         "machine_model": "TestMachine",
+        "machine_model_ids": [1, 2],
+        "machine_model_names": ["DuraFlex", "DuraCore"],
         "created_at": "2024-01-01T00:00:00",
         "chunks": [
             {
@@ -48,6 +50,9 @@ def chunks_file(temp_dir):
                     "file_name": "test.pdf",
                     "page_label": "1",
                     "chunk_index": 0,
+                    "machine_model_ids": [1, 2],
+                    "machine_model_names": ["DuraFlex", "DuraCore"],
+                    "machine_model": ["DuraFlex", "DuraCore"],
                 },
                 "node_id": None,
             },
@@ -57,6 +62,9 @@ def chunks_file(temp_dir):
                     "file_name": "test.pdf",
                     "page_label": "1",
                     "chunk_index": 1,
+                    "machine_model_ids": [1, 2],
+                    "machine_model_names": ["DuraFlex", "DuraCore"],
+                    "machine_model": ["DuraFlex", "DuraCore"],
                 },
                 "node_id": None,
             }
@@ -133,6 +141,17 @@ def test_embedding_success_transition(sample_metadata, chunks_file, temp_dir):
             run_embedding(metadata_id)
         finally:
             os.chdir(original_cwd)
+
+        # Verify we inserted nodes with propagated machine_model_ids
+        assert mock_index.insert_nodes.called
+        inserted_nodes = []
+        for call in mock_index.insert_nodes.call_args_list:
+            batch = call.args[0] if call.args else []
+            inserted_nodes.extend(batch)
+        assert len(inserted_nodes) > 0
+        for n in inserted_nodes:
+            md = getattr(n, "metadata", {}) or {}
+            assert md.get("machine_model_ids") == [1, 2]
         
         # Verify status transition
         session = SessionLocal()

@@ -2683,6 +2683,34 @@ async def query_knowledge_base(request: Request):
             logger.info(
                 f"Using hybrid approach: filtering to selected machine '{query_request.selected_machine}' + GENERAL"
             )
+
+        # NEW: Machine model filtering by DB IDs (chunk-level overlap)
+        # Node metadata now carries machine_model_ids[]; customers should filter by overlap.
+        effective_machine_model_ids: list[int] = []
+        if user_role and user_role.upper() == "CUSTOMER" and effective_machine_models:
+            # Resolve names -> ids (exclude reserved tokens like GENERAL/Any)
+            names = [m for m in effective_machine_models if isinstance(m, str) and m and m not in {"GENERAL", "Any"}]
+
+            def _resolve_ids_by_name():
+                from sqlalchemy import func
+                from backend.utils.db import MachineModel
+                with SessionLocal() as session:
+                    if not names:
+                        return []
+                    normalized = [" ".join(n.upper().split()) for n in names]
+                    rows = session.query(MachineModel).filter(func.upper(MachineModel.name).in_(normalized)).all()
+                    return [int(r.id) for r in rows if getattr(r, "id", None) is not None]
+
+            try:
+                effective_machine_model_ids = await run_sync(_resolve_ids_by_name)
+            except Exception as e:
+                logger.warning(f"Failed to resolve machine model ids for filtering: {e}")
+                effective_machine_model_ids = []
+
+        # Merge into metadata_filters for orchestrator overlap filtering
+        metadata_filters = query_request.metadata_filters or {}
+        if effective_machine_model_ids:
+            metadata_filters = {**metadata_filters, "machine_model_ids": effective_machine_model_ids}
         
         # Detect language and translate query if needed (for retrieval)
         query_original = query_request.query
@@ -2720,7 +2748,7 @@ async def query_knowledge_base(request: Request):
             detected_language=detected_lang,  # Pass detected language for LLM
             top_k=query_request.top_k,
             alpha=query_request.alpha,
-            metadata_filters=query_request.metadata_filters,
+            metadata_filters=metadata_filters,
             dynamic_windowing=query_request.dynamic_windowing,
             chat_history=chat_history,  # Pass chat history to pipeline
             role=user_role,  # Pass user role for machine-based filtering
@@ -3690,8 +3718,7 @@ async def get_all_documents(request: Request):
         # Query database: DocumentIngestionMetadata LEFT JOIN Document
         def _get_documents_from_db():
             with SessionLocal() as session:
-                from backend.utils.db import DocumentIngestionMetadata, Document
-                from sqlalchemy.orm import joinedload
+                from backend.utils.db import DocumentIngestionMetadata, Document, MachineModel, document_machine_models
                 
                 # Query all metadata records with optional Document join
                 query = (
@@ -3703,6 +3730,30 @@ async def get_all_documents(request: Request):
                 results = query.all()
                 logger.info(f"Found {len(results)} documents in database")
                 
+                # Preload machine model mappings for all document_ids in this page (avoid N+1)
+                doc_ids = [doc.id for (_meta, doc) in results if doc is not None]
+                doc_id_to_models: dict[int, list[dict[str, Any]]] = {}
+                if doc_ids:
+                    rows = (
+                        session.query(
+                            document_machine_models.c.document_id,
+                            MachineModel.id,
+                            MachineModel.name,
+                            MachineModel.machine_kind,
+                        )
+                        .join(MachineModel, MachineModel.id == document_machine_models.c.machine_model_id)
+                        .filter(document_machine_models.c.document_id.in_(doc_ids))
+                        .all()
+                    )
+                    for r in rows:
+                        doc_id_to_models.setdefault(int(r.document_id), []).append(
+                            {
+                                "id": int(r.id),
+                                "name": r.name,
+                                "machine_kind": r.machine_kind,
+                            }
+                        )
+
                 documents = []
                 for meta, doc in results:
                     # Get GCS path from Document if available, otherwise from metadata.file_path
@@ -3712,17 +3763,13 @@ async def get_all_documents(request: Request):
                     elif meta.file_path and meta.file_path.startswith('gs://'):
                         gcs_path = meta.file_path
                     
-                    # Get machine model - prefer Document, fallback to metadata
-                    machine_model = None
-                    if doc and doc.machine_model:
-                        # Document.machine_model can be JSON array string or single string
-                        import json
-                        try:
-                            machine_model = json.loads(doc.machine_model) if doc.machine_model.startswith('[') else [doc.machine_model]
-                        except:
-                            machine_model = [doc.machine_model] if doc.machine_model else None
-                    elif meta.machine_model:
-                        machine_model = [meta.machine_model]
+                    # Machine models (canonical): from join table when Document exists
+                    machine_models = doc_id_to_models.get(int(doc.id), []) if doc else []
+                    machine_model_ids = [m["id"] for m in machine_models]
+                    machine_model_names = [m["name"] for m in machine_models if m.get("name")]
+
+                    # Backward compatible machine_model field: list[str] of names
+                    machine_model = machine_model_names if machine_model_names else ([meta.machine_model] if meta.machine_model else None)
                     
                     # Get file type from filename
                     file_ext = os.path.splitext(meta.filename)[1].lower()
@@ -3754,6 +3801,8 @@ async def get_all_documents(request: Request):
                         "page_count": 0,  # Not available from DB - use diagnostics endpoint for index info
                         "is_active": doc.is_active if doc else False,
                         "machine_model": machine_model,
+                        "machine_model_ids": machine_model_ids,
+                        "machine_models": machine_models,
                         "missing_machine_model": machine_model is None or len(machine_model) == 0,
                         "requires_admin_review": doc.requires_admin_review if doc else False,
                         "category": doc.category if doc else None,
@@ -3769,12 +3818,11 @@ async def get_all_documents(request: Request):
         
         documents = await run_sync(_get_documents_from_db)
         
-        # Include allowed machine models in response for frontend dropdown
-        try:
-            from .config.machine_models import get_allowed_machine_models
-            allowed_machine_models = get_allowed_machine_models()
-        except ImportError:
-            allowed_machine_models = []
+        # Include machine models from DB for frontend dropdown fallback (non-authoritative; UI should use /admin/machines)
+        def _get_machine_model_names():
+            with SessionLocal() as session:
+                return [m.name for m in session.query(MachineModel).order_by(MachineModel.name.asc()).all() if m.name]
+        allowed_machine_models = await run_sync(_get_machine_model_names)
         
         return {
             "documents": documents,
@@ -4067,14 +4115,7 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
         - If empty list or null, sets to None and marks requires_admin_review
         - If not in allowed list, returns 400 error
     """
-    global rag_pipeline
-    
-    if not rag_pipeline or not rag_pipeline.is_initialized():
-        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
-    
     try:
-        from .config.machine_models import is_valid_machine_model_list, get_allowed_machine_models
-        
         import urllib.parse
         filename = urllib.parse.unquote(filename)
         
@@ -4082,50 +4123,51 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
         if '..' in filename or filename.startswith('/'):
             raise HTTPException(status_code=400, detail="Invalid filename")
         
-        machine_model = request.get("machine_model")
-        
-        # Accept both list and string (for backwards compatibility)
-        # Normalize to list format
-        if machine_model is None:
-            machine_models_list = None
-        elif isinstance(machine_model, str):
-            # Single string -> convert to list
-            machine_models_list = [machine_model] if machine_model else None
-        elif isinstance(machine_model, list):
-            # Filter out empty strings and None values
-            machine_models_list = [m for m in machine_model if m and isinstance(m, str)]
-            if len(machine_models_list) == 0:
-                machine_models_list = None
+        # New canonical input: machine_model_ids (list[int])
+        machine_model_ids = request.get("machine_model_ids")
+        machine_model = request.get("machine_model")  # legacy list[str] or str
+
+        machine_models_list: Optional[list[str]] = None
+
+        if machine_model_ids is not None:
+            if not isinstance(machine_model_ids, list):
+                raise HTTPException(status_code=400, detail="machine_model_ids must be a list of integers")
+            try:
+                ids = sorted(set(int(x) for x in machine_model_ids))
+            except Exception:
+                raise HTTPException(status_code=400, detail="machine_model_ids must be a list of integers")
+            def _resolve_names():
+                from backend.utils.db import MachineModel
+                with SessionLocal() as session:
+                    rows = session.query(MachineModel).filter(MachineModel.id.in_(ids)).all()
+                    found = {int(m.id) for m in rows}
+                    missing = [i for i in ids if i not in found]
+                    if missing:
+                        raise HTTPException(status_code=400, detail=f"Invalid machine_model_ids (not found): {missing}")
+                    return [m.name for m in rows]
+            machine_models_list = await run_sync(_resolve_names)
         else:
-            raise HTTPException(status_code=400, detail="machine_model must be a string or list of strings")
-        
-        # Validate: if not None, must be a valid list
-        if machine_models_list is not None and not is_valid_machine_model_list(machine_models_list):
-            allowed_models = get_allowed_machine_models()
-            # Check which models are invalid
-            from .config.machine_models import is_valid_machine_model
-            invalid_models = [m for m in machine_models_list if not is_valid_machine_model(m)]
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid machine_model(s) {invalid_models}. Must be from: {', '.join(allowed_models) if allowed_models else 'None'}"
-            )
-        
+            # Legacy: accept string or list[str]
+            if machine_model is None:
+                machine_models_list = None
+            elif isinstance(machine_model, str):
+                machine_models_list = [machine_model] if machine_model.strip() else None
+            elif isinstance(machine_model, list):
+                machine_models_list = [m for m in machine_model if m and isinstance(m, str) and m.strip()]
+                if len(machine_models_list) == 0:
+                    machine_models_list = None
+            else:
+                raise HTTPException(status_code=400, detail="machine_model must be a string or list of strings")
+
         from .utils.document_metadata import update_document_metadata
         updates = {"machine_model": machine_models_list}
-        
-        # If machine_model is None, mark for review
-        if machine_models_list is None:
-            updates["requires_admin_review"] = True
-        else:
-            # Clear review flag if machine_model is set
-            updates["requires_admin_review"] = False
-        
+        updates["requires_admin_review"] = machine_models_list is None
+
         update_document_metadata(filename, updates)
-        
-        # Also update DocumentIngestionMetadata table to keep it in sync
-        # Convert list to string (use first machine model for database compatibility)
-        db_machine_model = machine_models_list[0] if machine_models_list and len(machine_models_list) > 0 else ""
-        
+
+        # Keep DocumentIngestionMetadata.machine_model synced (best-effort, stores first name only)
+        db_machine_model = machine_models_list[0] if machine_models_list else ""
+
         def _update_db_metadata():
             with SessionLocal() as session:
                 metadata = session.query(DocumentIngestionMetadata).filter(
@@ -4134,23 +4176,20 @@ async def update_machine_model_endpoint(filename: str, request: Dict[str, Any]):
                 if metadata:
                     metadata.machine_model = db_machine_model
                     session.commit()
-                    logger.debug(f"Updated DocumentIngestionMetadata.machine_model for {filename}: {db_machine_model}")
-                else:
-                    logger.warning(f"DocumentIngestionMetadata record not found for {filename} - skipping database update")
-        
+
         try:
             await run_sync(_update_db_metadata)
         except Exception as e:
             logger.warning(f"Failed to update DocumentIngestionMetadata for {filename}: {e}")
-            # Don't fail the request if database update fails - JSON file update already succeeded
-        
+
         logger.info(f"Updated machine_model for {filename}: {machine_models_list}")
-        
+
         return {
             "status": "success",
             "message": f"Machine model updated for {filename}",
             "machine_model": machine_models_list,
-            "requires_admin_review": updates.get("requires_admin_review", False)
+            "machine_model_ids": machine_model_ids,
+            "requires_admin_review": updates.get("requires_admin_review", False),
         }
         
     except HTTPException:
@@ -4181,8 +4220,6 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
     user_role = get_user_role()
     
     try:
-        from .config.machine_models import is_valid_machine_model_list, get_allowed_machine_models, is_valid_machine_model
-        
         import urllib.parse
         filename = urllib.parse.unquote(filename)
         
@@ -4192,11 +4229,39 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
         
         # Extract allowed metadata fields
         updates = {}
-        allowed_fields = ["machine_model", "category", "product_family", "is_active"]
+        allowed_fields = ["machine_model_ids", "machine_model", "category", "product_family", "is_active"]
         for field in allowed_fields:
             if field in request:
                 value = request[field]
-                # Validate machine_model
+                # New canonical: machine_model_ids (list[int]) -> resolve to names list
+                if field == "machine_model_ids":
+                    if value is None:
+                        updates["machine_model"] = None
+                        updates["requires_admin_review"] = True
+                        continue
+                    if not isinstance(value, list):
+                        raise HTTPException(status_code=400, detail="machine_model_ids must be a list of integers")
+                    try:
+                        ids = sorted(set(int(x) for x in value))
+                    except Exception:
+                        raise HTTPException(status_code=400, detail="machine_model_ids must be a list of integers")
+
+                    def _resolve_names():
+                        from backend.utils.db import MachineModel
+                        with SessionLocal() as session:
+                            rows = session.query(MachineModel).filter(MachineModel.id.in_(ids)).all()
+                            found = {int(m.id) for m in rows}
+                            missing = [i for i in ids if i not in found]
+                            if missing:
+                                raise HTTPException(status_code=400, detail=f"Invalid machine_model_ids (not found): {missing}")
+                            return [m.name for m in rows]
+
+                    machine_models_list = await run_sync(_resolve_names)
+                    updates["machine_model"] = machine_models_list if machine_models_list else None
+                    updates["requires_admin_review"] = not bool(machine_models_list)
+                    continue
+
+                # Validate machine_model (legacy: string or list[str])
                 if field == "machine_model":
                     # Accept both list and string (for backwards compatibility)
                     if value is None:
@@ -4211,15 +4276,12 @@ async def update_document_metadata_endpoint(http_request: Request, filename: str
                             machine_models_list = None
                     else:
                         raise HTTPException(status_code=400, detail="machine_model must be a string or list of strings")
-                    
-                    # Validate: if not None, must be in allowed list
+
+                    # Validate via DB-backed validator (no hardcoded lists)
+                    from .utils.document_metadata import is_valid_machine_model_list
                     if machine_models_list is not None and not is_valid_machine_model_list(machine_models_list):
-                        allowed_models = get_allowed_machine_models()
-                        invalid_models = [m for m in machine_models_list if not is_valid_machine_model(m)]
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Invalid machine_model(s) {invalid_models}. Must be from: {', '.join(allowed_models) if allowed_models else 'None'}"
-                        )
+                        raise HTTPException(status_code=400, detail="Invalid machine_model values. Must match machine_models table.")
+
                     # If None, mark for review
                     if machine_models_list is None:
                         updates["requires_admin_review"] = True
@@ -4640,7 +4702,7 @@ async def get_document_diagnostics(request: Request):
     def _get_diagnostics():
         with SessionLocal() as session:
             from backend.utils.db import DocumentIngestionMetadata, Document
-            from backend.utils.gcs_client import list_objects, object_exists
+            from backend.utils.gcs_client import list_object_names, object_exists
             from backend.config.env import settings
             
             # Count DB records
@@ -4654,7 +4716,7 @@ async def get_document_diagnostics(request: Request):
             # Check GCS objects
             gcs_objects = []
             if settings.DOCS_GCS_BUCKET and settings.DOCS_GCS_PREFIX:
-                gcs_objects = list_objects(settings.DOCS_GCS_BUCKET, settings.DOCS_GCS_PREFIX)
+                gcs_objects = list_object_names(settings.DOCS_GCS_BUCKET, settings.DOCS_GCS_PREFIX)
             
             count_gcs_objects = len(gcs_objects)
             
@@ -5398,7 +5460,8 @@ async def upload_document(
     http_request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    machine_model: str = Form(...),
+    machine_model: Optional[str] = Form(None),  # legacy single selection by name (deprecated)
+    machine_model_ids: Optional[List[int]] = Form(None),  # new multi-select by DB IDs
     description: Optional[str] = Form(None),
 ):
     """
@@ -5423,6 +5486,43 @@ async def upload_document(
     user_role = get_user_role()
     request_id = get_request_id()
     
+    # Normalize/validate machine models selection
+    # Preferred: machine_model_ids (ints). Fallback: machine_model name (legacy).
+    selected_machine_model_ids: list[int] = []
+    selected_machine_model_names: list[str] = []
+
+    def _load_machine_models_by_ids(ids: list[int]) -> list[MachineModel]:
+        if not ids:
+            return []
+        unique_ids = sorted(set(int(x) for x in ids))
+        with SessionLocal() as session:
+            rows = session.query(MachineModel).filter(MachineModel.id.in_(unique_ids)).all()
+            found_ids = {int(m.id) for m in rows}
+            missing = [i for i in unique_ids if i not in found_ids]
+            if missing:
+                raise HTTPException(status_code=400, detail=f"Invalid machine_model_ids (not found): {missing}")
+            return rows
+
+    def _load_machine_model_by_name(name: str) -> MachineModel:
+        from sqlalchemy import func
+        normalized = " ".join(name.strip().upper().split())
+        with SessionLocal() as session:
+            row = session.query(MachineModel).filter(func.upper(MachineModel.name) == normalized).first()
+            if not row:
+                raise HTTPException(status_code=400, detail=f"Invalid machine model: {name}")
+            return row
+
+    if machine_model_ids:
+        selected_machine_model_ids = sorted(set(int(x) for x in machine_model_ids))
+        mm_rows = await run_sync(_load_machine_models_by_ids, selected_machine_model_ids)
+        selected_machine_model_names = [m.name for m in mm_rows]
+    elif machine_model and machine_model.strip():
+        mm_row = await run_sync(_load_machine_model_by_name, machine_model)
+        selected_machine_model_ids = [int(mm_row.id)]
+        selected_machine_model_names = [mm_row.name]
+    else:
+        raise HTTPException(status_code=400, detail="Please select at least one machine model.")
+
     # Log document upload received
     logger.info(
         {
@@ -5430,6 +5530,8 @@ async def upload_document(
             "filename": file.filename,
             "content_type": file.content_type,
             "machine_model_name": machine_model,
+            "machine_model_ids": selected_machine_model_ids,
+            "machine_model_names": selected_machine_model_names,
             "user_id": user_id,
             "request_id": request_id,
         }
@@ -5450,37 +5552,13 @@ async def upload_document(
             detail=f"File too large (>100MB). File size: {file_size / (1024*1024):.2f}MB"
         )
     
-    # Validate machine model exists (case-insensitive)
-    # Normalize machine_model to match MachineModel table format (uppercase, normalized spacing)
-    normalized_machine_model = " ".join(machine_model.strip().upper().split())
-    
-    machine_exists = await run_sync(
-        check_machine_model_exists,
-        normalized_machine_model,
-    )
-    if not machine_exists:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid machine model: {machine_model}"
-        )
-    
-    # Get machine model ID for logging
-    from .utils.db import MachineModel
-    machine_model_obj = None
-    try:
-        with SessionLocal() as session:
-            machine_model_obj = session.query(MachineModel).filter(
-                MachineModel.name == normalized_machine_model
-            ).first()
-    except Exception:
-        pass  # Ignore errors, just log what we have
-    
     # Log machine model validation
     logger.info(
         {
             "event": "document_upload_machine_model_validated",
             "machine_model_name": machine_model,
-            "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+            "machine_model_ids": selected_machine_model_ids,
+            "machine_model_names": selected_machine_model_names,
             "filename": file.filename,
             "request_id": request_id,
         }
@@ -5492,7 +5570,7 @@ async def upload_document(
         level="info",
         user_id=user_id,
         role=user_role,
-        metadata={"filename": file.filename, "machine_model": machine_model},
+        metadata={"filename": file.filename, "machine_model_ids": selected_machine_model_ids, "machine_model_names": selected_machine_model_names},
         request=http_request,
     )
     
@@ -5516,14 +5594,25 @@ async def upload_document(
             """Handle entire upload transaction: DB flush -> GCS upload -> DB commit."""
             session = SessionLocal()
             try:
-                from backend.utils.db import DocumentIngestionMetadata, Document
+                import json as _json
+                from backend.utils.db import DocumentIngestionMetadata, Document, MachineModel
                 from backend.utils.gcs_client import upload_bytes, get_gcs_client, delete_object, blob_exists, parse_gcs_path
+
+                # Legacy string field for backwards compatibility
+                # Document.machine_model is a string column; it historically held a single name,
+                # and sometimes a JSON array string. Keep it populated for now.
+                legacy_machine_model_str = (
+                    selected_machine_model_names[0]
+                    if len(selected_machine_model_names) == 1
+                    else _json.dumps(selected_machine_model_names)
+                )
                 
                 # Step 1: Create metadata record and flush (get ID without committing)
                 metadata = DocumentIngestionMetadata(
                     id=metadata_id,
                     filename=file.filename,
-                    machine_model=normalized_machine_model,
+                    # Keep a single string here for compatibility (non-null column)
+                    machine_model=selected_machine_model_names[0] if selected_machine_model_names else "",
                     status="PENDING_INGESTION",
                     description=description,
                     file_path=None,  # Will be set after GCS upload succeeds
@@ -5654,7 +5743,7 @@ async def upload_document(
                     # Update existing record
                     doc_record.gcs_path = gcs_path  # Always set from successful GCS upload
                     doc_record.file_size_bytes = file_size
-                    doc_record.machine_model = normalized_machine_model
+                    doc_record.machine_model = legacy_machine_model_str
                     doc_record.updated_at = datetime.utcnow()
                     # Ensure is_active is True for re-uploads
                     if not doc_record.is_active:
@@ -5665,11 +5754,20 @@ async def upload_document(
                         file_name=file.filename,
                         gcs_path=gcs_path,  # REQUIRED - must not be None
                         file_size_bytes=file_size,
-                        machine_model=normalized_machine_model,
+                        machine_model=legacy_machine_model_str,
                         is_active=True,
                         requires_admin_review=False,  # No review needed if GCS upload succeeded
                     )
                     session.add(doc_record)
+
+                # Canonical machine model mapping (many-to-many)
+                if selected_machine_model_ids:
+                    mm_rows = session.query(MachineModel).filter(MachineModel.id.in_(selected_machine_model_ids)).all()
+                    found_ids = {int(m.id) for m in mm_rows}
+                    missing = [i for i in selected_machine_model_ids if int(i) not in found_ids]
+                    if missing:
+                        raise ValueError(f"Invalid machine_model_ids (not found): {missing}")
+                    doc_record.machine_models = mm_rows
                 
                 # Final validation: Ensure both records have GCS paths before commit
                 if not metadata.file_path or not metadata.file_path.startswith('gs://'):
@@ -5695,8 +5793,11 @@ async def upload_document(
                 
                 return {
                     "id": metadata.id,
+                    "document_id": doc_record.id,
                     "filename": metadata.filename,
                     "machine_model": metadata.machine_model,
+                    "machine_model_ids": selected_machine_model_ids,
+                    "machine_model_names": selected_machine_model_names,
                     "status": metadata.status,
                     "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
                 }
@@ -5828,7 +5929,8 @@ async def upload_document(
                 "document_id": metadata_result["id"],
                 "filename": metadata_result["filename"],
                 "status": metadata_result["status"],
-                "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+                "machine_model_ids": selected_machine_model_ids,
+                "machine_model_names": selected_machine_model_names,
                 "request_id": request_id,
             }
         )
@@ -5841,7 +5943,9 @@ async def upload_document(
             role=user_role,
             metadata={
                 "filename": file.filename,
-                "machine_model": machine_model,
+                "machine_model": machine_model,  # legacy (may be None)
+                "machine_model_ids": selected_machine_model_ids,
+                "machine_model_names": selected_machine_model_names,
                 "metadata_id": metadata_result["id"],
                 "status": "PENDING_INGESTION",
             },
@@ -5858,7 +5962,8 @@ async def upload_document(
                 "event": "document_ingestion_enqueued",
                 "document_id": metadata_result["id"],
                 "filename": metadata_result["filename"],
-                "machine_model_id": machine_model_obj.id if machine_model_obj else None,
+                "machine_model_ids": selected_machine_model_ids,
+                "machine_model_names": selected_machine_model_names,
                 "request_id": request_id,
                 "note": "Upload endpoint always ingests - no gates, single-document ingestion always allowed",
             }
