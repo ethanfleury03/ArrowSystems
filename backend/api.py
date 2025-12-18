@@ -166,6 +166,102 @@ rag_state = {
     "last_error": None,
 }
 
+# Separate download state for index artifacts (GCS -> local dir)
+rag_download_state = {
+    "status": "not_started",  # "not_started" | "downloading" | "ready" | "error"
+    "last_error": None,
+}
+rag_download_lock: asyncio.Lock = asyncio.Lock()
+
+
+def _get_rag_storage_path_fallback() -> str:
+    """
+    Single source of truth for where we expect the local index directory to be.
+    This MUST match /rag/status behavior.
+    """
+    return (
+        getattr(app.state, "rag_storage_path", None)
+        or getattr(settings, "RAG_INDEX_LOCAL_DIR", None)
+        or "/tmp/latest_model"
+    )
+
+
+def _missing_index_files(storage_path: str) -> list[str]:
+    required = ["docstore.json", "index_store.json", "default__vector_store.json"]
+    missing: list[str] = []
+    for f in required:
+        try:
+            if not os.path.exists(os.path.join(storage_path, f)):
+                missing.append(f)
+        except Exception:
+            missing.append(f)
+    return missing
+
+
+async def ensure_rag_index_downloaded() -> bool:
+    """
+    Ensure index artifacts exist locally in production.
+    Runs at most one download concurrently per process.
+    """
+    global rag_download_state
+
+    storage_path = _get_rag_storage_path_fallback()
+    if not storage_path:
+        rag_download_state["status"] = "error"
+        rag_download_state["last_error"] = "No storage_path configured"
+        return False
+
+    # If files already present, we're done
+    if not _missing_index_files(storage_path):
+        rag_download_state["status"] = "ready"
+        rag_download_state["last_error"] = None
+        return True
+
+    # Only attempt downloads in production/cloud
+    if not settings.is_prod:
+        rag_download_state["status"] = "error"
+        rag_download_state["last_error"] = f"Index files missing in dev and no automatic download is configured (storage_path={storage_path})"
+        return False
+
+    async with rag_download_lock:
+        # Re-check after acquiring lock
+        if not _missing_index_files(storage_path):
+            rag_download_state["status"] = "ready"
+            rag_download_state["last_error"] = None
+            return True
+
+        rag_download_state["status"] = "downloading"
+        rag_download_state["last_error"] = None
+
+        try:
+            from backend.rag.startup_downloader import download_index_from_gcs, get_last_download_error
+            ok = await asyncio.to_thread(download_index_from_gcs)
+            if not ok:
+                err = get_last_download_error() or "Index download failed (unknown)"
+                rag_download_state["status"] = "error"
+                rag_download_state["last_error"] = err
+                # Preserve error for other endpoints
+                app.state.rag_last_error = err
+                rag_state["status"] = "error"
+                rag_state["last_error"] = err
+                return False
+
+            # Success: set storage path consistently and mark ready
+            app.state.rag_storage_path = storage_path
+            rag_download_state["status"] = "ready"
+            rag_download_state["last_error"] = None
+            app.state.rag_last_error = None
+            return True
+        except Exception as e:
+            err = f"{type(e).__name__}: {str(e)}"
+            rag_download_state["status"] = "error"
+            rag_download_state["last_error"] = err
+            app.state.rag_last_error = err
+            rag_state["status"] = "error"
+            rag_state["last_error"] = err
+            logger.error("rag_index_download_exception", error=err, exc_info=True)
+            return False
+
 # Global DB state for retryable initialization (prevents permanent "stuck initializing")
 db_state = {
     "status": "not_started",  # "not_started" | "initializing" | "ready" | "error"
@@ -568,11 +664,7 @@ async def start_rag_init_if_needed():
     
     # Get storage path
     # Default to configured local dir (Cloud Run-safe), fallback to legacy /app/latest_model
-    storage_path = (
-        getattr(app.state, "rag_storage_path", None)
-        or getattr(settings, "RAG_INDEX_LOCAL_DIR", None)
-        or "/app/latest_model"
-    )
+    storage_path = _get_rag_storage_path_fallback()
     
     # Start background task
     async def _init_rag_background():
@@ -891,7 +983,10 @@ async def startup_event():
                               message=f"RAG storage path resolved: {storage_path} (absolute: {storage_path_abs.is_absolute()})")
             
             # Store storage path in app state EARLY so other background init uses the same directory
-            app.state.rag_storage_path = storage_path
+            # Also store a last_error slot for observability
+            app.state.rag_storage_path = storage_path or getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+            if not hasattr(app.state, "rag_last_error"):
+                app.state.rag_last_error = None
 
             # Create pipeline instance
             cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
@@ -902,23 +997,20 @@ async def startup_event():
             rag_state["last_error"] = None
             
             # Verify required index files exist before attempting initialization
-            if storage_path:
+            if app.state.rag_storage_path:
                 print("[RAG] Checking if index files exist...", flush=True)
-                required_files = ["docstore.json", "index_store.json", "default__vector_store.json"]
-                index_files_exist = all(
-                    os.path.exists(os.path.join(storage_path, filename))
-                    for filename in required_files
-                )
+                missing = _missing_index_files(app.state.rag_storage_path)
+                index_files_exist = len(missing) == 0
                 
                 if not index_files_exist:
-                    missing = [f for f in required_files if not os.path.exists(os.path.join(storage_path, f))]
                     print(f"[RAG] ❌ Missing required files: {missing}", flush=True)
                     logger.error("rag_startup_missing_files", 
-                                storage_path=storage_path,
+                                storage_path=app.state.rag_storage_path,
                                 missing_files=missing,
                                 message="Required index files missing after GCS download")
                     rag_state["status"] = "error"
                     rag_state["last_error"] = f"Missing required files: {missing}"
+                    app.state.rag_last_error = rag_state["last_error"]
                     app.state.rag_enabled = False
                 else:
                     print(f"[RAG] ✅ All required files present, starting background initialization...", flush=True)
@@ -948,10 +1040,15 @@ async def startup_event():
             print(f"[RAG] ❌ RAG startup failed: {type(e).__name__}: {str(e)}", flush=True)
             import traceback
             traceback.print_exc()
+            error_msg = f"{type(e).__name__}: {str(e)}"
             storage_path = None
             rag_pipeline = None
-            app.state.rag_storage_path = None
+            # Do NOT clear storage path in prod; keep the configured fallback so /query can self-heal
+            app.state.rag_storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+            app.state.rag_last_error = error_msg
             app.state.rag_enabled = False
+            rag_state["status"] = "error"
+            rag_state["last_error"] = error_msg
         
         # Set RAG enabled flag on app state
         if not hasattr(app.state, 'rag_enabled'):
@@ -1361,6 +1458,17 @@ async def rag_status_public():
     
     global rag_pipeline, app, rag_state
     
+    # Ensure storage path is always set consistently
+    if getattr(app.state, "rag_storage_path", None) is None:
+        app.state.rag_storage_path = _get_rag_storage_path_fallback()
+
+    # In production: if index files are missing, kick off a background download (non-blocking)
+    storage_path_for_check = _get_rag_storage_path_fallback()
+    missing_files = _missing_index_files(storage_path_for_check) if storage_path_for_check else []
+    if settings.is_prod and storage_path_for_check and missing_files:
+        # fire-and-forget; state machine prevents duplication
+        asyncio.create_task(ensure_rag_index_downloaded())
+
     # Trigger background initialization if needed (non-blocking)
     await start_rag_init_if_needed()
     
@@ -1369,11 +1477,7 @@ async def rag_status_public():
     last_error = rag_state["last_error"]
     
     # Storage path we expect the index to be in
-    storage_path = (
-        getattr(app.state, "rag_storage_path", None)
-        or getattr(settings, "RAG_INDEX_LOCAL_DIR", None)
-        or "/app/latest_model"
-    )
+    storage_path = _get_rag_storage_path_fallback()
     index_dir_exists = bool(storage_path and os.path.exists(storage_path))
     
     # Map rag_state status to response format
@@ -1410,8 +1514,11 @@ async def rag_status_public():
         "rag_pipeline_initialized": initialized,
         "index_dir_exists": index_dir_exists,
         "storage_dir": str(storage_path) if storage_path else None,
+        "missing_files": missing_files,
+        "download_status": rag_download_state.get("status"),
+        "download_last_error": rag_download_state.get("last_error") or getattr(app.state, "rag_last_error", None),
         "initializing": initializing,
-        "last_error": last_error,
+        "last_error": last_error or getattr(app.state, "rag_last_error", None),
         "details": details,
     }
 
@@ -2298,9 +2405,12 @@ async def query_knowledge_base(request: Request):
     global rag_pipeline, db_manager, saved_response_manager
     
     # Lazy initialization: ensure RAG is initialized before processing query
-    storage_path = getattr(app.state, 'rag_storage_path', None)
-    
-    if storage_path is None:
+    # IMPORTANT: Do not rely solely on app.state.rag_storage_path; use the same fallback chain as /rag/status.
+    storage_path = getattr(app.state, 'rag_storage_path', None) or _get_rag_storage_path_fallback()
+    if getattr(app.state, "rag_storage_path", None) is None:
+        app.state.rag_storage_path = storage_path
+
+    if not storage_path:
         logger.warning("rag_query_no_storage_path", path="/query")
         raise HTTPException(
             status_code=503,
@@ -2309,9 +2419,29 @@ async def query_knowledge_base(request: Request):
                 "message": "RAG storage path is not configured.",
                 "rag_status": {
                     "storage_dir": None,
-                    "last_error": "RAG storage path is not configured",
+                    "last_error": getattr(app.state, "rag_last_error", None) or "RAG storage path is not configured",
                     "initialized": False,
                     "initializing": False,
+                },
+            },
+        )
+
+    # If index files are missing in prod, kick off download and return warming
+    missing = _missing_index_files(storage_path)
+    if settings.is_prod and missing:
+        asyncio.create_task(ensure_rag_index_downloaded())
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "RAG_WARMING",
+                "message": "Document search is warming up (downloading index). Please retry shortly.",
+                "rag_status": {
+                    "storage_dir": str(storage_path),
+                    "missing_files": missing,
+                    "download_status": rag_download_state.get("status"),
+                    "last_error": rag_download_state.get("last_error") or getattr(app.state, "rag_last_error", None),
+                    "initialized": False,
+                    "initializing": True,
                 },
             },
         )
