@@ -84,7 +84,7 @@ def test_chunking_success_transition(sample_metadata, temp_dir):
         mock_loader_class.return_value = mock_loader
         
         # Mock document loading
-        from llama_index.core import Document
+        from llama_index.core.schema import Document
         mock_doc = Document(
             text="This is a test document with some content.",
             metadata={"file_name": "test.pdf", "file_type": "pdf"}
@@ -185,7 +185,7 @@ def test_chunking_chunking_status_set(sample_metadata, temp_dir):
         mock_loader._load_markdown = Mock(return_value=[])
         mock_loader_class.return_value = mock_loader
         
-        from llama_index.core import Document
+        from llama_index.core.schema import Document
         mock_doc = Document(
             text="Test content",
             metadata={"file_name": "test.pdf", "file_type": "pdf"}

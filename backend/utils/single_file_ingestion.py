@@ -9,7 +9,8 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
-from llama_index.core import Document, VectorStoreIndex, load_index_from_storage, StorageContext
+from llama_index.core import VectorStoreIndex, load_index_from_storage, StorageContext
+from llama_index.core.schema import Document
 from llama_index.core.schema import TextNode
 
 from ..ingest import (
