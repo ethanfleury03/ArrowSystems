@@ -159,30 +159,7 @@ export default function AdminDocumentsPage() {
 
   const [roleForPage, setRoleForPage] = useState<string | null>(null);
 
-  const requireAdminOrExplain = useCallback(async (): Promise<boolean> => {
-    // Extra safety: admin pages should be gated by layout, but don't assume.
-    try {
-      const meResp = await fetch(`/api/auth/me`, { credentials: "include" });
-      const body = await readResponseBody(meResp);
-      if (!meResp.ok) {
-        const msg =
-          body.isJson ? extractApiError(body.json) : `Not authenticated (${meResp.status}): ${body.text || body.contentType}`;
-        showToast(msg || "Not authenticated", "error");
-        return false;
-      }
-      const role = body.isJson ? (body.json as any)?.role : null;
-      if (role !== "ADMIN") {
-        showToast("Admin only: Diagnostics are restricted to ADMIN users.", "error");
-        return false;
-      }
-      return true;
-    } catch (err) {
-      showToast("Admin only: Unable to verify permissions.", "error");
-      return false;
-    }
-  }, [extractApiError, readResponseBody, showToast]);
-
-  const extractApiError = (detail: unknown): string | null => {
+  const extractApiError = useCallback(function extractApiErrorInner(detail: unknown): string | null {
     if (!detail) return null;
     if (typeof detail === "string") return detail;
     if (Array.isArray(detail)) {
@@ -210,7 +187,7 @@ export default function AdminDocumentsPage() {
     if (typeof detail === "object") {
       const nested = (detail as Record<string, unknown>).detail;
       if (nested && nested !== detail) {
-        return extractApiError(nested);
+        return extractApiErrorInner(nested);
       }
       try {
         return JSON.stringify(detail);
@@ -219,7 +196,30 @@ export default function AdminDocumentsPage() {
       }
     }
     return String(detail);
-  };
+  }, []);
+
+  const requireAdminOrExplain = useCallback(async (): Promise<boolean> => {
+    // Extra safety: admin pages should be gated by layout, but don't assume.
+    try {
+      const meResp = await fetch(`/api/auth/me`, { credentials: "include" });
+      const body = await readResponseBody(meResp);
+      if (!meResp.ok) {
+        const msg =
+          body.isJson ? extractApiError(body.json) : `Not authenticated (${meResp.status}): ${body.text || body.contentType}`;
+        showToast(msg || "Not authenticated", "error");
+        return false;
+      }
+      const role = body.isJson ? (body.json as any)?.role : null;
+      if (role !== "ADMIN") {
+        showToast("Admin only: Diagnostics are restricted to ADMIN users.", "error");
+        return false;
+      }
+      return true;
+    } catch (err) {
+      showToast("Admin only: Unable to verify permissions.", "error");
+      return false;
+    }
+  }, [extractApiError, readResponseBody, showToast]);
 
   const fetchAllowedMachineModels = useCallback(
     async () => {
