@@ -31,6 +31,9 @@ def normalize_gcs_prefix(prefix: Optional[str]) -> str:
         return ""
     if p.upper() == "ROOT":
         return ""
+    # Treat "/" (or any all-slash string) as bucket root
+    if p.strip("/") == "":
+        return ""
     p = p.lstrip("/")
     return p if p.endswith("/") else f"{p}/"
 

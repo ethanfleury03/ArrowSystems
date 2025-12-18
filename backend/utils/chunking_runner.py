@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from sqlalchemy.orm import Session
-from llama_index.core import Document
+from llama_index.core.schema import Document
 from llama_index.core.schema import TextNode
 
 from backend.utils.db import SessionLocal, DocumentIngestionMetadata
