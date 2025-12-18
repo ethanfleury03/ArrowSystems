@@ -2868,6 +2868,13 @@ def _resolve_authoritative_doc_metadata(
     machine_model_ids: list[str] = []
     ingestion_metadata_id: str | None = None
 
+    # Cache whether the join table exists in this DB (avoids repeating to_regclass on every doc)
+    global _dmm_table_exists_cache  # type: ignore
+    try:
+        _dmm_table_exists_cache  # type: ignore
+    except Exception:
+        _dmm_table_exists_cache = None  # type: ignore
+
     # Parse metadata_id from conventional object structure: <prefix><metadata_id>/<filename>
     rel = object_name
     if docs_prefix and rel.startswith(docs_prefix):
@@ -2888,7 +2895,37 @@ def _resolve_authoritative_doc_metadata(
             if doc and doc.id is not None:
                 # Note: DB doc.id is integer in this repo; keep as string without enforcing a specific shape.
                 db_doc_id = str(doc.id)
-                machine_model_names = _parse_machine_models(doc.machine_model)
+
+                # Preferred: read canonical mappings from join table document_machine_models (if it exists)
+                if _dmm_table_exists_cache is None:
+                    try:
+                        exists_row = session.execute(text("SELECT to_regclass('public.document_machine_models')")).scalar()
+                        _dmm_table_exists_cache = bool(exists_row)
+                    except Exception:
+                        _dmm_table_exists_cache = False
+
+                if _dmm_table_exists_cache:
+                    try:
+                        rows = session.execute(
+                            text(
+                                """
+                                SELECT mm.id AS id, mm.name AS name
+                                FROM public.document_machine_models dmm
+                                JOIN public.machine_models mm ON mm.id = dmm.machine_model_id
+                                WHERE dmm.document_id = :doc_id
+                                """
+                            ),
+                            {"doc_id": int(doc.id)},
+                        ).fetchall()
+                        machine_model_ids = [str(r.id) for r in rows if getattr(r, "id", None) is not None]
+                        machine_model_names = [str(r.name).strip() for r in rows if getattr(r, "name", None)]
+                    except Exception as e:
+                        # If the join table is missing/misconfigured, fall back to legacy field
+                        logger.warning(f"Failed to query document_machine_models for document_id={doc.id}: {e}")
+                        machine_model_names = _parse_machine_models(doc.machine_model)
+                else:
+                    # Legacy fallback
+                    machine_model_names = _parse_machine_models(doc.machine_model)
 
             # If machine models missing, try ingestion metadata
             meta = None
@@ -2901,7 +2938,7 @@ def _resolve_authoritative_doc_metadata(
                 machine_model_names = _parse_machine_models(meta.machine_model)
 
             # Best-effort: resolve machine model IDs from the registry table using names
-            if machine_model_names:
+            if machine_model_names and not machine_model_ids:
                 rows = session.query(MachineModel).filter(MachineModel.name.in_(machine_model_names)).all()
                 machine_model_ids = [str(r.id) for r in rows if getattr(r, "id", None) is not None]
         except Exception as e:
