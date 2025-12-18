@@ -139,6 +139,7 @@ def download_index_from_gcs() -> bool:
     required_success: list[str] = []
     required_failures: list[str] = []
     optional_results: dict[str, str] = {}
+    download_errors: dict[str, str] = {}
 
     # List objects under prefix (helps debug prefix mismatch)
     objects_under_prefix: list[str] = []
@@ -180,6 +181,7 @@ def download_index_from_gcs() -> bool:
             return True
         except Exception as e:
             logger.error("[RAG] Download failed", filename=filename, gcs_path=gcs_obj, error=str(e), exc_info=True)
+            download_errors.setdefault(filename, f"{type(e).__name__}: {str(e)}")
             return False
 
     # Download required files
@@ -207,6 +209,7 @@ def download_index_from_gcs() -> bool:
 
     # Validate results
     if required_failures:
+        failure_reasons = {f: download_errors.get(f) for f in required_failures if download_errors.get(f)}
         logger.error(
             "[RAG] Index download failed — missing required files",
             bucket=bucket_name,
@@ -214,15 +217,17 @@ def download_index_from_gcs() -> bool:
             prefixes_tried=prefixes_to_try,
             required_failures=required_failures,
             required_success=required_success,
+            failure_reasons=failure_reasons,
             objects_under_prefix_count=len(objects_under_prefix),
             objects_under_prefix_sample=objects_under_prefix[:25],
             local_dir=str(local_path),
             message=f"Failed to download {len(required_failures)} required file(s): {', '.join(required_failures)}",
         )
         _last_download_error = (
-            f"Missing required index files after download. "
+            "Index download failed for required files. "
             f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} missing={required_failures} "
-            f"local_dir={str(local_path)}"
+            f"local_dir={str(local_path)} "
+            f"sample_errors={failure_reasons}"
         )
         return False
 

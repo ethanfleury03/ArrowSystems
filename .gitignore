@@ -97,3 +97,6 @@ rag_app.db
 
 compute-key.json
 deploy-key.json
+
+# Cloud Run service dumps (contain secrets like DATABASE_URL / API keys)
+arrow-rag-backend.json
