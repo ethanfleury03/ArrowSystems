@@ -847,6 +847,7 @@ class SmartChunkSplitter:
         This is a simplified version that processes documents one by one.
         """
         all_nodes = []
+        logged_sources: set[str] = set()
         
         for doc in tqdm(documents, desc="Splitting documents", disable=not show_progress):
             try:
@@ -905,6 +906,23 @@ class SmartChunkSplitter:
                             }
                         )
                         all_nodes.append(node)
+                        # Minimal targeted log: first node per unique source_gcs
+                        try:
+                            src = (node.metadata or {}).get("source_gcs") or (node.metadata or {}).get("gcs_path")
+                            if isinstance(src, str) and src and src not in logged_sources:
+                                logged_sources.add(src)
+                                logger.info(
+                                    {
+                                        "event": "chunk_metadata_sample",
+                                        "source_gcs": src,
+                                        "document_id": (node.metadata or {}).get("document_id"),
+                                        "machine_model": (node.metadata or {}).get("machine_model"),
+                                        "machine_model_ids": (node.metadata or {}).get("machine_model_ids"),
+                                        "machine_model_names": (node.metadata or {}).get("machine_model_names"),
+                                    }
+                                )
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.error(f"Error creating node for {doc_name}, chunk {chunk_idx}: {e}")
                         continue
@@ -1190,6 +1208,7 @@ class DocumentLoader:
                     machine_model_names = []
                 machine_model_names = [m for m in machine_model_names if isinstance(m, str) and m.strip()]
 
+                # Normalize machine_model_ids to list[int] for end-to-end consistency.
                 if isinstance(machine_model_ids, str):
                     try:
                         machine_model_ids = json.loads(machine_model_ids)
@@ -1197,7 +1216,25 @@ class DocumentLoader:
                         machine_model_ids = [m.strip() for m in machine_model_ids.split(",") if m.strip()]
                 if not isinstance(machine_model_ids, list):
                     machine_model_ids = []
-                machine_model_ids = [m for m in machine_model_ids if isinstance(m, str) and m.strip()]
+                normalized_ids: list[int] = []
+                seen_ids: set[int] = set()
+                for v in machine_model_ids:
+                    if isinstance(v, bool) or v is None:
+                        continue
+                    if isinstance(v, int):
+                        if v not in seen_ids:
+                            normalized_ids.append(v)
+                            seen_ids.add(v)
+                        continue
+                    if isinstance(v, str) and v.strip():
+                        try:
+                            iv = int(v.strip())
+                        except Exception:
+                            continue
+                        if iv not in seen_ids:
+                            normalized_ids.append(iv)
+                            seen_ids.add(iv)
+                machine_model_ids = normalized_ids
 
                 if document_id is None:
                     logger.warning(
@@ -1229,17 +1266,18 @@ class DocumentLoader:
                 if file_ext == ".pdf":
                     pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
                     for doc in pdf_docs:
-                        doc.metadata = {**base_meta, **(doc.metadata or {})}
+                        # Authoritative metadata (document_id/source_gcs/machine_model*) must win.
+                        doc.metadata = {**(doc.metadata or {}), **base_meta}
                     documents.extend(pdf_docs)
                 elif file_ext == ".docx" and DOCX_AVAILABLE:
                     docx_docs = self._load_docx(file_path)
                     for doc in docx_docs:
-                        doc.metadata = {**base_meta, **(doc.metadata or {})}
+                        doc.metadata = {**(doc.metadata or {}), **base_meta}
                     documents.extend(docx_docs)
                 elif file_ext in {".md", ".markdown"}:
                     md_docs = self._load_markdown(file_path)
                     for doc in md_docs:
-                        doc.metadata = {**base_meta, **(doc.metadata or {})}
+                        doc.metadata = {**(doc.metadata or {}), **base_meta}
                     documents.extend(md_docs)
             except Exception as e:
                 logger.error(f"Error loading manifest entry: {e}", exc_info=True)
@@ -2241,9 +2279,28 @@ class TechnicalRAGPipeline:
                             mm_names = []
                         if not isinstance(mm_ids, list):
                             mm_ids = []
+                        # Normalize ids to list[int] (manifest may contain ints already)
+                        mm_ids_int: list[int] = []
+                        seen: set[int] = set()
+                        for v in mm_ids:
+                            if isinstance(v, bool) or v is None:
+                                continue
+                            if isinstance(v, int):
+                                if v not in seen:
+                                    mm_ids_int.append(v)
+                                    seen.add(v)
+                                continue
+                            if isinstance(v, str) and v.strip():
+                                try:
+                                    iv = int(v.strip())
+                                except Exception:
+                                    continue
+                                if iv not in seen:
+                                    mm_ids_int.append(iv)
+                                    seen.add(iv)
                         mapping[str(Path(lp).resolve())] = {
                             "document_id": str(entry.get("document_id")) if entry.get("document_id") is not None else "0",
-                            "machine_model_ids": [str(x) for x in mm_ids if isinstance(x, str) and x.strip()],
+                            "machine_model_ids": mm_ids_int,
                             "machine_model_names": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
                             "machine_models": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
                             "source_gcs": entry.get("source_gcs"),
@@ -2865,7 +2922,7 @@ def _resolve_authoritative_doc_metadata(
 
     db_doc_id: str | None = None
     machine_model_names: list[str] = []
-    machine_model_ids: list[str] = []
+    machine_model_ids: list[int] = []
     ingestion_metadata_id: str | None = None
 
     # Cache whether the join table exists in this DB (avoids repeating to_regclass on every doc)
@@ -2917,7 +2974,7 @@ def _resolve_authoritative_doc_metadata(
                             ),
                             {"doc_id": int(doc.id)},
                         ).fetchall()
-                        machine_model_ids = [str(r.id) for r in rows if getattr(r, "id", None) is not None]
+                        machine_model_ids = [int(r.id) for r in rows if getattr(r, "id", None) is not None]
                         machine_model_names = [str(r.name).strip() for r in rows if getattr(r, "name", None)]
                     except Exception as e:
                         # If the join table is missing/misconfigured, fall back to legacy field
@@ -2940,7 +2997,7 @@ def _resolve_authoritative_doc_metadata(
             # Best-effort: resolve machine model IDs from the registry table using names
             if machine_model_names and not machine_model_ids:
                 rows = session.query(MachineModel).filter(MachineModel.name.in_(machine_model_names)).all()
-                machine_model_ids = [str(r.id) for r in rows if getattr(r, "id", None) is not None]
+                machine_model_ids = [int(r.id) for r in rows if getattr(r, "id", None) is not None]
         except Exception as e:
             logger.warning(f"DB lookup failed for {source_gcs}: {e}")
 
@@ -2956,7 +3013,14 @@ def _resolve_authoritative_doc_metadata(
 
         if not machine_model_ids:
             raw_ids = object_custom_metadata.get("machine_model_ids") or object_custom_metadata.get("machineModelIds")
-            machine_model_ids = _parse_machine_models(raw_ids)
+            parsed = _parse_machine_models(raw_ids)
+            out_ids: list[int] = []
+            for v in parsed:
+                try:
+                    out_ids.append(int(str(v).strip()))
+                except Exception:
+                    continue
+            machine_model_ids = out_ids
 
         if db_doc_id is None:
             raw_doc_id = object_custom_metadata.get("document_id") or object_custom_metadata.get("documentId")
@@ -3016,6 +3080,7 @@ def stage_gcs_documents_to_workdir(
         session = None
 
     entries: list[dict[str, Any]] = []
+    sample_logged = 0
     try:
         for b in tqdm(blobs, desc="Staging GCS documents"):
             object_name = b.name
@@ -3042,6 +3107,18 @@ def stage_gcs_documents_to_workdir(
                 object_name=object_name,
                 object_custom_metadata=custom_md,
             )
+            if sample_logged < 3:
+                logger.info(
+                    {
+                        "event": "ingest_resolved_doc_metadata_sample",
+                        "document_id": resolved.get("document_id"),
+                        "ingestion_metadata_id": resolved.get("ingestion_metadata_id"),
+                        "source_gcs": resolved.get("source_gcs"),
+                        "machine_model_ids": resolved.get("machine_model_ids"),
+                        "machine_model_names": resolved.get("machine_model_names"),
+                    }
+                )
+                sample_logged += 1
 
             # Idempotent download: skip if local file exists and size matches
             should_download = True
@@ -3168,7 +3245,7 @@ def verify_local_index_artifact(index_dir: Path) -> dict[str, Any]:
                 invalid_counts["machine_model_names"] += 1
         if "machine_model_ids" in meta:
             mid = meta.get("machine_model_ids")
-            if not isinstance(mid, list) or any((not isinstance(x, str)) for x in mid):
+            if not isinstance(mid, list) or any((not isinstance(x, int) or isinstance(x, bool)) for x in mid):
                 invalid_counts["machine_model_ids"] += 1
         if "machine_model" in meta:
             m = meta.get("machine_model")

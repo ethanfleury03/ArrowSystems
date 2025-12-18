@@ -87,6 +87,11 @@ def _is_list_of_str(x: Any) -> bool:
     return isinstance(x, list) and all(isinstance(v, str) for v in x)
 
 
+def _is_list_of_int(x: Any) -> bool:
+    # bool is an int subclass; exclude it
+    return isinstance(x, list) and all(isinstance(v, int) and not isinstance(v, bool) for v in x)
+
+
 def main() -> None:
     workdir = _resolve_workdir()
     index_dir = _resolve_index_dir(workdir)
@@ -196,7 +201,8 @@ def main() -> None:
             invalid_total["machine_models"] += 1
         if not _is_list_of_str(meta.get("machine_model_names")):
             invalid_total["machine_model_names"] += 1
-        if not _is_list_of_str(meta.get("machine_model_ids")):
+        # machine_model_ids are now stored as list[int] for end-to-end consistency
+        if not _is_list_of_int(meta.get("machine_model_ids")):
             invalid_total["machine_model_ids"] += 1
         else:
             if len(meta.get("machine_model_ids") or []) > 0:
