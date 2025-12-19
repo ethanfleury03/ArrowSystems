@@ -1417,16 +1417,24 @@ async def healthz_check():
     Available at both /healthz and /api/healthz for compatibility.
     Use this for Cloud Run health checks and CI/CD pipelines.
     """
-    # Include index_ready status (read-only, no dependencies)
+    # Include index status (read-only, no dependencies)
+    index_status_str = "unknown"
+    index_ready = False
     try:
-        from backend.rag.index_state import get_index_state
-        index_state = get_index_state()
-        index_ready = index_state.get("ready", False) and index_state.get("phase") == "ready"
+        from backend.rag.index_manager import get_index_load_state
+        load_state = get_index_load_state()
+        state = load_state.get_state()
+        index_status_str = state.get("status", "unknown")
+        index_ready = state.get("status") == "ready"
     except Exception:
         # If state tracker fails, assume not ready (safe default)
-        index_ready = False
+        pass
     
-    return {"status": "ok", "index_ready": index_ready}
+    return {
+        "status": "ok",
+        "index_status": index_status_str,
+        "index_ready": index_ready,
+    }
 
 
 @app.get("/api/index_status")
@@ -2517,45 +2525,30 @@ async def query_knowledge_base(request: Request):
                 except Exception:
                     pass  # If wait fails, continue to return 503
             
-            # Still not ready - return 503 with status
+            # Still not ready - return 503 with structured error
+            error_detail = {
+                "error": "rag_index_not_loaded",
+                "status": state["status"],
+                "detail": state.get("error") if state["status"] == "failed" else None,
+            }
+            
             if state["status"] == "loading":
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "error": "index_not_ready",
-                        "code": "RAG_WARMING",
-                        "message": "Document search is warming up (index is loading). Please retry shortly.",
-                        "status": state["status"],
-                        "detail": "Index is currently loading. This should complete during startup on Cloud Run.",
-                    },
-                )
+                error_detail["detail"] = "Index is currently loading. This should complete during startup on Cloud Run."
             elif state["status"] == "failed":
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "error": "index_not_ready",
-                        "code": "RAG_NOT_INITIALIZED",
-                        "message": f"RAG index failed to load: {state.get('error')}",
-                        "status": state["status"],
-                        "detail": state.get("error"),
-                    },
-                )
+                # Include full error from load_state
+                error_detail["detail"] = state.get("error") or "Index loading failed (unknown error)"
             else:  # not_started
-                # Try to trigger load (but don't wait in request)
+                # Try to trigger load (but don't wait in request) - singleflight ensures only one attempt
                 try:
                     asyncio.create_task(load_state.ensure_loaded())
                 except Exception:
                     pass
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "error": "index_not_ready",
-                        "code": "RAG_NOT_INITIALIZED",
-                        "message": "RAG index loading has not started. Please retry shortly.",
-                        "status": state["status"],
-                        "detail": "Index loading should happen during startup. If this persists, check server logs.",
-                    },
-                )
+                error_detail["detail"] = "Index loading has not started. This should happen during startup. If this persists, check server logs."
+            
+            raise HTTPException(
+                status_code=503,
+                detail=error_detail,
+            )
         
         # Index is ready - ensure pipeline is available
         storage_path = getattr(app.state, 'rag_storage_path', None) or _get_rag_storage_path_fallback()

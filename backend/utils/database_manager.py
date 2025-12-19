@@ -14,8 +14,9 @@ import bcrypt
 
 from .db import SessionLocal, User, QueryHistory, Feedback, SavedResponse, init_db, DATABASE_URL
 from .db import run_sync
+from ..logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 T = TypeVar("T")
 
