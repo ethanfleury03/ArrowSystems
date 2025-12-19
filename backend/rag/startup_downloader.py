@@ -10,11 +10,16 @@ Key behaviors:
 """
 
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
 from backend.config.env import settings
 from backend.logging_config import get_logger
+from backend.rag.index_state import (
+    set_phase, reset_state, init_file_tracking,
+    update_file_start, update_file_success, update_file_error
+)
 
 logger = get_logger(__name__)
 
@@ -49,6 +54,34 @@ def _normalize_prefix(prefix: Optional[str]) -> str:
         return ""
     p = p.strip("/")
     return f"{p}/" if p else ""
+
+
+def _resolve_local_dir(requested_local_dir: str, gcs_prefix: str) -> Path:
+    """
+    Resolve the local directory path, avoiding double-prefix bugs.
+    
+    If RAG_INDEX_LOCAL_DIR already ends with the final segment of RAG_INDEX_GCS_PREFIX,
+    do NOT append it again.
+    
+    Example:
+    - RAG_INDEX_LOCAL_DIR=/tmp/latest_model, RAG_INDEX_GCS_PREFIX=latest_model/ -> /tmp/latest_model
+    - RAG_INDEX_LOCAL_DIR=/tmp, RAG_INDEX_GCS_PREFIX=latest_model/ -> /tmp/latest_model
+    """
+    requested = Path(requested_local_dir).resolve()
+    
+    # Extract the final segment from GCS prefix (e.g., "latest_model" from "latest_model/")
+    prefix_segment = gcs_prefix.rstrip("/").split("/")[-1] if gcs_prefix else None
+    
+    # If requested dir already ends with the prefix segment, use it as-is
+    if prefix_segment and requested.name == prefix_segment:
+        resolved = requested
+    elif prefix_segment:
+        # Append the prefix segment
+        resolved = requested / prefix_segment
+    else:
+        resolved = requested
+    
+    return _ensure_writable_dir(str(resolved))
 
 
 def _ensure_writable_dir(local_dir: str) -> Path:
@@ -106,14 +139,31 @@ def download_index_from_gcs() -> bool:
     except ImportError:
         logger.error("[RAG] google-cloud-storage not installed - cannot download index from GCS", exc_info=True)
         _last_download_error = "ImportError: google-cloud-storage not installed"
+        set_phase("error", error=_last_download_error)
         return False
 
     bucket_name = settings.RAG_INDEX_GCS_BUCKET
     index_prefix = _normalize_prefix(getattr(settings, "RAG_INDEX_GCS_PREFIX", "latest_model/"))
     requested_local_dir = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
-    local_path = _ensure_writable_dir(requested_local_dir)
-
+    
+    # Resolve local dir (avoid double-prefix)
+    local_path = _resolve_local_dir(requested_local_dir, index_prefix)
+    
+    # Log resolved paths for debugging
+    logger.info(
+        "[RAG] Resolved index paths",
+        bucket=bucket_name,
+        prefix=index_prefix,
+        requested_local_dir=requested_local_dir,
+        resolved_local_dir=str(local_path),
+        cloud_run=_is_cloud_run(),
+    )
     print(f"[RAG] Starting GCS index download from gs://{bucket_name}/{index_prefix} to {str(local_path)}...", flush=True)
+    
+    # Initialize state tracking
+    reset_state()
+    set_phase("downloading", bucket=bucket_name, prefix=index_prefix, local_dir=str(local_path))
+    
     logger.info(
         "[RAG] Starting GCS index download...",
         bucket=bucket_name,
@@ -130,9 +180,11 @@ def download_index_from_gcs() -> bool:
         print("[RAG] ✅ GCS client initialized successfully", flush=True)
         logger.info("[RAG] GCS client initialized", bucket=bucket_name)
     except Exception as e:
-        print(f"[RAG] ❌ Failed to initialize GCS client: {type(e).__name__}: {str(e)}", flush=True)
-        logger.error("[RAG] Failed to initialize GCS client", bucket=bucket_name, error=str(e), exc_info=True)
-        _last_download_error = f"{type(e).__name__}: {str(e)}"
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"[RAG] ❌ Failed to initialize GCS client: {error_msg}", flush=True)
+        logger.error("[RAG] Failed to initialize GCS client", bucket=bucket_name, error=error_msg, exc_info=True)
+        _last_download_error = error_msg
+        set_phase("error", error=error_msg)
         return False
 
     # Track download results
@@ -165,23 +217,90 @@ def download_index_from_gcs() -> bool:
     elif not index_prefix:
         prefixes_to_try = [""]
 
+    # Initialize file tracking
+    all_files = REQUIRED_FILES + OPTIONAL_FILES
+    init_file_tracking(all_files)
+
     def _download_one(prefix: str, filename: str) -> bool:
         gcs_obj = f"{prefix}{filename}" if prefix else filename
         local_file_path = local_path / filename
+        t0 = time.time()
+        
         try:
             blob = bucket.blob(gcs_obj)
-            # Avoid explicit exists() checks where possible; download will raise NotFound if missing.
-            print(f"[RAG] Downloading {filename} from gs://{bucket_name}/{gcs_obj}...", flush=True)
-            logger.info("[RAG] Downloading file...", filename=filename, gcs_path=gcs_obj)
+            
+            # Get blob size if available (for progress tracking)
+            try:
+                blob.reload()
+                size_bytes = blob.size or 0
+            except Exception:
+                size_bytes = 0
+            
+            update_file_start(filename, size_bytes)
+            
+            gcs_path = f"gs://{bucket_name}/{gcs_obj}"
+            print(f"[RAG] Downloading {filename} from {gcs_path}...", flush=True)
+            logger.info(
+                "[RAG] Downloading file...",
+                filename=filename,
+                gcs_path=gcs_path,
+                size_bytes=size_bytes,
+                attempt=1,
+            )
+            
             blob.download_to_filename(str(local_file_path))
+            
             if not local_file_path.exists():
-                logger.error("[RAG] Download completed but file not found locally", filename=filename, local_path=str(local_file_path))
+                elapsed = time.time() - t0
+                error_msg = "Download completed but file not found locally"
+                logger.error(
+                    "[RAG] Download completed but file not found locally",
+                    filename=filename,
+                    local_path=str(local_file_path),
+                    gcs_path=gcs_path,
+                    elapsed_s=elapsed,
+                )
+                update_file_error(filename, error_msg, elapsed)
                 return False
-            logger.info("[RAG] Downloaded file", filename=filename, gcs_path=gcs_obj, size=local_file_path.stat().st_size, local_path=str(local_file_path))
+            
+            # Get actual file size
+            actual_size = local_file_path.stat().st_size
+            elapsed = time.time() - t0
+            
+            update_file_success(filename, actual_size, elapsed)
+            
+            logger.info(
+                "[RAG] Downloaded file",
+                filename=filename,
+                gcs_path=gcs_path,
+                size_bytes=actual_size,
+                local_path=str(local_file_path),
+                elapsed_s=elapsed,
+            )
+            print(f"[RAG] ✅ Downloaded {filename} ({actual_size:,} bytes in {elapsed:.2f}s)", flush=True)
             return True
+            
         except Exception as e:
-            logger.error("[RAG] Download failed", filename=filename, gcs_path=gcs_obj, error=str(e), exc_info=True)
-            download_errors.setdefault(filename, f"{type(e).__name__}: {str(e)}")
+            elapsed = time.time() - t0
+            error_type = type(e).__name__
+            error_msg = str(e)
+            status_code = getattr(e, "status_code", None)
+            
+            full_error = f"{error_type}: {error_msg}"
+            if status_code:
+                full_error = f"{error_type} (status={status_code}): {error_msg}"
+            
+            logger.error(
+                "[RAG] Download failed",
+                filename=filename,
+                gcs_path=f"gs://{bucket_name}/{gcs_obj}",
+                error=full_error,
+                elapsed_s=elapsed,
+                status_code=status_code,
+                exc_info=True,
+            )
+            download_errors.setdefault(filename, full_error)
+            update_file_error(filename, full_error, elapsed)
             return False
 
     # Download required files
@@ -210,6 +329,12 @@ def download_index_from_gcs() -> bool:
     # Validate results
     if required_failures:
         failure_reasons = {f: download_errors.get(f) for f in required_failures if download_errors.get(f)}
+        error_msg = (
+            f"Index download failed for required files. "
+            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} missing={required_failures} "
+            f"local_dir={str(local_path)} "
+            f"sample_errors={failure_reasons}"
+        )
         logger.error(
             "[RAG] Index download failed — missing required files",
             bucket=bucket_name,
@@ -223,12 +348,8 @@ def download_index_from_gcs() -> bool:
             local_dir=str(local_path),
             message=f"Failed to download {len(required_failures)} required file(s): {', '.join(required_failures)}",
         )
-        _last_download_error = (
-            "Index download failed for required files. "
-            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} missing={required_failures} "
-            f"local_dir={str(local_path)} "
-            f"sample_errors={failure_reasons}"
-        )
+        _last_download_error = error_msg
+        set_phase("error", error=error_msg)
         return False
 
     # Verify all required files are present locally
@@ -238,6 +359,10 @@ def download_index_from_gcs() -> bool:
             local_listing = sorted([p.name for p in local_path.iterdir() if p.is_file()])
         except Exception:
             local_listing = []
+        error_msg = (
+            f"Validation failed: required files missing locally after download: {missing_locally}. "
+            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} local_dir={str(local_path)}"
+        )
         logger.error(
             "[RAG] Validation failed — files missing after download",
             missing_files=missing_locally,
@@ -248,17 +373,20 @@ def download_index_from_gcs() -> bool:
             prefixes_tried=prefixes_to_try,
             message=f"Files not found locally after download: {', '.join(missing_locally)}",
         )
-        _last_download_error = (
-            f"Validation failed: required files missing locally after download: {missing_locally}. "
-            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} local_dir={str(local_path)}"
-        )
+        _last_download_error = error_msg
+        set_phase("error", error=error_msg)
         return False
 
+    # Download complete - mark as ready
+    set_phase("ready")
+    
     logger.info(
         "[RAG] Index download and validation complete",
         local_dir=str(local_path),
         required_files=REQUIRED_FILES,
         optional_results=optional_results,
+        files_done=len(required_success),
+        files_total=len(REQUIRED_FILES),
         message="Ready to load RAG index",
     )
     print(f"[RAG] ✅ Index download and validation complete - downloaded {len(required_success)} required files", flush=True)

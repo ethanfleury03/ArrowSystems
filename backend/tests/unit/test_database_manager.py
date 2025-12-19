@@ -67,59 +67,97 @@ async def test_update_user_machine_models_parameter_handling():
         assert machine_model_ids_param.default is None or machine_model_ids_param.annotation is not None
 
 
-# Integration test template (requires test database setup):
-#
-# @pytest.mark.asyncio
-# async def test_update_user_machine_models_scenarios():
-#     """
-#     Integration test for update_user machine_models handling.
-#     
-#     Tests:
-#     a) payload omits machine_model_ids -> user.machine_models unchanged, no crash
-#     b) payload machine_model_ids=[] -> cleared
-#     c) payload machine_model_ids=[valid ids] -> set exactly
-#     d) payload contains invalid id -> 400 with clear error
-#     """
-#     async with get_test_db() as db:
-#         manager = DatabaseManager()
-#         
-#         # Create a test user
-#         user = await manager.create_user(
-#             email="test@example.com",
-#             name="Test User",
-#             role="ADMIN",
-#             password="testpass123"
-#         )
-#         user_id = user['id']
-#         
-#         # Test a: Omit machine_model_ids - should not crash
-#         updated = await manager.update_user(
-#             user_id,
-#             name="Updated Name"
-#             # machine_model_ids and machine_models both None
-#         )
-#         assert updated['name'] == "Updated Name"
-#         # machine_models should be unchanged (whatever was set before)
-#         
-#         # Test b: Empty list clears machine_models
-#         updated = await manager.update_user(
-#             user_id,
-#             machine_model_ids=[]
-#         )
-#         assert updated.get('machine_models') == []
-#         
-#         # Test c: Valid IDs set machine_models
-#         # (Would need to create test MachineModel records first)
-#         # updated = await manager.update_user(
-#         #     user_id,
-#         #     machine_model_ids=[1, 2]
-#         # )
-#         # assert len(updated.get('machine_models', [])) == 2
-#         
-#         # Test d: Invalid ID raises ValueError
-#         with pytest.raises(ValueError, match="Invalid machine model IDs"):
-#             await manager.update_user(
-#                 user_id,
-#                 machine_model_ids=[99999]  # Non-existent ID
-#             )
+@pytest.mark.asyncio
+async def test_update_user_machine_models_with_ids():
+    """
+    Integration test for update_user machine_models handling with machine_model_ids.
+    
+    Tests:
+    a) Create user + 2 machine models
+    b) Call update_user to add one model via ID
+    c) Verify relationship updated
+    d) Call update_user to set to empty list
+    e) Verify relationship cleared
+    f) Test invalid ID raises ValueError
+    
+    This test should fail on old code (session management bug) and pass after fix.
+    """
+    from backend.utils.db import SessionLocal, User, MachineModel
+    
+    manager = DatabaseManager()
+    
+    # Create test machine models in the database
+    with SessionLocal() as session:
+        # Create machine models
+        model1 = MachineModel(name="TestModel1", machine_kind="PRINT_ENGINE")
+        model2 = MachineModel(name="TestModel2", machine_kind="PRINT_ENGINE")
+        session.add(model1)
+        session.add(model2)
+        session.commit()
+        session.refresh(model1)
+        session.refresh(model2)
+        model1_id = model1.id
+        model2_id = model2.id
+    
+    try:
+        # Create a test user
+        user = await manager.create_user(
+            email="test_update_machines@example.com",
+            name="Test User",
+            role="ADMIN",
+            password="testpass123"
+        )
+        user_id = int(user['id'])
+        
+        # Verify initial state (should be empty list)
+        assert user.get('machine_models') == []
+        
+        # Test: Add one machine model via ID
+        updated = await manager.update_user(
+            user_id,
+            machine_model_ids=[model1_id]
+        )
+        assert updated['name'] == "Test User"
+        assert len(updated.get('machine_models', [])) == 1
+        assert "TestModel1" in updated.get('machine_models', [])
+        
+        # Test: Add second machine model (should replace, not append based on current implementation)
+        # Note: Current implementation replaces, so we need to include both IDs
+        updated = await manager.update_user(
+            user_id,
+            machine_model_ids=[model1_id, model2_id]
+        )
+        assert len(updated.get('machine_models', [])) == 2
+        assert "TestModel1" in updated.get('machine_models', [])
+        assert "TestModel2" in updated.get('machine_models', [])
+        
+        # Test: Clear machine models with empty list
+        updated = await manager.update_user(
+            user_id,
+            machine_model_ids=[]
+        )
+        assert updated.get('machine_models') == []
+        
+        # Test: Invalid ID raises ValueError
+        with pytest.raises(ValueError, match="Invalid machine model IDs"):
+            await manager.update_user(
+                user_id,
+                machine_model_ids=[99999]  # Non-existent ID
+            )
+        
+        # Test: Mix of valid and invalid IDs
+        with pytest.raises(ValueError, match="Invalid machine model IDs"):
+            await manager.update_user(
+                user_id,
+                machine_model_ids=[model1_id, 99999]  # One valid, one invalid
+            )
+        
+        # Cleanup: Delete test user
+        await manager.delete_user(user_id)
+        
+    finally:
+        # Cleanup: Delete test machine models
+        with SessionLocal() as session:
+            session.query(MachineModel).filter(MachineModel.id.in_([model1_id, model2_id])).delete(synchronize_session=False)
+            session.commit()
 
