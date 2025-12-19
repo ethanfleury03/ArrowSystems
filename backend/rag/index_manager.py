@@ -245,7 +245,7 @@ class IndexLoadState:
                 load_start_time = time.time()
                 logger.info("rag_index_load_pipeline_start", message="Loading index into RAG pipeline")
                 from backend.rag_pipeline import get_rag_pipeline
-                from backend.utils.database_manager import get_db_manager_instance
+                from backend.api import get_db_manager_instance
                 
                 db_manager = get_db_manager_instance()
                 cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
