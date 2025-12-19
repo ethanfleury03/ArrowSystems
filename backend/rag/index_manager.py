@@ -203,8 +203,36 @@ class IndexLoadState:
                             error_msg = get_last_download_error() or "Index download failed (unknown)"
                             raise RuntimeError(f"Index download failed: {error_msg}")
                         logger.info("rag_index_download_complete", message="Index download completed successfully")
+                        
+                        # Validate downloaded files have non-trivial size
+                        for f in required:
+                            file_path = os.path.join(storage_path, f)
+                            if os.path.exists(file_path):
+                                size = os.path.getsize(file_path)
+                                if size <= 1024:  # 1KB threshold
+                                    raise RuntimeError(
+                                        f"Downloaded file {f} is too small ({size} bytes). "
+                                        f"Expected > 1KB. File may be corrupted or empty."
+                                    )
+                                logger.info(
+                                    "rag_index_file_validated",
+                                    filename=f,
+                                    size_bytes=size,
+                                    message=f"Validated {f}: {size:,} bytes"
+                                )
                     else:
                         logger.info("rag_index_files_present", message="All required index files already present locally")
+                        
+                        # Validate existing files have non-trivial size
+                        for f in required:
+                            file_path = os.path.join(storage_path, f)
+                            if os.path.exists(file_path):
+                                size = os.path.getsize(file_path)
+                                if size <= 1024:
+                                    raise RuntimeError(
+                                        f"Existing file {f} is too small ({size} bytes). "
+                                        f"Expected > 1KB. File may be corrupted."
+                                    )
                 
                 # Step 2: Load index into pipeline
                 logger.info("rag_index_load_pipeline_start", message="Loading index into RAG pipeline")
@@ -228,6 +256,40 @@ class IndexLoadState:
                 if not pipeline.is_initialized():
                     raise RuntimeError("Pipeline initialization completed but is_initialized() returned False")
                 
+                # Log sample metadata keys for compatibility checking
+                try:
+                    from backend.rag_pipeline import get_rag_pipeline
+                    loaded_pipeline = get_rag_pipeline()
+                    if loaded_pipeline and loaded_pipeline.is_initialized():
+                        orchestrator = loaded_pipeline.orchestrator
+                        if orchestrator and orchestrator.index:
+                            # Try to get a sample node to check metadata keys
+                            try:
+                                docstore = orchestrator.index.storage_context.docstore
+                                if docstore:
+                                    # Get first node ID from docstore
+                                    all_doc_ids = list(docstore.docs.keys())
+                                    if all_doc_ids:
+                                        sample_id = all_doc_ids[0]
+                                        sample_node = docstore.get_document(sample_id)
+                                        if sample_node and hasattr(sample_node, 'metadata'):
+                                            meta_keys = list(sample_node.metadata.keys()) if sample_node.metadata else []
+                                            logger.info(
+                                                "rag_index_metadata_sample",
+                                                sample_node_id=sample_id,
+                                                metadata_keys=meta_keys,
+                                                metadata_keys_count=len(meta_keys),
+                                                message=f"Sample node metadata keys: {meta_keys}"
+                                            )
+                            except Exception as meta_check_error:
+                                logger.warning(
+                                    "rag_index_metadata_check_failed",
+                                    error=str(meta_check_error),
+                                    message="Could not check sample metadata keys (non-fatal)"
+                                )
+                except Exception:
+                    pass  # Non-fatal - just logging
+                
                 # Success!
                 self._status = "ready"
                 self._finished_at = time.time()
@@ -246,17 +308,21 @@ class IndexLoadState:
             except Exception as e:
                 self._status = "failed"
                 self._finished_at = time.time()
-                self._error = f"{type(e).__name__}: {str(e)}"
+                # Store full exception details including traceback
+                import traceback
+                error_traceback = traceback.format_exc()
+                self._error = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{error_traceback}"
                 elapsed = (self._finished_at - self._started_at) if self._started_at else None
                 
                 elapsed_str = f"{elapsed:.2f}s" if elapsed else "unknown"
                 logger.error(
                     "rag_index_load_failed",
                     status=self._status,
-                    error=self._error,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
                     elapsed_s=elapsed,
                     exc_info=True,
-                    message=f"RAG index load failed after {elapsed_str}"
+                    message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {str(e)}"
                 )
                 raise RuntimeError(self._error) from e
             

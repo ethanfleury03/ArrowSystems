@@ -34,6 +34,56 @@ from .config.env import settings
 logger = get_logger(__name__)
 
 
+def _get_node_text(node: Any) -> str:
+    """
+    Compatibility helper to get text content from a node.
+    
+    Handles different node types and metadata schemas:
+    - node.get_content() (LlamaIndex standard)
+    - node.text (direct attribute)
+    - node.metadata.get("text") (metadata fallback)
+    - node.metadata.get("chunk_text") (alternative metadata key)
+    
+    Returns empty string if all methods fail.
+    """
+    try:
+        # Try LlamaIndex standard method first
+        if hasattr(node, 'get_content') and callable(node.get_content):
+            content = node.get_content()
+            if content:
+                return str(content)
+    except Exception:
+        pass
+    
+    try:
+        # Try direct attribute
+        if hasattr(node, 'text') and node.text:
+            return str(node.text)
+    except Exception:
+        pass
+    
+    try:
+        # Try metadata fallbacks
+        if hasattr(node, 'metadata') and node.metadata:
+            meta = node.metadata
+            if isinstance(meta, dict):
+                # Try various metadata keys
+                for key in ["text", "chunk_text", "content", "page_content"]:
+                    if key in meta and meta[key]:
+                        return str(meta[key])
+    except Exception:
+        pass
+    
+    # Last resort: try to get from node.node if it's a wrapper
+    try:
+        if hasattr(node, 'node'):
+            return _get_node_text(node.node)
+    except Exception:
+        pass
+    
+    return ""
+
+
 # ============================================================================
 # ANTHROPIC CLIENT HELPER
 # ============================================================================
@@ -789,7 +839,7 @@ class HybridRetriever:
             
             if self.corpus_nodes:
                 self.corpus_nodes = self.corpus_nodes[:1000]  # Limit to 1000
-                tokenized_corpus = [node.text.lower().split() for node in self.corpus_nodes]
+                tokenized_corpus = [_get_node_text(node).lower().split() for node in self.corpus_nodes]
                 self.bm25 = BM25Okapi(tokenized_corpus)
                 logger.info("bm25_initialized", documents=len(self.corpus_nodes))
             else:
@@ -1713,7 +1763,7 @@ class HybridRetriever:
     def _rerank(self, query: str, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
         """Apply cross-encoder re-ranking."""
         try:
-            pairs = [(query, node.text) for node in nodes]
+            pairs = [(query, _get_node_text(node)) for node in nodes]
             scores = self.reranker.predict(pairs)
             
             # Update scores and sort
@@ -1858,7 +1908,9 @@ class ResponseGenerator:
             # Combine relevant text from this source
             text_parts = []
             for node in nodes[:3]:  # Limit to top 3 chunks per source
-                text_parts.append(node.text.strip())
+                node_text = _get_node_text(node)
+                if node_text:
+                    text_parts.append(node_text.strip())
             
             combined_text = ' '.join(text_parts)
             
@@ -1922,7 +1974,8 @@ class ResponseGenerator:
                 source_docs[source_name]['pages'].add(str(page_num))
             
             # Collect snippet from this chunk (first 200 chars)
-            snippet = node.text[:200].strip() if hasattr(node, 'text') and node.text else ""
+            node_text = _get_node_text(node)
+            snippet = node_text[:200].strip() if node_text else ""
             if snippet and snippet not in source_docs[source_name]['snippets']:
                 source_docs[source_name]['snippets'].append(snippet)
         
@@ -3688,6 +3741,44 @@ class RAGOrchestrator:
                        index_type=type(self.index).__name__,
                        index_id="default",  # Default index_id used
                        message="Index loaded successfully from storage")
+            
+            # Log sample metadata keys for compatibility checking
+            try:
+                docstore = self.index.storage_context.docstore
+                if docstore:
+                    all_doc_ids = list(docstore.docs.keys())
+                    if all_doc_ids:
+                        sample_id = all_doc_ids[0]
+                        sample_node = docstore.get_document(sample_id)
+                        if sample_node:
+                            meta = sample_node.metadata if hasattr(sample_node, 'metadata') else {}
+                            meta_keys = list(meta.keys()) if isinstance(meta, dict) else []
+                            logger.info(
+                                "orchestrator_index_metadata_sample",
+                                sample_node_id=sample_id,
+                                metadata_keys=meta_keys,
+                                metadata_keys_count=len(meta_keys),
+                                has_document_id="document_id" in meta_keys,
+                                has_machine_model_ids="machine_model_ids" in meta_keys,
+                                has_source_gcs="source_gcs" in meta_keys,
+                                message=f"Sample node metadata keys: {meta_keys}"
+                            )
+                            
+                            # Check for required keys for filtering
+                            required_for_filtering = ["machine_model_ids", "document_id"]
+                            missing_for_filtering = [k for k in required_for_filtering if k not in meta_keys]
+                            if missing_for_filtering:
+                                logger.warning(
+                                    "orchestrator_index_missing_filter_keys",
+                                    missing_keys=missing_for_filtering,
+                                    message=f"Index may be incompatible: missing keys for filtering: {missing_for_filtering}"
+                                )
+            except Exception as meta_check_error:
+                logger.warning(
+                    "orchestrator_index_metadata_check_failed",
+                    error=str(meta_check_error),
+                    message="Could not check sample metadata keys (non-fatal)"
+                )
             
             # Initialize hybrid retriever
             self.retriever = HybridRetriever(
