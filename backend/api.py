@@ -744,6 +744,9 @@ async def startup_event():
     """
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager, rag_state
     
+    # Ensure settings is available (imported at module level, but make it explicit)
+    from .config.env import settings
+    
     log_checkpoint("startup_event: begin")
     
     try:
@@ -1392,7 +1395,8 @@ async def health_check():
 
 
 @app.get("/healthz")
-# Note: /healthz endpoint is NOT rate limited and has ZERO dependencies
+@app.get("/api/healthz")
+# Note: /healthz and /api/healthz endpoints are NOT rate limited and have ZERO dependencies
 async def healthz_check():
     """
     Zero-dependency health check endpoint for Cloud Run and CI.
@@ -1404,9 +1408,10 @@ async def healthz_check():
     - RAG index
     - Any other heavy dependencies
     
+    Available at both /healthz and /api/healthz for compatibility.
     Use this for Cloud Run health checks and CI/CD pipelines.
     """
-    return {"ok": True}
+    return {"status": "ok"}
 
 
 class RAGStatusResponse(BaseModel):

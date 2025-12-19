@@ -682,6 +682,16 @@ jobs:
           
           echo "✅ Migrations complete."
 
+      - name: Compile Python code (syntax check)
+        run: |
+          echo "🔍 Compiling Python code to check for syntax errors..."
+          python -m compileall backend || {
+            echo "❌ Python syntax/indentation errors detected!"
+            echo "Fix errors before deploying to Cloud Run."
+            exit 1
+          }
+          echo "✅ All Python files compiled successfully"
+
       - name: Deploy backend to Cloud Run
         run: |
           # SAFETY CHECK – do not allow accidental GCS mounts
@@ -1103,15 +1113,15 @@ jobs:
               exit 1
             fi
             
-            # Try health check (use /healthz for zero-dependency fast check)
-            if curl -f -sS --max-time 5 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/healthz" > /tmp/health_response.json 2>&1; then
+            # Try health check (use /api/healthz for zero-dependency fast check)
+            if curl -f -sS --max-time 5 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/api/healthz" > /tmp/health_response.json 2>&1; then
               echo ""
               echo "✅ Backend health check passed after ${ELAPSED} seconds!"
               cat /tmp/health_response.json | jq '.' || cat /tmp/health_response.json
               SUCCESS=true
               break
             else
-              HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/healthz" 2>/dev/null || echo "000")
+              HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/api/healthz" 2>/dev/null || echo "000")
               
               # Only print status every 10 attempts to reduce noise
               if [ $((ATTEMPT % 10)) -eq 0 ]; then
