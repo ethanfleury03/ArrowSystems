@@ -465,13 +465,23 @@ class TextPreprocessor:
     
     def is_low_content_page(self, text: str, min_words: int = 15) -> bool:
         """Check if a page has too little content to be useful."""
-        words = len(text.split())
-        return words < min_words
+        # Non-allocating word count: count transitions from whitespace to non-whitespace
+        word_count = 0
+        was_whitespace = True
+        for ch in text:
+            is_whitespace = ch.isspace()
+            if was_whitespace and not is_whitespace:
+                word_count += 1
+                if word_count >= min_words:
+                    return False  # Early exit once we have enough words
+            was_whitespace = is_whitespace
+        return word_count < min_words
     
     def should_skip_node(self, text: str, min_chars: int = 30, metadata: dict = None) -> Tuple[bool, str]:
         """
         Check if a node should be skipped (too short or empty).
         Returns (should_skip: bool, reason: str)
+        Optimized for performance: avoids expensive regex scans on every chunk.
         """
         if not text:
             return True, "empty_text"
@@ -481,17 +491,42 @@ class TextPreprocessor:
             return True, "too_short"
         
         # Check if it's mostly whitespace or special characters
-        alpha_chars = len(re.findall(r'[a-zA-Z]', text))
-        if alpha_chars < min_chars // 2:  # At least half should be alphabetic
+        # Short-circuiting counter: stop once we have enough alphabetic chars
+        target = min_chars // 2
+        alpha_chars = 0
+        for ch in text:
+            if ch.isalpha():
+                alpha_chars += 1
+                if alpha_chars >= target:
+                    break  # Early exit - we have enough alphabetic content
+        if alpha_chars < target:
             return True, "low_alphabetic_content"
         
-        # Check if it's a Table of Contents
-        if self.is_table_of_contents(text):
-            return True, "table_of_contents"
+        # Gate TOC detection: only check if it makes sense
+        # Only run on first page/chunk AND if text is not huge
+        should_check_toc = False
+        if metadata:
+            page_label = str(metadata.get('page_label', '')).strip()
+            chunk_index = metadata.get('chunk_index', -1)
+            # Check if first page (explicit page 1) or first chunk
+            if (page_label in {'1', 'i', 'I'} or chunk_index == 0):
+                # Only check if text is reasonable size (TOC patterns pointless on huge chunks)
+                if len(text) <= 5000:
+                    should_check_toc = True
         
-        # Check if it's a first page without content
-        if self.is_first_page_without_content(text, metadata):
-            return True, "first_page_no_content"
+        if should_check_toc:
+            # Fast pre-check: if obvious TOC keywords aren't present, skip regex
+            text_preview = text[:500].lower()
+            if any(keyword in text_preview for keyword in ['contents', 'index', 'toc']):
+                if self.is_table_of_contents(text):
+                    return True, "table_of_contents"
+        
+        # Gate is_first_page_without_content: only check if metadata indicates first page
+        if metadata:
+            page_label = str(metadata.get('page_label', '')).strip()
+            if page_label in {'1', 'i', 'I'}:
+                if self.is_first_page_without_content(text, metadata):
+                    return True, "first_page_no_content"
         
         return False, ""
 
@@ -710,6 +745,14 @@ class SmartChunkSplitter:
     """
     Wrapper around SentenceSplitter that preserves structured content like tables,
     code blocks, numbered steps, and command syntax.
+    
+    Environment Variables (for performance tuning and diagnostics):
+    - CHUNK_DEBUG: Set to "1" to enable detailed diagnostic logging (default: "0")
+    - MAX_DOC_CHARS: Maximum document size before using simple chunker (default: 250000)
+    - MAX_DOC_CHARS_FOR_SMART_CHUNK: Maximum size for smart chunking, larger docs use base splitter (default: 250000)
+    - MAX_CHUNKS_PER_DOC: Maximum chunks per document before fallback to base splitter (default: 5000)
+    - CHUNK_HEARTBEAT_EVERY: Heartbeat frequency in documents for progress tracking (default: 50)
+    - CHUNK_PROGRESS_LOG: Path to progress log file (default: /workspace/ingest_work/chunk_progress.log)
     """
     
     def __init__(self, chunk_size: int = 350, chunk_overlap: int = 88, preprocessor: TextPreprocessor = None):
@@ -721,6 +764,12 @@ class SmartChunkSplitter:
             include_metadata=True
         )
         self.preprocessor = preprocessor or TextPreprocessor()
+        
+        # Precompile regexes used in hot loop (_preserve_structured_chunks)
+        # to avoid repeated compilation overhead
+        self._regex_numbered_item = re.compile(r'^\d+[\.\)]')
+        self._regex_bullet = re.compile(r'^[-*•]')
+        self._regex_section_header = re.compile(r'^[A-Z][a-z]+:\s*$')
     
     def _is_table_content(self, text: str) -> bool:
         """Detect if text contains table-like content (markdown table or pipe-separated)."""
@@ -766,18 +815,24 @@ class SmartChunkSplitter:
                 # Try to collect the entire structured block
                 structured_block = [line]
                 block_size = len(line)
+                block_line_count = 1
                 j = i + 1
+                MAX_STRUCTURED_LINES = 200  # Hard cap to prevent pathological accumulation
                 
                 # Collect lines until we hit a non-structured line or exceed chunk size
-                while j < len(lines) and block_size + len(lines[j]) < self.chunk_size:
+                while (j < len(lines) and 
+                       block_size + len(lines[j]) < self.chunk_size and
+                       block_line_count < MAX_STRUCTURED_LINES):
                     next_line = lines[j].strip()
                     # Continue if it's part of the structure (numbered, bullet, or continuation)
+                    # Use precompiled regexes for performance
                     if (next_line.startswith((' ', '\t')) or  # Indented continuation
-                        re.match(r'^\d+[\.\)]', next_line) or  # Next numbered item
-                        re.match(r'^[-*•]', next_line) or  # Next bullet
-                        re.match(r'^[A-Z][a-z]+:\s*$', next_line)):  # Next section header
+                        self._regex_numbered_item.match(next_line) or  # Next numbered item
+                        self._regex_bullet.match(next_line) or  # Next bullet
+                        self._regex_section_header.match(next_line)):  # Next section header
                         structured_block.append(lines[j])
                         block_size += len(lines[j])
+                        block_line_count += 1
                         j += 1
                     else:
                         break
@@ -790,8 +845,8 @@ class SmartChunkSplitter:
                 
                 # Add the structured block as a single chunk
                 structured_text = '\n'.join(structured_block)
-                # Check if it exceeds chunk size (rare, but handle it)
-                if len(structured_text) > self.chunk_size:
+                # Check if it exceeds chunk size or line limit (fallback to base splitter)
+                if len(structured_text) > self.chunk_size or block_line_count >= MAX_STRUCTURED_LINES:
                     # Split the structured block using base splitter, but preserve internal structure
                     sub_chunks = self.base_splitter.split_text(structured_text)
                     chunks.extend(sub_chunks)
@@ -832,7 +887,16 @@ class SmartChunkSplitter:
         return chunks
     
     def split_text(self, text: str) -> List[str]:
-        """Split text with smart chunking that preserves structured content."""
+        """
+        Split text with smart chunking that preserves structured content.
+        Includes safety fallback for pathological documents.
+        """
+        # Safety fallback: if document is huge, use base splitter directly
+        max_doc_chars_for_smart = int(os.getenv("MAX_DOC_CHARS_FOR_SMART_CHUNK", "250000"))
+        if len(text) > max_doc_chars_for_smart:
+            # Bypass smart chunking for huge documents
+            return self.base_splitter.split_text(text)
+        
         # Check if entire text is a table or code block
         if self._is_table_content(text) or self._is_code_block(text):
             # Preserve as single chunk (may exceed chunk_size, but that's okay for structured content)
@@ -879,10 +943,13 @@ class SmartChunkSplitter:
         
         # Configuration from environment
         max_doc_chars = int(os.getenv("MAX_DOC_CHARS", "250000"))
-        heartbeat_every = int(os.getenv("CHUNK_HEARTBEAT_EVERY", "25"))
+        heartbeat_every = int(os.getenv("CHUNK_HEARTBEAT_EVERY", "50"))  # Default 50 for diagnostics
+        chunk_debug = os.getenv("CHUNK_DEBUG", "0") == "1"
+        max_chunks_per_doc = int(os.getenv("MAX_CHUNKS_PER_DOC", "5000"))
         
         all_nodes = []
         logged_sources: set[str] = set()
+        total_docs = len(documents)
         
         def write_progress(msg: str):
             """Write to progress log and flush immediately."""
@@ -899,6 +966,19 @@ class SmartChunkSplitter:
             doc_name = doc_meta.get('file_name', 'unknown')
             source_gcs = doc_meta.get('source_gcs') or doc_meta.get('gcs_path') or doc_name
             raw_text_len = len(doc.text or "")
+            
+            # Diagnostic logging (if enabled)
+            if chunk_debug:
+                logger.info({
+                    "event": "chunking_doc_start",
+                    "document_id": doc_meta.get('document_id'),
+                    "source_gcs": source_gcs,
+                    "raw_len": raw_text_len,
+                    "page_label": doc_meta.get('page_label'),
+                    "section_number": doc_meta.get('section_number'),
+                    "idx": doc_idx,
+                    "total": total_docs
+                })
             
             # Write START line
             write_progress(f"START idx={doc_idx} src={source_gcs} len={raw_text_len}")
@@ -937,6 +1017,12 @@ class SmartChunkSplitter:
                     # Split into chunks (with error handling)
                     try:
                         chunks = self.split_text(text)
+                        
+                        # Safety fallback: if chunk count exceeds limit, use base splitter
+                        if len(chunks) > max_chunks_per_doc:
+                            logger.warning("Chunk count %d exceeds limit %d for %s, using base splitter", 
+                                         len(chunks), max_chunks_per_doc, doc_name)
+                            chunks = self.base_splitter.split_text(text)
                     except Exception as e:
                         logger.error("Error splitting text for %s: %s", doc_name, e)
                         write_progress(f"ERROR idx={doc_idx} stage=split_text error={str(e)[:100]}")
@@ -997,6 +1083,19 @@ class SmartChunkSplitter:
                 elapsed_secs = time.time() - doc_start_time
                 write_progress(f"DONE idx={doc_idx} secs={elapsed_secs:.2f} chunks={len(chunks)} nodes={nodes_emitted}")
                 
+                # Diagnostic logging (if enabled)
+                if chunk_debug:
+                    logger.info({
+                        "event": "chunking_doc_done",
+                        "document_id": doc_meta.get('document_id'),
+                        "source_gcs": source_gcs,
+                        "elapsed_s": round(elapsed_secs, 2),
+                        "chunks": len(chunks),
+                        "nodes_emitted": nodes_emitted,
+                        "idx": doc_idx,
+                        "total": total_docs
+                    })
+                
             except Exception as e:
                 elapsed_secs = time.time() - doc_start_time
                 error_msg = str(e)[:100]  # Truncate long error messages
@@ -1007,6 +1106,13 @@ class SmartChunkSplitter:
             # Heartbeat every N documents
             if (doc_idx + 1) % heartbeat_every == 0:
                 write_progress(f"HEARTBEAT idx={doc_idx}")
+                if chunk_debug:
+                    logger.info({
+                        "event": "chunking_heartbeat",
+                        "idx": doc_idx,
+                        "total": total_docs,
+                        "nodes_so_far": len(all_nodes)
+                    })
         
         return all_nodes
 
