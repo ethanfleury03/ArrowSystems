@@ -841,95 +841,172 @@ class SmartChunkSplitter:
         # Use smart chunking
         return self._preserve_structured_chunks(text)
     
+    def _simple_chunk_text(self, text: str, chunk_size: int = 512, chunk_overlap: int = 128) -> List[str]:
+        """
+        Simple deterministic chunker for huge documents.
+        Chunks by character count with overlap.
+        """
+        if not text:
+            return []
+        
+        chunks = []
+        start = 0
+        text_len = len(text)
+        
+        while start < text_len:
+            end = min(start + chunk_size, text_len)
+            chunk = text[start:end]
+            chunks.append(chunk)
+            
+            # Move start position with overlap
+            start = end - chunk_overlap
+            if start >= text_len:
+                break
+        
+        return chunks
+    
     def get_nodes_from_documents(self, documents: List[Document], show_progress: bool = False) -> List[TextNode]:
         """
         Split documents into nodes with smart chunking.
         This is a simplified version that processes documents one by one.
+        Optimized for performance with progress logging and huge document fallback.
         """
+        # Setup progress log file
+        progress_log_path = os.getenv("CHUNK_PROGRESS_LOG", "/workspace/ingest_work/chunk_progress.log")
+        progress_log_dir = os.path.dirname(progress_log_path)
+        if progress_log_dir:
+            os.makedirs(progress_log_dir, exist_ok=True)
+        
+        # Configuration from environment
+        max_doc_chars = int(os.getenv("MAX_DOC_CHARS", "250000"))
+        heartbeat_every = int(os.getenv("CHUNK_HEARTBEAT_EVERY", "25"))
+        
         all_nodes = []
         logged_sources: set[str] = set()
         
-        for doc in tqdm(documents, desc="Splitting documents", disable=not show_progress):
+        def write_progress(msg: str):
+            """Write to progress log and flush immediately."""
+            try:
+                with open(progress_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"{msg}\n")
+                    f.flush()
+            except Exception:
+                pass  # Silently fail if log file can't be written
+        
+        for doc_idx, doc in enumerate(tqdm(documents, desc="Splitting documents", disable=not show_progress)):
+            doc_start_time = time.time()
+            doc_meta = doc.metadata or {}
+            doc_name = doc_meta.get('file_name', 'unknown')
+            source_gcs = doc_meta.get('source_gcs') or doc_meta.get('gcs_path') or doc_name
+            raw_text_len = len(doc.text or "")
+            
+            # Write START line
+            write_progress(f"START idx={doc_idx} src={source_gcs} len={raw_text_len}")
+            
             try:
                 text = doc.text or ""
-                doc_name = doc.metadata.get('file_name', 'unknown')
                 
                 # Clean the text first (with error handling)
                 try:
-                    text = self.preprocessor.clean_text(text, metadata=doc.metadata)
+                    text = self.preprocessor.clean_text(text, metadata=doc_meta)
                 except Exception as e:
-                    logger.warning(f"Error cleaning text for {doc_name}: {e}")
+                    logger.warning("Error cleaning text for %s: %s", doc_name, e)
                     # Use original text if cleaning fails
                     text = doc.text or ""
                 
                 # Check if page/document should be skipped (low content)
                 try:
                     if self.preprocessor.is_low_content_page(text):
-                        logger.debug(f"Skipping low-content page: {doc_name}")
+                        logger.debug("Skipping low-content page: %s", doc_name)
+                        write_progress(f"SKIP idx={doc_idx} reason=low_content")
                         continue
                 except Exception as e:
-                    logger.debug(f"Error checking low-content for {doc_name}: {e}")
+                    logger.debug("Error checking low-content for %s: %s", doc_name, e)
                     # Continue processing if check fails
                 
-                # Split into chunks (with error handling)
-                try:
-                    chunks = self.split_text(text)
-                except Exception as e:
-                    logger.error(f"Error splitting text for {doc_name}: {e}")
-                    # Fallback to simple split if smart chunking fails
-                    if text:
-                        chunks = [text]
-                    else:
-                        chunks = []
+                # Check for huge documents and use simple chunker
+                use_simple_chunker = len(text) > max_doc_chars
+                if use_simple_chunker:
+                    logger.warning("Using simple chunker for huge document: %s (len=%d)", doc_name, len(text))
+                    write_progress(f"HUGE idx={doc_idx} len={len(text)} using_simple_chunker=1")
+                    # Use simple chunker with current settings or defaults
+                    simple_chunk_size = self.chunk_size if self.chunk_size >= 512 else 512
+                    simple_overlap = self.chunk_overlap if self.chunk_overlap >= 128 else 128
+                    chunks = self._simple_chunk_text(text, chunk_size=simple_chunk_size, chunk_overlap=simple_overlap)
+                else:
+                    # Split into chunks (with error handling)
+                    try:
+                        chunks = self.split_text(text)
+                    except Exception as e:
+                        logger.error("Error splitting text for %s: %s", doc_name, e)
+                        write_progress(f"ERROR idx={doc_idx} stage=split_text error={str(e)[:100]}")
+                        # Fallback to simple split if smart chunking fails
+                        if text:
+                            chunks = [text]
+                        else:
+                            chunks = []
+                
+                nodes_emitted = 0
                 
                 # Create nodes from chunks
                 for chunk_idx, chunk_text in enumerate(chunks):
                     # Enhanced skip check with reason tracking
-                    should_skip, skip_reason = self.preprocessor.should_skip_node(
-                        chunk_text, 
-                        metadata={**doc.metadata, "chunk_index": chunk_idx, "total_chunks": len(chunks)}
-                    )
+                    chunk_meta = {**doc_meta, "chunk_index": chunk_idx, "total_chunks": len(chunks)}
+                    should_skip, skip_reason = self.preprocessor.should_skip_node(chunk_text, metadata=chunk_meta)
                     
                     if should_skip:
-                        logger.debug(f"Skipping chunk {chunk_idx} from {doc_name}: {skip_reason}")
+                        # Use parameterized logging to avoid f-string overhead
+                        logger.debug("Skipping chunk %s from %s: %s", chunk_idx, doc_name, skip_reason)
                         continue
                     
-                    # Create node with metadata (including skip reason if applicable)
+                    # Create node with metadata
                     try:
                         node = TextNode(
                             text=chunk_text,
                             metadata={
-                                **doc.metadata,
-                                "chunk_index": chunk_idx,
-                                "total_chunks": len(chunks),
+                                **chunk_meta,
                                 "content_type": "text"
                             }
                         )
                         all_nodes.append(node)
+                        nodes_emitted += 1
+                        
                         # Minimal targeted log: first node per unique source_gcs
                         try:
-                            src = (node.metadata or {}).get("source_gcs") or (node.metadata or {}).get("gcs_path")
+                            node_meta = node.metadata or {}
+                            src = node_meta.get("source_gcs") or node_meta.get("gcs_path")
                             if isinstance(src, str) and src and src not in logged_sources:
                                 logged_sources.add(src)
                                 logger.info(
                                     {
                                         "event": "chunk_metadata_sample",
                                         "source_gcs": src,
-                                        "document_id": (node.metadata or {}).get("document_id"),
-                                        "machine_model": (node.metadata or {}).get("machine_model"),
-                                        "machine_model_ids": (node.metadata or {}).get("machine_model_ids"),
-                                        "machine_model_names": (node.metadata or {}).get("machine_model_names"),
+                                        "document_id": node_meta.get("document_id"),
+                                        "machine_model": node_meta.get("machine_model"),
+                                        "machine_model_ids": node_meta.get("machine_model_ids"),
+                                        "machine_model_names": node_meta.get("machine_model_names"),
                                     }
                                 )
                         except Exception:
                             pass
                     except Exception as e:
-                        logger.error(f"Error creating node for {doc_name}, chunk {chunk_idx}: {e}")
+                        logger.error("Error creating node for %s, chunk %s: %s", doc_name, chunk_idx, e)
                         continue
-                        
+                
+                # Write DONE line
+                elapsed_secs = time.time() - doc_start_time
+                write_progress(f"DONE idx={doc_idx} secs={elapsed_secs:.2f} chunks={len(chunks)} nodes={nodes_emitted}")
+                
             except Exception as e:
-                logger.error(f"Error processing document {doc.metadata.get('file_name', 'unknown')}: {e}")
+                elapsed_secs = time.time() - doc_start_time
+                error_msg = str(e)[:100]  # Truncate long error messages
+                logger.error("Error processing document %s: %s", doc_meta.get('file_name', 'unknown'), e)
+                write_progress(f"ERROR idx={doc_idx} secs={elapsed_secs:.2f} error={error_msg}")
                 continue
+            
+            # Heartbeat every N documents
+            if (doc_idx + 1) % heartbeat_every == 0:
+                write_progress(f"HEARTBEAT idx={doc_idx}")
         
         return all_nodes
 
