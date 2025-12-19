@@ -349,39 +349,19 @@ def create_admin_router(
         role_changed = new_role != current_role
         
         # Normalize machine_models - support multiple input formats
+        # Note: machine_model_ids will be handled inside update_user to use the same session
         machine_models = None
+        machine_model_ids = None
+        
         if payload.machine_model_ids is not None:
-            # Convert IDs to names via DB lookup
+            # Validate IDs are integers and pass to update_user (it will do the lookup in the same session)
             try:
-                with SessionLocal() as session:
-                    models = session.query(MachineModel).filter(
-                        MachineModel.id.in_(payload.machine_model_ids)
-                    ).all()
-                    if len(models) != len(set(payload.machine_model_ids)):
-                        found_ids = {m.id for m in models}
-                        missing_ids = sorted(set(payload.machine_model_ids) - found_ids)
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail={
-                                "error": "invalid_machine_model_ids",
-                                "missing": missing_ids,
-                                "message": f"Invalid machine model IDs: {missing_ids}"
-                            }
-                        )
-                    machine_models = [m.name for m in models]
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error({
-                    "event": "admin_update_user_machine_model_id_lookup_failed",
-                    "user_id": user_id,
-                    "machine_model_ids": payload.machine_model_ids,
-                    "error": f"{type(e).__name__}: {e}",
-                    "traceback": traceback.format_exc(),
-                })
+                machine_model_ids = [int(x) for x in payload.machine_model_ids]
+                machine_model_ids = sorted(set(machine_model_ids))  # Deduplicate
+            except (ValueError, TypeError) as e:
                 raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to lookup machine model IDs: {str(e)}"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"machine_model_ids must be a list of integers: {str(e)}"
                 )
         elif payload.machine_model_names is not None:
             machine_models = normalize_machine_models(payload.machine_model_names)
@@ -430,15 +410,24 @@ def create_admin_router(
                 )
         
         try:
-            # If role is admin/technician and machine_models is None, clear it
-            # If role is customer and machine_models is None, keep existing (don't update)
-            update_machine_models = machine_models
-            if new_role != "CUSTOMER" and machine_models is None:
-                # Admin/technician - can clear machine_models
-                update_machine_models = []
-            elif new_role == "CUSTOMER" and machine_models is None:
-                # Customer - keep existing machine_models (don't update)
-                update_machine_models = None
+            # Determine what to update for machine models
+            # If machine_model_ids is provided, use that (will be converted to names in update_user)
+            # Otherwise, use machine_models (names)
+            update_machine_models = None
+            update_machine_model_ids = None
+            
+            if machine_model_ids is not None:
+                # Use IDs - will be converted to names inside update_user
+                update_machine_model_ids = machine_model_ids
+            elif machine_models is not None:
+                # Use names directly
+                update_machine_models = machine_models
+            else:
+                # No machine models provided - determine based on role
+                if new_role != "CUSTOMER":
+                    # Admin/technician - can clear machine_models
+                    update_machine_models = []
+                # else: Customer - keep existing (don't update, so both remain None)
             
             # Get user before update for audit log
             user_before = await manager.get_user_by_id(user_id)
@@ -454,10 +443,12 @@ def create_admin_router(
                 contact_name=payload.contact_name,
                 contact_phone=payload.contact_phone,
                 machine_models=update_machine_models,
+                machine_model_ids=update_machine_model_ids,
             )
             
             # Audit log user update
-            machines_changed = update_machine_models is not None and update_machine_models != user_before_machines
+            new_machines = updated.get("machine_models", [])
+            machines_changed = (update_machine_models is not None or update_machine_model_ids is not None) and new_machines != user_before_machines
             role_changed = payload.role and payload.role.upper() != (user_before.get("role", "") if user_before else "").upper()
             
             await audit_log(
@@ -471,7 +462,7 @@ def create_admin_router(
                     "role_changed": role_changed,
                     "machines_changed": machines_changed,
                     "old_machines": user_before_machines,
-                    "new_machines": update_machine_models if machines_changed else None,
+                    "new_machines": new_machines if machines_changed else None,
                 },
                 request=http_request,
             )
@@ -480,7 +471,8 @@ def create_admin_router(
             # Re-raise HTTP exceptions (validation errors, etc.)
             raise
         except ValueError as exc:
-            # User not found, email already in use, etc.
+            # User not found, email already in use, invalid machine model IDs, etc.
+            error_str = str(exc)
             logger.warning({
                 "event": "admin_update_user_validation_failed",
                 "user_id": user_id,
@@ -490,6 +482,21 @@ def create_admin_router(
                 "machine_model_names": getattr(payload, "machine_model_names", None),
                 "error": f"{type(exc).__name__}: {exc}",
             })
+            # Check if it's an invalid machine model IDs error
+            if "Invalid machine model IDs" in error_str:
+                # Extract missing IDs from error message
+                import re
+                match = re.search(r'\[([\d,\s]+)\]', error_str)
+                if match:
+                    missing_ids = [int(x.strip()) for x in match.group(1).split(',')]
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error": "invalid_machine_model_ids",
+                            "missing": missing_ids,
+                            "message": error_str
+                        }
+                    )
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
         except Exception as e:
             # Log the full exception with traceback for debugging
