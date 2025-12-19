@@ -295,6 +295,13 @@ class DatabaseManager:
                     
                     # Only update user.machine_models if we have a value to set
                     if updated_machine_models is not None:
+                        logger.info(
+                            "update_user_writing_machine_models",
+                            user_id=user_id,
+                            machine_models_before=user.machine_models,
+                            machine_models_after=updated_machine_models,
+                            machine_models_count=len(updated_machine_models),
+                        )
                         user.machine_models = updated_machine_models
                     # If both machine_model_ids and machine_models are None, don't touch user.machine_models
 
@@ -306,7 +313,15 @@ class DatabaseManager:
                     # Since expire_on_commit=False, user attributes remain accessible
                     # Access machine_models (JSON column) inside session to ensure it's loaded
                     # This prevents any potential lazy-loading issues after session closes
-                    machine_models_value = user.machine_models  # Access the attribute while session is open
+                    machine_models_after_commit = user.machine_models  # Access the attribute while session is open
+                    
+                    # Log what was actually committed (for debugging)
+                    logger.info(
+                        "update_user_after_commit",
+                        user_id=user_id,
+                        machine_models_committed=machine_models_after_commit,
+                        machine_models_committed_count=len(machine_models_after_commit) if machine_models_after_commit else 0,
+                    )
                     
                     # Serialize BEFORE session closes (user is still attached)
                     # Return a dict, not the ORM instance
@@ -316,6 +331,7 @@ class DatabaseManager:
                         "update_user_success",
                         user_id=user_id,
                         updated_machine_models_count=len(result.get("machine_models", [])),
+                        serialized_machine_models=result.get("machine_models", []),
                     )
                     
                     return result
