@@ -234,35 +234,50 @@ class DatabaseManager:
                     user.contact_phone = contact_phone.strip() if contact_phone else None
 
                 # Handle machine models - support both IDs and names
+                # Initialize variable to track what to set (None means don't change)
+                updated_machine_models = None
+                
                 if machine_model_ids is not None:
                     # Convert IDs to names via DB lookup in the same session
                     from ..utils.db import MachineModel
-                    models = session.execute(
-                        select(MachineModel).where(MachineModel.id.in_(machine_model_ids))
-                    ).scalars().all()
-                    found_ids = {m.id for m in models}
-                    missing_ids = sorted(set(machine_model_ids) - found_ids)
-                    if missing_ids:
-                        raise ValueError(f"Invalid machine model IDs: {missing_ids}")
-                    # Store as names (JSON column)
-                    from ..config.machine_models import normalize_machine_models
-                    machine_models = normalize_machine_models([m.name for m in models])
-                
-                if machine_models is not None:
-                    # Normalize machine_models using the helper
+                    # Deduplicate IDs
+                    unique_ids = sorted(set(machine_model_ids))
+                    
+                    if len(unique_ids) == 0:
+                        # Empty list means clear all machine models
+                        updated_machine_models = []
+                    else:
+                        # Look up models by IDs
+                        models = session.execute(
+                            select(MachineModel).where(MachineModel.id.in_(unique_ids))
+                        ).scalars().all()
+                        found_ids = {m.id for m in models}
+                        missing_ids = sorted(set(unique_ids) - found_ids)
+                        if missing_ids:
+                            raise ValueError(f"Invalid machine model IDs: {missing_ids}")
+                        # Store as names (JSON column)
+                        from ..config.machine_models import normalize_machine_models
+                        updated_machine_models = normalize_machine_models([m.name for m in models])
+                elif machine_models is not None:
+                    # Normalize machine_models using the helper (names provided directly)
                     from ..config.machine_models import normalize_machine_models
                     # Validate input type
                     if not isinstance(machine_models, list):
                         raise ValueError(f"machine_models must be a list, got {type(machine_models).__name__}")
                     # Normalize and validate
-                    normalized = normalize_machine_models(machine_models)
-                    user.machine_models = normalized
+                    updated_machine_models = normalize_machine_models(machine_models)
+                
+                # Only update user.machine_models if we have a value to set
+                if updated_machine_models is not None:
+                    user.machine_models = updated_machine_models
+                # If both machine_model_ids and machine_models are None, don't touch user.machine_models
 
                 # Commit transaction with retry on lock
                 _retry_on_locked(session.commit)
                 # Refresh to ensure we have latest state
                 session.refresh(user)
                 # Serialize BEFORE closing session to ensure user is still attached
+                # Use persisted state from user object, not local variables
                 result = self._serialize_user(user)
                 return result
             except ValueError:
