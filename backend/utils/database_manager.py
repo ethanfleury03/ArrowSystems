@@ -178,12 +178,33 @@ class DatabaseManager:
     ) -> Dict[str, Any]:
         def _update() -> Dict[str, Any]:
             # Use context manager to ensure proper session lifecycle
+            # ONE session for the entire operation - no ORM objects cross session boundaries
             with SessionLocal() as session:
                 try:
                     # Load user in THIS session - critical for session.refresh() to work
+                    # DO NOT use any User instance from outside this function
                     user = session.get(User, user_id)
-                    if not user:
+                    
+                    # Log user lookup result (no PII)
+                    if user is None:
+                        logger.warning(
+                            "update_user_user_not_found",
+                            user_id=user_id,
+                            message=f"User {user_id} not found in database"
+                        )
                         raise ValueError("User not found")
+                    
+                    logger.info(
+                        "update_user_start",
+                        user_id=user_id,
+                        has_email=email is not None,
+                        has_name=name is not None,
+                        has_password=password is not None,
+                        has_role=role is not None,
+                        has_machine_model_ids=machine_model_ids is not None,
+                        machine_model_ids_count=len(machine_model_ids) if machine_model_ids else 0,
+                        has_machine_models=machine_models is not None,
+                    )
 
                     if email:
                         normalized = email.strip().lower()
@@ -224,7 +245,7 @@ class DatabaseManager:
                         user.contact_phone = contact_phone.strip() if contact_phone else None
 
                     # Handle machine models - support both IDs and names
-                    # Initialize variable to avoid UnboundLocalError
+                    # Initialize at top to avoid UnboundLocalError
                     updated_machine_models = None
                     
                     if machine_model_ids is not None:
@@ -233,6 +254,13 @@ class DatabaseManager:
                         # Convert to list of ints and deduplicate
                         ids = [int(x) for x in machine_model_ids]
                         unique_ids = sorted(set(ids))
+                        
+                        logger.info(
+                            "update_user_machine_model_ids",
+                            user_id=user_id,
+                            machine_model_ids_count=len(unique_ids),
+                            machine_model_ids=unique_ids,
+                        )
                         
                         if len(unique_ids) == 0:
                             # Empty list means clear all machine models
@@ -245,6 +273,12 @@ class DatabaseManager:
                             found_ids = {m.id for m in models}
                             missing_ids = sorted(set(unique_ids) - found_ids)
                             if missing_ids:
+                                logger.warning(
+                                    "update_user_invalid_machine_model_ids",
+                                    user_id=user_id,
+                                    missing_ids=missing_ids,
+                                    requested_ids=unique_ids,
+                                )
                                 raise ValueError(f"Invalid machine model IDs: {missing_ids}")
                             # Store as names (JSON column)
                             from ..config.machine_models import normalize_machine_models
@@ -265,10 +299,24 @@ class DatabaseManager:
 
                     # Commit transaction with retry on lock
                     _retry_on_locked(session.commit)
+                    
                     # Refresh to ensure we have latest state (user must be in this session)
                     session.refresh(user)
+                    
+                    # Access machine_models (JSON column) inside session to ensure it's loaded
+                    # This prevents any potential lazy-loading issues after session closes
+                    _ = user.machine_models  # Access the attribute while session is open
+                    
                     # Serialize BEFORE session closes (user is still attached)
+                    # Return a dict, not the ORM instance
                     result = self._serialize_user(user)
+                    
+                    logger.info(
+                        "update_user_success",
+                        user_id=user_id,
+                        updated_machine_models_count=len(result.get("machine_models", [])),
+                    )
+                    
                     return result
                 except ValueError:
                     # Re-raise validation errors
@@ -277,12 +325,24 @@ class DatabaseManager:
                 except SQLAlchemyError as e:
                     # Database errors - rollback and re-raise
                     session.rollback()
-                    logger.error(f"Database error updating user {user_id}: {e}")
+                    logger.error(
+                        "update_user_database_error",
+                        user_id=user_id,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        exc_info=True,
+                    )
                     raise ValueError(f"Database error: {str(e)}")
                 except Exception as e:
                     # Unexpected errors - rollback and re-raise
                     session.rollback()
-                    logger.error(f"Unexpected error updating user {user_id}: {e}")
+                    logger.error(
+                        "update_user_unexpected_error",
+                        user_id=user_id,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        exc_info=True,
+                    )
                     raise ValueError(f"Failed to update user: {str(e)}")
 
         return await run_sync(_update)
