@@ -2993,9 +2993,13 @@ async def query_knowledge_base(request: Request):
         
     except Exception as e:
         logger.exception("[/query] Unhandled exception", extra={"user_id": locals().get("user_id"), "conversation_id": locals().get("conversation_id")})
+        # FIX: Ensure error detail is always a string, not an object
+        error_detail = get_error_detail(e, "An internal error occurred while processing your request")
+        if not isinstance(error_detail, str):
+            error_detail = str(error_detail) if error_detail else "An internal error occurred while processing your request"
         raise HTTPException(
             status_code=500,
-            detail=get_error_detail(e, "An internal error occurred while processing your request")
+            detail=error_detail
         )
 
 

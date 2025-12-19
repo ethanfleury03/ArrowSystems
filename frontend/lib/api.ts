@@ -111,7 +111,24 @@ export async function sendQuery(query: string, params?: QueryParams): Promise<Qu
     return response.data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to get response';
+      // FIX: Ensure error message is always a string, not an object
+      let errorMessage = error.message || 'Failed to get response';
+      const errorData = error.response?.data;
+      
+      if (errorData?.detail) {
+        if (typeof errorData.detail === 'string') {
+          errorMessage = errorData.detail;
+        } else if (typeof errorData.detail === 'object') {
+          errorMessage = errorData.detail?.message || errorData.detail?.error || JSON.stringify(errorData.detail);
+        } else {
+          errorMessage = String(errorData.detail);
+        }
+      } else if (errorData?.error) {
+        errorMessage = typeof errorData.error === 'string' ? errorData.error : String(errorData.error);
+      } else if (errorData?.message) {
+        errorMessage = typeof errorData.message === 'string' ? errorData.message : String(errorData.message);
+      }
+      
       throw new Error(errorMessage);
     }
     throw error;
