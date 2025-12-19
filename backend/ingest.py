@@ -35,6 +35,8 @@ import time
 import json
 import yaml
 import re
+import signal
+import faulthandler
 from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -70,6 +72,16 @@ import tarfile
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Enable faulthandler for stack dumps on signals (safe, non-terminating)
+faulthandler.enable(all_threads=True)
+try:
+    # Register SIGUSR1 to dump stacks (Linux/Unix only)
+    if hasattr(signal, 'SIGUSR1'):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+except (AttributeError, ValueError):
+    # SIGUSR1 not available on this platform (Windows)
+    pass
 
 # Try to import Anthropic (optional dependency)
 try:
@@ -817,12 +829,13 @@ class SmartChunkSplitter:
                 block_size = len(line)
                 block_line_count = 1
                 j = i + 1
-                MAX_STRUCTURED_LINES = 200  # Hard cap to prevent pathological accumulation
+                # Hard cap to prevent pathological accumulation (configurable via env)
+                max_structured_lines = int(os.getenv("MAX_STRUCTURED_LINES", "200"))
                 
                 # Collect lines until we hit a non-structured line or exceed chunk size
                 while (j < len(lines) and 
                        block_size + len(lines[j]) < self.chunk_size and
-                       block_line_count < MAX_STRUCTURED_LINES):
+                       block_line_count < max_structured_lines):
                     next_line = lines[j].strip()
                     # Continue if it's part of the structure (numbered, bullet, or continuation)
                     # Use precompiled regexes for performance
@@ -846,7 +859,7 @@ class SmartChunkSplitter:
                 # Add the structured block as a single chunk
                 structured_text = '\n'.join(structured_block)
                 # Check if it exceeds chunk size or line limit (fallback to base splitter)
-                if len(structured_text) > self.chunk_size or block_line_count >= MAX_STRUCTURED_LINES:
+                if len(structured_text) > self.chunk_size or block_line_count >= max_structured_lines:
                     # Split the structured block using base splitter, but preserve internal structure
                     sub_chunks = self.base_splitter.split_text(structured_text)
                     chunks.extend(sub_chunks)
@@ -946,16 +959,45 @@ class SmartChunkSplitter:
         heartbeat_every = int(os.getenv("CHUNK_HEARTBEAT_EVERY", "50"))  # Default 50 for diagnostics
         chunk_debug = os.getenv("CHUNK_DEBUG", "0") == "1"
         max_chunks_per_doc = int(os.getenv("MAX_CHUNKS_PER_DOC", "5000"))
+        max_seconds_per_doc = int(os.getenv("MAX_SECONDS_PER_DOC", "90"))
+        
+        # Repro mode: filter documents if specified
+        only_source_gcs = os.getenv("CHUNK_ONLY_SOURCE_GCS")
+        chunk_doc_range_start = os.getenv("CHUNK_DOC_RANGE_START")
+        chunk_doc_range_end = os.getenv("CHUNK_DOC_RANGE_END")
+        
+        # Filter documents for repro mode
+        if only_source_gcs:
+            documents = [d for d in documents if (d.metadata or {}).get('source_gcs') == only_source_gcs or 
+                        (d.metadata or {}).get('gcs_path') == only_source_gcs]
+            logger.info("Repro mode: filtering to source_gcs=%s, %d documents", only_source_gcs, len(documents))
+        
+        if chunk_doc_range_start is not None and chunk_doc_range_end is not None:
+            start_idx = int(chunk_doc_range_start)
+            end_idx = int(chunk_doc_range_end)
+            documents = documents[start_idx:end_idx]
+            logger.info("Repro mode: processing doc range [%d:%d], %d documents", start_idx, end_idx, len(documents))
         
         all_nodes = []
         logged_sources: set[str] = set()
         total_docs = len(documents)
         
-        def write_progress(msg: str):
-            """Write to progress log and flush immediately."""
+        def write_progress(event: str, **kwargs):
+            """Write structured progress log entry and flush immediately."""
             try:
                 with open(progress_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"{msg}\n")
+                    # Format: event: key=value key=value ...
+                    parts = [f"event={event}"]
+                    for key, value in kwargs.items():
+                        # Escape special chars and truncate long values
+                        if value is None:
+                            value = ""
+                        elif isinstance(value, (int, float)):
+                            value = str(value)
+                        else:
+                            value = str(value).replace(" ", "_").replace("=", "_")[:200]
+                        parts.append(f"{key}={value}")
+                    f.write(" ".join(parts) + "\n")
                     f.flush()
             except Exception:
                 pass  # Silently fail if log file can't be written
@@ -981,7 +1023,39 @@ class SmartChunkSplitter:
                 })
             
             # Write START line
-            write_progress(f"START idx={doc_idx} src={source_gcs} len={raw_text_len}")
+            write_progress("chunking_doc_start",
+                          idx=doc_idx,
+                          total=total_docs,
+                          file_name=doc_name,
+                          source_gcs=source_gcs,
+                          document_id=doc_meta.get('document_id', ''),
+                          page_label=doc_meta.get('page_label', ''),
+                          section_number=doc_meta.get('section_number', ''),
+                          raw_len=raw_text_len)
+            
+            # Setup per-document timeout (Linux/Unix only)
+            timeout_triggered = [False]  # Use list for mutable in nested function
+            prev_alarm_handler = None
+            prev_timer = None
+            
+            def timeout_handler(signum, frame):
+                timeout_triggered[0] = True
+                logger.warning("Document timeout triggered for idx=%d, source=%s", doc_idx, source_gcs)
+            
+            # Set up timeout if available (Linux/Unix only)
+            try:
+                if hasattr(signal, 'SIGALRM') and hasattr(signal, 'alarm'):
+                    prev_alarm_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(max_seconds_per_doc)
+                elif hasattr(signal, 'setitimer'):
+                    # Use setitimer if available (more precise)
+                    prev_timer = signal.setitimer(signal.ITIMER_REAL, max_seconds_per_doc)
+                    # Also set handler for SIGALRM if setitimer uses it
+                    if hasattr(signal, 'SIGALRM'):
+                        prev_alarm_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            except (AttributeError, OSError, ValueError):
+                # Timeout not available on this platform (Windows)
+                pass
             
             try:
                 text = doc.text or ""
@@ -994,11 +1068,32 @@ class SmartChunkSplitter:
                     # Use original text if cleaning fails
                     text = doc.text or ""
                 
+                # Check timeout periodically during processing
+                if timeout_triggered[0]:
+                    logger.warning("Document %s timed out, attempting fallback", doc_name)
+                    write_progress("chunking_doc_skipped",
+                                  idx=doc_idx,
+                                  reason="timeout",
+                                  source_gcs=source_gcs,
+                                  document_id=doc_meta.get('document_id', ''))
+                    # Try fallback to base splitter before skipping
+                    try:
+                        chunks = self.base_splitter.split_text(text)
+                        # Continue with fallback chunks
+                        logger.info("Fallback to base splitter succeeded for timed-out document %s", doc_name)
+                    except Exception as fallback_error:
+                        # Fallback also failed, skip document
+                        logger.error("Fallback also failed for timed-out document %s: %s", doc_name, fallback_error)
+                        continue
+                
                 # Check if page/document should be skipped (low content)
                 try:
                     if self.preprocessor.is_low_content_page(text):
                         logger.debug("Skipping low-content page: %s", doc_name)
-                        write_progress(f"SKIP idx={doc_idx} reason=low_content")
+                        write_progress("chunking_doc_skipped",
+                                      idx=doc_idx,
+                                      reason="low_content",
+                                      source_gcs=source_gcs)
                         continue
                 except Exception as e:
                     logger.debug("Error checking low-content for %s: %s", doc_name, e)
@@ -1008,7 +1103,10 @@ class SmartChunkSplitter:
                 use_simple_chunker = len(text) > max_doc_chars
                 if use_simple_chunker:
                     logger.warning("Using simple chunker for huge document: %s (len=%d)", doc_name, len(text))
-                    write_progress(f"HUGE idx={doc_idx} len={len(text)} using_simple_chunker=1")
+                    write_progress("chunking_doc_huge",
+                                  idx=doc_idx,
+                                  len=len(text),
+                                  using_simple_chunker=1)
                     # Use simple chunker with current settings or defaults
                     simple_chunk_size = self.chunk_size if self.chunk_size >= 512 else 512
                     simple_overlap = self.chunk_overlap if self.chunk_overlap >= 128 else 128
@@ -1022,10 +1120,18 @@ class SmartChunkSplitter:
                         if len(chunks) > max_chunks_per_doc:
                             logger.warning("Chunk count %d exceeds limit %d for %s, using base splitter", 
                                          len(chunks), max_chunks_per_doc, doc_name)
+                            write_progress("chunking_doc_chunk_explosion",
+                                          idx=doc_idx,
+                                          chunks=len(chunks),
+                                          max_allowed=max_chunks_per_doc,
+                                          fallback="base_splitter")
                             chunks = self.base_splitter.split_text(text)
                     except Exception as e:
                         logger.error("Error splitting text for %s: %s", doc_name, e)
-                        write_progress(f"ERROR idx={doc_idx} stage=split_text error={str(e)[:100]}")
+                        write_progress("chunking_doc_error",
+                                      idx=doc_idx,
+                                      stage="split_text",
+                                      error=str(e)[:100])
                         # Fallback to simple split if smart chunking fails
                         if text:
                             chunks = [text]
@@ -1081,7 +1187,18 @@ class SmartChunkSplitter:
                 
                 # Write DONE line
                 elapsed_secs = time.time() - doc_start_time
-                write_progress(f"DONE idx={doc_idx} secs={elapsed_secs:.2f} chunks={len(chunks)} nodes={nodes_emitted}")
+                write_progress("chunking_doc_done",
+                              idx=doc_idx,
+                              total=total_docs,
+                              file_name=doc_name,
+                              source_gcs=source_gcs,
+                              document_id=doc_meta.get('document_id', ''),
+                              page_label=doc_meta.get('page_label', ''),
+                              section_number=doc_meta.get('section_number', ''),
+                              raw_len=raw_text_len,
+                              elapsed_s=round(elapsed_secs, 2),
+                              chunks_count=len(chunks),
+                              nodes_emitted=nodes_emitted)
                 
                 # Diagnostic logging (if enabled)
                 if chunk_debug:
@@ -1100,12 +1217,33 @@ class SmartChunkSplitter:
                 elapsed_secs = time.time() - doc_start_time
                 error_msg = str(e)[:100]  # Truncate long error messages
                 logger.error("Error processing document %s: %s", doc_meta.get('file_name', 'unknown'), e)
-                write_progress(f"ERROR idx={doc_idx} secs={elapsed_secs:.2f} error={error_msg}")
+                write_progress("chunking_doc_error",
+                              idx=doc_idx,
+                              source_gcs=source_gcs,
+                              elapsed_s=round(elapsed_secs, 2),
+                              error=error_msg)
                 continue
+            finally:
+                # Always restore/disarm timeout
+                try:
+                    if hasattr(signal, 'setitimer'):
+                        if prev_timer is not None:
+                            signal.setitimer(signal.ITIMER_REAL, 0)  # Disarm
+                        else:
+                            signal.setitimer(signal.ITIMER_REAL, 0)  # Disarm
+                    elif hasattr(signal, 'alarm'):
+                        signal.alarm(0)  # Disarm
+                        if prev_alarm_handler is not None:
+                            signal.signal(signal.SIGALRM, prev_alarm_handler)  # Restore
+                except (AttributeError, OSError):
+                    pass
             
-            # Heartbeat every N documents
+            # Heartbeat every N documents (always write, even if CHUNK_DEBUG=0)
             if (doc_idx + 1) % heartbeat_every == 0:
-                write_progress(f"HEARTBEAT idx={doc_idx}")
+                write_progress("chunking_heartbeat",
+                              idx=doc_idx,
+                              total=total_docs,
+                              nodes_so_far=len(all_nodes))
                 if chunk_debug:
                     logger.info({
                         "event": "chunking_heartbeat",
@@ -3560,6 +3698,11 @@ def main():
     Production ingestion flow:
       GCS docs -> local staging + doc_manifest.json -> chunk/embed/build local index -> verify -> (optional) promote.
     """
+    # Print PID for stack dump debugging
+    pid = os.getpid()
+    logger.info(f"[INGEST] PID={pid} (kill -USR1 {pid} to dump stacks)")
+    print(f"[INGEST] PID={pid} (kill -USR1 {pid} to dump stacks)")
+    
     # Env/config (supports both new and existing env names)
     from backend.config.env import normalize_gcs_prefix
 
