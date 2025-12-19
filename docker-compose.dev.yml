@@ -22,6 +22,7 @@ services:
       - "8000:8000"
     environment:
       - ENV=dev
+      - PYTHONDONTWRITEBYTECODE=1
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - DATABASE_URL=postgresql://rag_user:ArrowSystems1@host.docker.internal:5432/rag_app
       - SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-admin@example.com}

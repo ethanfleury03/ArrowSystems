@@ -258,30 +258,30 @@ class DatabaseManager:
                     normalized = normalize_machine_models(machine_models)
                     user.machine_models = normalized
 
-                    # Commit transaction with retry on lock
-                    _retry_on_locked(session.commit)
-                    # Refresh to ensure we have latest state
-                    session.refresh(user)
-                    # Serialize BEFORE closing session to ensure user is still attached
-                    result = self._serialize_user(user)
-                    return result
-                except ValueError:
-                    # Re-raise validation errors
-                    session.rollback()
-                    raise
-                except SQLAlchemyError as e:
-                    # Database errors - rollback and re-raise
-                    session.rollback()
-                    logger.error(f"Database error updating user {user_id}: {e}")
-                    raise ValueError(f"Database error: {str(e)}")
-                except Exception as e:
-                    # Unexpected errors - rollback and re-raise
-                    session.rollback()
-                    logger.error(f"Unexpected error updating user {user_id}: {e}")
-                    raise ValueError(f"Failed to update user: {str(e)}")
-                finally:
-                    # Always close the session
-                    session.close()
+                # Commit transaction with retry on lock
+                _retry_on_locked(session.commit)
+                # Refresh to ensure we have latest state
+                session.refresh(user)
+                # Serialize BEFORE closing session to ensure user is still attached
+                result = self._serialize_user(user)
+                return result
+            except ValueError:
+                # Re-raise validation errors
+                session.rollback()
+                raise
+            except SQLAlchemyError as e:
+                # Database errors - rollback and re-raise
+                session.rollback()
+                logger.error(f"Database error updating user {user_id}: {e}")
+                raise ValueError(f"Database error: {str(e)}")
+            except Exception as e:
+                # Unexpected errors - rollback and re-raise
+                session.rollback()
+                logger.error(f"Unexpected error updating user {user_id}: {e}")
+                raise ValueError(f"Failed to update user: {str(e)}")
+            finally:
+                # Always close the session
+                session.close()
 
         return await run_sync(_update)
     

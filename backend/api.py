@@ -19,6 +19,9 @@ import threading
 import asyncio
 import warnings
 
+# Prevent Python from generating bytecode caches (read-only behavior)
+sys.dont_write_bytecode = True
+
 # Enable faulthandler early to catch startup hangs
 # Dumps stack traces every 60s if startup is stuck
 faulthandler.enable()

@@ -1,5 +1,9 @@
 # Python
 __pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 *.py[cod]
 *$py.class
 *.so
@@ -8,6 +12,9 @@ __pycache__/
 dist/
 build/
 *.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual Environment
 venv/
