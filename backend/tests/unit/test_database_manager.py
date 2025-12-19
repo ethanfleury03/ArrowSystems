@@ -158,6 +158,11 @@ async def test_update_user_machine_models_with_ids():
     finally:
         # Cleanup: Delete test machine models
         with SessionLocal() as session:
-            session.query(MachineModel).filter(MachineModel.id.in_([model1_id, model2_id])).delete(synchronize_session=False)
+            from sqlalchemy import select
+            models_to_delete = session.execute(
+                select(MachineModel).where(MachineModel.id.in_([model1_id, model2_id]))
+            ).scalars().all()
+            for model in models_to_delete:
+                session.delete(model)
             session.commit()
 
