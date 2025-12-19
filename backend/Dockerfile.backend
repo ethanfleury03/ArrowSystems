@@ -157,7 +157,8 @@ COPY backend/migrations/alembic.ini /app/backend/migrations/alembic.ini
 COPY pyproject.toml /app/pyproject.toml
 
 # Create health check script (uses PORT env var, defaults to 8080 for GCP)
-RUN printf '#!/bin/bash\nPORT=${PORT:-8080}\nif curl -f http://localhost:${PORT}/health > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && sed -i 's/\r$//' /app/healthcheck.sh && chmod +x /app/healthcheck.sh
+# Uses /healthz endpoint which has zero dependencies and returns immediately
+RUN printf '#!/bin/bash\nPORT=${PORT:-8080}\nif curl -f http://localhost:${PORT}/healthz > /dev/null 2>&1; then\n    exit 0\nelse\n    exit 1\nfi\n' > /app/healthcheck.sh && sed -i 's/\r$//' /app/healthcheck.sh && chmod +x /app/healthcheck.sh
 
 # Copy ONLY backend code (exclude data/, latest_model/, frontend/, etc.)
 # .dockerignore ensures large directories are excluded from build context
