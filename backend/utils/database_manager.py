@@ -196,42 +196,42 @@ class DatabaseManager:
                 })
 
                 if email:
-                        normalized = email.strip().lower()
-                        if not normalized:
-                            raise ValueError("Email cannot be empty")
-                        existing = (
-                            session.execute(
-                                select(User).where(func.lower(User.email) == normalized, User.id != user_id)
-                            ).scalars().first()
-                        )
-                        if existing:
-                            raise ValueError("Email already in use")
-                        user.email = normalized
+                    normalized = email.strip().lower()
+                    if not normalized:
+                        raise ValueError("Email cannot be empty")
+                    existing = (
+                        session.execute(
+                            select(User).where(func.lower(User.email) == normalized, User.id != user_id)
+                        ).scalars().first()
+                    )
+                    if existing:
+                        raise ValueError("Email already in use")
+                    user.email = normalized
 
-                    if name is not None:
-                        if not name.strip():
-                            raise ValueError("Name cannot be empty")
-                        user.name = name.strip()
+                if name is not None:
+                    if not name.strip():
+                        raise ValueError("Name cannot be empty")
+                    user.name = name.strip()
 
-                    if role:
-                        role_upper = role.strip().upper()
-                        if role_upper not in ["ADMIN", "TECHNICIAN", "CUSTOMER"]:
-                            raise ValueError(f"Invalid role: {role}. Must be ADMIN, TECHNICIAN, or CUSTOMER")
-                        user.role = role_upper
+                if role:
+                    role_upper = role.strip().upper()
+                    if role_upper not in ["ADMIN", "TECHNICIAN", "CUSTOMER"]:
+                        raise ValueError(f"Invalid role: {role}. Must be ADMIN, TECHNICIAN, or CUSTOMER")
+                    user.role = role_upper
 
-                    if password:
-                        if not password.strip():
-                            raise ValueError("Password cannot be empty")
-                        user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                if password:
+                    if not password.strip():
+                        raise ValueError("Password cannot be empty")
+                    user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-                    if company_name is not None:
-                        user.company_name = company_name.strip() if company_name else None
+                if company_name is not None:
+                    user.company_name = company_name.strip() if company_name else None
 
-                    if contact_name is not None:
-                        user.contact_name = contact_name.strip() if contact_name else None
+                if contact_name is not None:
+                    user.contact_name = contact_name.strip() if contact_name else None
 
-                    if contact_phone is not None:
-                        user.contact_phone = contact_phone.strip() if contact_phone else None
+                if contact_phone is not None:
+                    user.contact_phone = contact_phone.strip() if contact_phone else None
 
                 # Handle machine models - support both IDs and names
                 if machine_model_ids is not None:
