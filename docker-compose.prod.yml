@@ -23,6 +23,7 @@ services:
       - "8000:8000"
     environment:
       - ENV=prod
+      - PYTHONDONTWRITEBYTECODE=1
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
