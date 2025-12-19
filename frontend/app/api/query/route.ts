@@ -159,7 +159,30 @@ export async function POST(request: NextRequest) {
       });
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({ detail: 'Backend request failed' }));
+        // FIX: Ensure we always get a string detail, even if backend returns non-JSON or object
+        let error: any = { detail: 'Backend request failed' };
+        try {
+          const errorText = await response.text();
+          try {
+            error = JSON.parse(errorText);
+          } catch {
+            // Backend returned non-JSON, use text as detail
+            error = { detail: errorText || 'Backend request failed' };
+          }
+        } catch {
+          // Failed to read response body
+          error = { detail: 'Backend request failed' };
+        }
+        
+        // FIX: Ensure detail is always a string
+        if (error?.detail && typeof error.detail !== 'string') {
+          if (typeof error.detail === 'object') {
+            error.detail = error.detail?.message || error.detail?.error || JSON.stringify(error.detail);
+          } else {
+            error.detail = String(error.detail);
+          }
+        }
+        
         console.error('IAM Backend Request Error (query):', {
           status: response.status,
           path: '/query',
@@ -194,9 +217,12 @@ export async function POST(request: NextRequest) {
           );
         }
         
-        // For other errors, return as-is
+        // For other errors, ensure detail is a string
         return NextResponse.json(
-          error ?? { detail: 'Backend request failed' },
+          {
+            ...error,
+            detail: error?.detail || 'Backend request failed',
+          },
           { status: response.status },
         );
       }

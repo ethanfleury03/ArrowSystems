@@ -301,12 +301,12 @@ class DatabaseManager:
                     # Commit transaction with retry on lock
                     _retry_on_locked(session.commit)
                     
-                    # Refresh to ensure we have latest state (user must be in this session)
-                    session.refresh(user)
-                    
+                    # FIX: After commit, read needed fields and serialize while session is open
+                    # Clean pattern: commit → access fields → serialize → return (no refresh needed)
+                    # Since expire_on_commit=False, user attributes remain accessible
                     # Access machine_models (JSON column) inside session to ensure it's loaded
                     # This prevents any potential lazy-loading issues after session closes
-                    _ = user.machine_models  # Access the attribute while session is open
+                    machine_models_value = user.machine_models  # Access the attribute while session is open
                     
                     # Serialize BEFORE session closes (user is still attached)
                     # Return a dict, not the ORM instance

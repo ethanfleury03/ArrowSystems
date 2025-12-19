@@ -452,7 +452,37 @@ export function ChatInterface() {
         return
       }
       
-      const errorText = error instanceof Error ? error.message : (errorData?.detail || 'Failed to get response')
+      // FIX: Properly extract error message from various error formats
+      // Ensure we never show "[object Object]" in the UI
+      let errorText = 'Failed to get response'
+      
+      if (error instanceof Error) {
+        errorText = error.message
+      } else if (errorData?.detail) {
+        // Handle both string and object detail fields
+        if (typeof errorData.detail === 'string') {
+          errorText = errorData.detail
+        } else if (typeof errorData.detail === 'object') {
+          // Try to extract message from nested detail object
+          errorText = errorData.detail?.message || errorData.detail?.error || JSON.stringify(errorData.detail)
+        } else {
+          errorText = String(errorData.detail)
+        }
+      } else if (errorData?.error) {
+        errorText = typeof errorData.error === 'string' ? errorData.error : String(errorData.error)
+      } else if (errorData?.message) {
+        errorText = typeof errorData.message === 'string' ? errorData.message : String(errorData.message)
+      } else if (typeof error === 'string') {
+        errorText = error
+      } else if (error && typeof error === 'object') {
+        // Last resort: try to stringify the error object
+        try {
+          errorText = JSON.stringify(error)
+        } catch {
+          errorText = String(error)
+        }
+      }
+      
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
