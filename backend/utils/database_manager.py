@@ -177,47 +177,76 @@ class DatabaseManager:
     ) -> Dict[str, Any]:
         def _update() -> Dict[str, Any]:
             with SessionLocal() as session:
-                user = session.get(User, user_id)
-                if not user:
-                    raise ValueError("User not found")
+                try:
+                    user = session.get(User, user_id)
+                    if not user:
+                        raise ValueError("User not found")
 
-                if email:
-                    normalized = email.strip().lower()
-                    existing = (
-                        session.execute(
-                            select(User).where(func.lower(User.email) == normalized, User.id != user_id)
-                        ).scalars().first()
-                    )
-                    if existing:
-                        raise ValueError("Email already in use")
-                    user.email = normalized
+                    if email:
+                        normalized = email.strip().lower()
+                        if not normalized:
+                            raise ValueError("Email cannot be empty")
+                        existing = (
+                            session.execute(
+                                select(User).where(func.lower(User.email) == normalized, User.id != user_id)
+                            ).scalars().first()
+                        )
+                        if existing:
+                            raise ValueError("Email already in use")
+                        user.email = normalized
 
-                if name is not None:
-                    user.name = name
+                    if name is not None:
+                        if not name.strip():
+                            raise ValueError("Name cannot be empty")
+                        user.name = name.strip()
 
-                if role:
-                    user.role = role.strip().upper()
+                    if role:
+                        role_upper = role.strip().upper()
+                        if role_upper not in ["ADMIN", "TECHNICIAN", "CUSTOMER"]:
+                            raise ValueError(f"Invalid role: {role}. Must be ADMIN, TECHNICIAN, or CUSTOMER")
+                        user.role = role_upper
 
-                if password:
-                    user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                    if password:
+                        if not password.strip():
+                            raise ValueError("Password cannot be empty")
+                        user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-                if company_name is not None:
-                    user.company_name = company_name
+                    if company_name is not None:
+                        user.company_name = company_name.strip() if company_name else None
 
-                if contact_name is not None:
-                    user.contact_name = contact_name
+                    if contact_name is not None:
+                        user.contact_name = contact_name.strip() if contact_name else None
 
-                if contact_phone is not None:
-                    user.contact_phone = contact_phone
+                    if contact_phone is not None:
+                        user.contact_phone = contact_phone.strip() if contact_phone else None
 
-                if machine_models is not None:
-                    # Normalize machine_models using the helper
-                    from ..config.machine_models import normalize_machine_models
-                    user.machine_models = normalize_machine_models(machine_models)
+                    if machine_models is not None:
+                        # Normalize machine_models using the helper
+                        from ..config.machine_models import normalize_machine_models
+                        # Validate input type
+                        if not isinstance(machine_models, list):
+                            raise ValueError(f"machine_models must be a list, got {type(machine_models).__name__}")
+                        # Normalize and validate
+                        normalized = normalize_machine_models(machine_models)
+                        user.machine_models = normalized
 
-                _retry_on_locked(session.commit)
-                session.refresh(user)
-                return self._serialize_user(user)
+                    # Commit transaction with retry on lock
+                    _retry_on_locked(session.commit)
+                    session.refresh(user)
+                    return self._serialize_user(user)
+                except ValueError:
+                    # Re-raise validation errors
+                    raise
+                except SQLAlchemyError as e:
+                    # Database errors - rollback and re-raise
+                    session.rollback()
+                    logger.error(f"Database error updating user {user_id}: {e}")
+                    raise ValueError(f"Database error: {str(e)}")
+                except Exception as e:
+                    # Unexpected errors - rollback and re-raise
+                    session.rollback()
+                    logger.error(f"Unexpected error updating user {user_id}: {e}")
+                    raise ValueError(f"Failed to update user: {str(e)}")
 
         return await run_sync(_update)
     

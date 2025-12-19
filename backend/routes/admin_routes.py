@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import json
 import re
 import sys
+import traceback
 
 import jwt
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
@@ -62,7 +63,9 @@ class AdminUserUpdateRequest(BaseModel):
     company_name: Optional[str] = None
     contact_name: Optional[str] = None
     contact_phone: Optional[str] = None
-    machine_models: Optional[List[str]] = None  # List of machine model strings
+    machine_models: Optional[List[str]] = None  # List of machine model strings (legacy, names)
+    machine_model_ids: Optional[List[int]] = None  # List of machine model IDs (preferred)
+    machine_model_names: Optional[List[str]] = None  # List of machine model names (alternative to machine_models)
 
 
 class MachineListResponse(BaseModel):
@@ -345,8 +348,46 @@ def create_admin_router(
         new_role = (payload.role or current_role).upper()
         role_changed = new_role != current_role
         
-        # Normalize machine_models
-        machine_models = normalize_machine_models(payload.machine_models) if payload.machine_models is not None else None
+        # Normalize machine_models - support multiple input formats
+        machine_models = None
+        if payload.machine_model_ids is not None:
+            # Convert IDs to names via DB lookup
+            try:
+                with SessionLocal() as session:
+                    models = session.query(MachineModel).filter(
+                        MachineModel.id.in_(payload.machine_model_ids)
+                    ).all()
+                    if len(models) != len(set(payload.machine_model_ids)):
+                        found_ids = {m.id for m in models}
+                        missing_ids = sorted(set(payload.machine_model_ids) - found_ids)
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "error": "invalid_machine_model_ids",
+                                "missing": missing_ids,
+                                "message": f"Invalid machine model IDs: {missing_ids}"
+                            }
+                        )
+                    machine_models = [m.name for m in models]
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error({
+                    "event": "admin_update_user_machine_model_id_lookup_failed",
+                    "user_id": user_id,
+                    "machine_model_ids": payload.machine_model_ids,
+                    "error": f"{type(e).__name__}: {e}",
+                    "traceback": traceback.format_exc(),
+                })
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to lookup machine model IDs: {str(e)}"
+                )
+        elif payload.machine_model_names is not None:
+            machine_models = normalize_machine_models(payload.machine_model_names)
+        elif payload.machine_models is not None:
+            # Legacy field name
+            machine_models = normalize_machine_models(payload.machine_models)
         
         # Validation based on role changes
         if role_changed:
@@ -435,8 +476,58 @@ def create_admin_router(
                 request=http_request,
             )
             
+        except HTTPException:
+            # Re-raise HTTP exceptions (validation errors, etc.)
+            raise
         except ValueError as exc:
+            # User not found, email already in use, etc.
+            logger.warning({
+                "event": "admin_update_user_validation_failed",
+                "user_id": user_id,
+                "payload_keys": list(payload.dict(exclude_unset=True).keys()),
+                "machine_models": getattr(payload, "machine_models", None),
+                "machine_model_ids": getattr(payload, "machine_model_ids", None),
+                "machine_model_names": getattr(payload, "machine_model_names", None),
+                "error": f"{type(exc).__name__}: {exc}",
+            })
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as e:
+            # Log the full exception with traceback for debugging
+            logger.error({
+                "event": "admin_update_user_failed",
+                "user_id": user_id,
+                "payload_keys": list(payload.dict(exclude_unset=True).keys()),
+                "machine_models": getattr(payload, "machine_models", None),
+                "machine_model_ids": getattr(payload, "machine_model_ids", None),
+                "machine_model_names": getattr(payload, "machine_model_names", None),
+                "error": f"{type(e).__name__}: {e}",
+                "traceback": traceback.format_exc(),
+            })
+            
+            # Check for common database/migration issues
+            error_str = str(e).lower()
+            if "no such table" in error_str or "relation" in error_str and "does not exist" in error_str:
+                logger.error({
+                    "event": "schema_missing_user_machine_models_table",
+                    "user_id": user_id,
+                    "error": str(e),
+                })
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Database schema is missing required tables. Please run migrations."
+                )
+            elif "foreign key" in error_str or "constraint" in error_str:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid data: {str(e)}"
+                )
+            else:
+                # Generic 500 for unexpected errors
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to update user: {str(e)}"
+                )
+        
         return updated
 
     @router.put("/users/{user_id}", response_model=AdminUserResponse)
