@@ -183,6 +183,7 @@ class IndexLoadState:
                 )
                 
                 # Step 1: Download index from GCS (if in production and files missing)
+                download_duration = None
                 if settings.is_prod:
                     # Check for missing files
                     required = ["docstore.json", "index_store.json", "default__vector_store.json"]
@@ -191,6 +192,7 @@ class IndexLoadState:
                         if not os.path.exists(os.path.join(storage_path, f)):
                             missing.append(f)
                     if missing:
+                        download_start = time.time()
                         logger.info(
                             "rag_index_download_needed",
                             missing_files=missing,
@@ -198,11 +200,16 @@ class IndexLoadState:
                         )
                         from backend.rag.startup_downloader import download_index_from_gcs
                         download_ok = await asyncio.to_thread(download_index_from_gcs)
+                        download_duration = time.time() - download_start
                         if not download_ok:
                             from backend.rag.startup_downloader import get_last_download_error
                             error_msg = get_last_download_error() or "Index download failed (unknown)"
                             raise RuntimeError(f"Index download failed: {error_msg}")
-                        logger.info("rag_index_download_complete", message="Index download completed successfully")
+                        logger.info(
+                            "rag_index_download_complete",
+                            duration_seconds=download_duration,
+                            message=f"Index download completed successfully in {download_duration:.2f}s"
+                        )
                         
                         # Validate downloaded files have non-trivial size
                         for f in required:
@@ -235,6 +242,7 @@ class IndexLoadState:
                                     )
                 
                 # Step 2: Load index into pipeline
+                load_start_time = time.time()
                 logger.info("rag_index_load_pipeline_start", message="Loading index into RAG pipeline")
                 from backend.rag_pipeline import get_rag_pipeline
                 from backend.utils.database_manager import get_db_manager_instance
@@ -248,6 +256,7 @@ class IndexLoadState:
                 # Initialize pipeline (this loads models and index)
                 # This is a blocking call that will download models if needed and load the index
                 initialized = pipeline.ensure_initialized(storage_path)
+                load_duration = time.time() - load_start_time
                 if not initialized:
                     error_msg = pipeline.debug_status().get("last_error") or "Pipeline initialization failed"
                     raise RuntimeError(f"Pipeline initialization failed: {error_msg}")
@@ -255,6 +264,12 @@ class IndexLoadState:
                 # Verify pipeline is actually ready
                 if not pipeline.is_initialized():
                     raise RuntimeError("Pipeline initialization completed but is_initialized() returned False")
+                
+                logger.info(
+                    "rag_index_pipeline_load_complete",
+                    duration_seconds=load_duration,
+                    message=f"Pipeline index load completed in {load_duration:.2f}s"
+                )
                 
                 # Log sample metadata keys for compatibility checking
                 try:
@@ -294,24 +309,50 @@ class IndexLoadState:
                 self._status = "ready"
                 self._finished_at = time.time()
                 self._error = None
-                elapsed = self._finished_at - self._started_at
+                total_elapsed = self._finished_at - self._started_at
+                
+                # Build message with timing breakdown
+                timing_parts = []
+                if download_duration is not None:
+                    timing_parts.append(f"download: {download_duration:.2f}s")
+                if 'load_duration' in locals():
+                    timing_parts.append(f"load: {load_duration:.2f}s")
+                timing_msg = f" ({', '.join(timing_parts)})" if timing_parts else ""
                 
                 logger.info(
                     "rag_index_load_done",
                     status=self._status,
-                    elapsed_s=elapsed,
+                    total_elapsed_s=total_elapsed,
+                    download_duration_s=download_duration,
+                    load_duration_s=load_duration if 'load_duration' in locals() else None,
                     started_at=self._started_at,
                     finished_at=self._finished_at,
-                    message=f"RAG index load completed successfully in {elapsed:.2f}s"
+                    message=f"RAG index load completed successfully in {total_elapsed:.2f}s{timing_msg}"
                 )
                 
+            except asyncio.CancelledError:
+                # If cancelled (shouldn't happen with shield, but handle defensively)
+                # Reset to not_started so a new load can be attempted
+                logger.warning(
+                    "rag_index_load_cancelled",
+                    message="Index load was cancelled (should not happen with shield). Resetting to not_started."
+                )
+                self._status = "not_started"
+                self._error = "Load was cancelled"
+                self._finished_at = time.time()
+                self._ready_event.set()
+                raise  # Re-raise to propagate cancellation
             except Exception as e:
                 self._status = "failed"
                 self._finished_at = time.time()
                 # Store full exception details including traceback
                 import traceback
                 error_traceback = traceback.format_exc()
-                self._error = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{error_traceback}"
+                # Store error as string (extract key message, truncate traceback if too long)
+                error_str = str(e)
+                if len(error_traceback) > 2000:
+                    error_traceback = error_traceback[:2000] + "... (truncated)"
+                self._error = f"{type(e).__name__}: {error_str}"
                 elapsed = (self._finished_at - self._started_at) if self._started_at else None
                 
                 elapsed_str = f"{elapsed:.2f}s" if elapsed else "unknown"
@@ -319,10 +360,10 @@ class IndexLoadState:
                     "rag_index_load_failed",
                     status=self._status,
                     error_type=type(e).__name__,
-                    error_message=str(e),
+                    error_message=error_str,
                     elapsed_s=elapsed,
                     exc_info=True,
-                    message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {str(e)}"
+                    message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {error_str}"
                 )
                 raise RuntimeError(self._error) from e
             
