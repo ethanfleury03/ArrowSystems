@@ -369,28 +369,38 @@ class TextPreprocessor:
         """
         Normalize technical instructions and explanations.
         Fixes spacing, punctuation, and formatting issues.
+        PRESERVES newlines to maintain line structure for chunking.
         """
         if not text:
             return text
         
-        # Fix spacing around punctuation
-        text = re.sub(r'\s+([.,;:!?])', r'\1', text)  # Remove space before punctuation
-        text = re.sub(r'([.,;:!?])([^\s])', r'\1 \2', text)  # Add space after punctuation
+        # Process line by line to preserve newlines
+        lines = text.split('\n')
+        normalized_lines = []
         
-        # Fix spacing around parentheses and brackets
-        text = re.sub(r'\(\s+', '(', text)
-        text = re.sub(r'\s+\)', ')', text)
-        text = re.sub(r'\[\s+', '[', text)
-        text = re.sub(r'\s+\]', ']', text)
+        for line in lines:
+            # Fix spacing around punctuation (within line)
+            line = re.sub(r'\s+([.,;:!?])', r'\1', line)  # Remove space before punctuation
+            line = re.sub(r'([.,;:!?])([^\s\n])', r'\1 \2', line)  # Add space after punctuation (not before newline)
+            
+            # Fix spacing around parentheses and brackets (within line)
+            line = re.sub(r'\(\s+', '(', line)
+            line = re.sub(r'\s+\)', ')', line)
+            line = re.sub(r'\[\s+', '[', line)
+            line = re.sub(r'\s+\]', ']', line)
+            
+            # Normalize multiple spaces within line (but preserve intentional spacing in tables/code)
+            if '|' not in line and '\t' not in line:
+                line = re.sub(r' {2,}', ' ', line)
+            
+            # Fix common technical formatting issues (within line)
+            line = re.sub(r'(\d+)\s*-\s*(\d+)', r'\1-\2', line)  # Number ranges: "5 - 10" -> "5-10"
+            line = re.sub(r'(\w+)\s*/\s*(\w+)', r'\1/\2', line)  # Slashes: "A / B" -> "A/B"
+            
+            normalized_lines.append(line)
         
-        # Normalize multiple spaces (but preserve intentional spacing in tables/code)
-        # Only normalize if not in a table-like structure
-        if '|' not in text and '\t' not in text:
-            text = re.sub(r' {2,}', ' ', text)
-        
-        # Fix common technical formatting issues
-        text = re.sub(r'(\d+)\s*-\s*(\d+)', r'\1-\2', text)  # Number ranges: "5 - 10" -> "5-10"
-        text = re.sub(r'(\w+)\s*/\s*(\w+)', r'\1/\2', text)  # Slashes: "A / B" -> "A/B"
+        # Join lines back with newlines preserved
+        text = '\n'.join(normalized_lines)
         
         return text
     
@@ -410,20 +420,32 @@ class TextPreprocessor:
         return cleaned
     
     def normalize_whitespace(self, text: str) -> str:
-        """Normalize whitespace: collapse multiple spaces/tabs, normalize newlines."""
+        """
+        Normalize whitespace: collapse multiple spaces/tabs, normalize newlines.
+        PRESERVES newlines to prevent whole pages from becoming single long lines.
+        """
         try:
-            # Replace tabs with spaces
-            text = text.replace('\t', ' ')
+            # Split into lines first to preserve newline structure
+            lines = text.split('\n')
+            normalized_lines = []
             
-            # Collapse multiple spaces into single space (limit to prevent hanging)
-            text = re.sub(r' {2,}', ' ', text)
+            for line in lines:
+                # Replace tabs with spaces within the line
+                line = line.replace('\t', ' ')
+                
+                # Collapse multiple spaces into single space (within line only)
+                line = re.sub(r' {2,}', ' ', line)
+                
+                # Strip trailing spaces but preserve leading spaces (for indentation)
+                line = line.rstrip()
+                
+                normalized_lines.append(line)
             
-            # Normalize line breaks: multiple newlines -> double newline (paragraph break)
+            # Join lines back with newlines preserved
+            text = '\n'.join(normalized_lines)
+            
+            # Normalize excessive newlines: multiple newlines -> double newline (paragraph break)
             text = re.sub(r'\n{3,}', '\n\n', text)
-            
-            # Remove leading/trailing whitespace from each line
-            lines = [line.strip() for line in text.split('\n')]
-            text = '\n'.join(lines)
             
             # Remove leading/trailing whitespace from entire text
             text = text.strip()
@@ -818,7 +840,17 @@ class SmartChunkSplitter:
         current_chunk_size = 0
         
         i = 0
+        prev_i = -1  # Track previous i for infinite loop detection
         while i < len(lines):
+            # Safety guard: ensure i always increases
+            if i == prev_i:
+                logger.error("Infinite loop detected in _preserve_structured_chunks at line %d, forcing progress", i)
+                i += 1
+                if i >= len(lines):
+                    break
+                continue
+            prev_i = i
+            
             line = lines[i]
             line_stripped = line.strip()
             
@@ -871,6 +903,36 @@ class SmartChunkSplitter:
             
             # Regular line - add to current chunk
             line_size = len(line)
+            
+            # CRITICAL FIX: Handle single line that exceeds chunk_size
+            # This prevents infinite loop when preprocessing collapses newlines
+            if line_size > self.chunk_size:
+                # Flush current chunk if non-empty
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                    current_chunk = []
+                    current_chunk_size = 0
+                
+                # Split this single long line using base splitter
+                # This guarantees forward progress
+                try:
+                    line_chunks = self.base_splitter.split_text(line)
+                    chunks.extend(line_chunks)
+                except Exception:
+                    # Fallback: simple safe slicer if base_splitter fails
+                    start = 0
+                    text_len = line_size
+                    while start < text_len:
+                        end = min(start + self.chunk_size, text_len)
+                        chunks.append(line[start:end])
+                        start = end - self.chunk_overlap
+                        if start >= text_len:
+                            break
+                
+                i += 1
+                continue
+            
+            # Normal case: line fits or would fit with current chunk
             if current_chunk_size + line_size <= self.chunk_size:
                 current_chunk.append(line)
                 current_chunk_size += line_size
@@ -891,6 +953,14 @@ class SmartChunkSplitter:
                             break
                     current_chunk = overlap_lines + [line]
                     current_chunk_size = overlap_size + line_size
+                    i += 1
+                else:
+                    # Safety guard: if current_chunk is empty but we're here,
+                    # something went wrong - force progress to prevent infinite loop
+                    logger.warning("Empty current_chunk in chunking loop, forcing progress (idx=%d, line_size=%d)", 
+                                 i, line_size)
+                    # Add line as single chunk and move forward
+                    chunks.append(line)
                     i += 1
         
         # Add remaining chunk
@@ -1060,6 +1130,11 @@ class SmartChunkSplitter:
             try:
                 text = doc.text or ""
                 
+                # Stage timing: clean_text
+                stage_times = {}
+                if chunk_debug:
+                    stage_start = time.time()
+                
                 # Clean the text first (with error handling)
                 try:
                     text = self.preprocessor.clean_text(text, metadata=doc_meta)
@@ -1067,6 +1142,13 @@ class SmartChunkSplitter:
                     logger.warning("Error cleaning text for %s: %s", doc_name, e)
                     # Use original text if cleaning fails
                     text = doc.text or ""
+                
+                if chunk_debug:
+                    stage_times['clean_text'] = time.time() - stage_start
+                
+                # Stage timing: is_low_content_page
+                if chunk_debug:
+                    stage_start = time.time()
                 
                 # Check timeout periodically during processing
                 if timeout_triggered[0]:
@@ -1094,10 +1176,15 @@ class SmartChunkSplitter:
                                       idx=doc_idx,
                                       reason="low_content",
                                       source_gcs=source_gcs)
+                        if chunk_debug:
+                            stage_times['is_low_content_page'] = time.time() - stage_start
                         continue
                 except Exception as e:
                     logger.debug("Error checking low-content for %s: %s", doc_name, e)
                     # Continue processing if check fails
+                
+                if chunk_debug:
+                    stage_times['is_low_content_page'] = time.time() - stage_start
                 
                 # Check for huge documents and use simple chunker
                 use_simple_chunker = len(text) > max_doc_chars
@@ -1112,6 +1199,10 @@ class SmartChunkSplitter:
                     simple_overlap = self.chunk_overlap if self.chunk_overlap >= 128 else 128
                     chunks = self._simple_chunk_text(text, chunk_size=simple_chunk_size, chunk_overlap=simple_overlap)
                 else:
+                    # Stage timing: split_text
+                    if chunk_debug:
+                        stage_start = time.time()
+                    
                     # Split into chunks (with error handling)
                     try:
                         chunks = self.split_text(text)
@@ -1137,8 +1228,15 @@ class SmartChunkSplitter:
                             chunks = [text]
                         else:
                             chunks = []
+                    
+                    if chunk_debug:
+                        stage_times['split_text'] = time.time() - stage_start
                 
                 nodes_emitted = 0
+                
+                # Stage timing: chunk loop + should_skip_node
+                if chunk_debug:
+                    stage_start = time.time()
                 
                 # Create nodes from chunks
                 for chunk_idx, chunk_text in enumerate(chunks):
@@ -1185,6 +1283,9 @@ class SmartChunkSplitter:
                         logger.error("Error creating node for %s, chunk %s: %s", doc_name, chunk_idx, e)
                         continue
                 
+                if chunk_debug:
+                    stage_times['chunk_loop'] = time.time() - stage_start
+                
                 # Write DONE line
                 elapsed_secs = time.time() - doc_start_time
                 write_progress("chunking_doc_done",
@@ -1200,18 +1301,25 @@ class SmartChunkSplitter:
                               chunks_count=len(chunks),
                               nodes_emitted=nodes_emitted)
                 
-                # Diagnostic logging (if enabled)
+                # Diagnostic logging (if enabled) with stage timings
                 if chunk_debug:
-                    logger.info({
+                    log_data = {
                         "event": "chunking_doc_done",
                         "document_id": doc_meta.get('document_id'),
                         "source_gcs": source_gcs,
+                        "file_name": doc_name,
+                        "page_label": doc_meta.get('page_label'),
+                        "section_number": doc_meta.get('section_number'),
+                        "raw_len": raw_text_len,
                         "elapsed_s": round(elapsed_secs, 2),
                         "chunks": len(chunks),
                         "nodes_emitted": nodes_emitted,
                         "idx": doc_idx,
                         "total": total_docs
-                    })
+                    }
+                    # Add stage timings
+                    log_data.update({f"stage_{k}_s": round(v, 3) for k, v in stage_times.items()})
+                    logger.info(log_data)
                 
             except Exception as e:
                 elapsed_secs = time.time() - doc_start_time
@@ -3788,5 +3896,83 @@ def main():
         print(f"Local artifact ready at: {str(index_out_dir)}")
 
 
+def _test_chunker_infinite_loop_fix():
+    """
+    Self-test to verify the infinite loop fix in _preserve_structured_chunks.
+    Tests that a 6000+ char string with no newlines returns chunks quickly and doesn't hang.
+    """
+    print("\n" + "=" * 80)
+    print("Running chunker infinite loop fix self-test...")
+    print("=" * 80)
+    
+    # Create test input: 6000 chars with no newlines (simulates collapsed page)
+    test_text = "A" * 6000
+    chunk_size = 350
+    chunk_overlap = 88
+    
+    # Create splitter
+    preprocessor = TextPreprocessor()
+    splitter = SmartChunkSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        preprocessor=preprocessor
+    )
+    
+    # Test with timeout to catch infinite loops
+    import signal
+    
+    def timeout_handler(signum, frame):
+        raise TimeoutError("Test timed out - infinite loop detected!")
+    
+    # Set 1 second timeout
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(1)
+    
+    try:
+        start_time = time.time()
+        chunks = splitter._preserve_structured_chunks(test_text)
+        elapsed = time.time() - start_time
+        
+        signal.alarm(0)  # Disarm
+        
+        # Verify results
+        assert len(chunks) > 0, "Should return at least one chunk"
+        assert len(chunks) > 1, "Should return multiple chunks for 6000 char input"
+        assert all(len(chunk) > 0 for chunk in chunks), "All chunks should be non-empty"
+        assert elapsed < 1.0, f"Should complete quickly, took {elapsed:.2f}s"
+        
+        # Verify total content preserved (allowing for overlap)
+        total_chars = sum(len(chunk) for chunk in chunks)
+        assert total_chars >= len(test_text), "Total chunk length should preserve input"
+        
+        print(f"✅ Test passed!")
+        print(f"   - Input: {len(test_text)} chars (no newlines)")
+        print(f"   - Output: {len(chunks)} chunks")
+        print(f"   - Total output chars: {total_chars}")
+        print(f"   - Elapsed: {elapsed:.3f}s")
+        print(f"   - Chunk sizes: {[len(c) for c in chunks[:5]]}...")
+        return True
+        
+    except TimeoutError:
+        signal.alarm(0)
+        print("❌ Test FAILED: Infinite loop detected (timed out after 1s)")
+        return False
+    except AssertionError as e:
+        signal.alarm(0)
+        print(f"❌ Test FAILED: {e}")
+        return False
+    except Exception as e:
+        signal.alarm(0)
+        print(f"❌ Test FAILED with exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 if __name__ == "__main__":
-    main()
+    # Run self-test if env var is set
+    if os.getenv("RUN_CHUNK_SELFTEST", "0") == "1":
+        success = _test_chunker_infinite_loop_fix()
+        sys.exit(0 if success else 1)
+    else:
+        main()
