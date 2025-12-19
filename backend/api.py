@@ -12,9 +12,23 @@ Author: Arrow Systems Inc
 from __future__ import annotations
 
 import os
+import sys
 import time
+import faulthandler
+import threading
 import asyncio
 import warnings
+
+# Enable faulthandler early to catch startup hangs
+# Dumps stack traces every 60s if startup is stuck
+faulthandler.enable()
+faulthandler.dump_traceback_later(60, repeat=True, file=sys.stderr)
+
+def log_checkpoint(msg: str):
+    """Log startup checkpoint with timestamp."""
+    print(f"[BOOT] {time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+log_checkpoint("import start")
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -721,17 +735,24 @@ async def start_rag_init_if_needed():
 async def startup_event():
     """
     FastAPI startup event handler.
-    Handles application initialization including GCS index download and RAG pipeline initialization.
+    
+    IMPORTANT: This startup event must complete quickly (<30s) to avoid gunicorn worker timeout.
+    Heavy operations (GCS download, model loading, index loading) are deferred to lazy initialization
+    triggered on first /query request.
+    
     Wrapped in try/except to prevent unhandled exceptions from killing the worker.
     """
     global rag_pipeline, db_manager, query_summarizer, feedback_manager, saved_response_manager, rag_state
     
-    print("[DEBUG] FastAPI startup_event running", flush=True)
+    log_checkpoint("startup_event: begin")
     
     try:
+        log_checkpoint("startup_event: loading settings")
         # Log SMTP configuration status at startup (non-sensitive)
         from .utils.email_utils import log_smtp_config_status
         log_smtp_config_status()
+        
+        log_checkpoint("startup_event: settings loaded")
         
         # Log effective ENV value to confirm Cloud Run env vars are being used
         logger.info("env_runtime_value", 
@@ -742,6 +763,7 @@ async def startup_event():
                    message=f"Runtime environment: {settings.ENV} (is_prod={settings.is_prod}, is_dev={settings.is_dev})")
         logger.info("server_starting", environment=settings.ENV)
 
+        log_checkpoint("startup_event: initializing logs directory")
         # Ensure logs directory exists for feedback storage
         os.makedirs("logs", exist_ok=True)
         try:
@@ -752,6 +774,7 @@ async def startup_event():
             feedback_manager = None
             logger.warning("feedback_manager_init_failed", error=str(e), exc_info=True)
 
+        log_checkpoint("startup_event: db init start")
         # Database initialization - retryable + non-fatal (service can still serve RAG-only endpoints)
         try:
             logger.info(f"Database URL configured: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'database'}")
@@ -784,12 +807,15 @@ async def startup_event():
                 else:
                     logger.info("migration_check_passed", message="Database is up to date")
             
+            log_checkpoint("startup_event: db manager init start")
             # Initialize database manager with retries (prevents permanent "db_manager=None" after transient failures)
             db_ready = await ensure_db_manager_initialized(max_attempts=5, initial_delay_s=0.5, max_delay_s=5.0)
             if not db_ready:
                 print(f"[STARTUP] ⚠️ Database initialization failed: {db_state.get('last_error')}", flush=True)
+                log_checkpoint("startup_event: db manager init failed (non-fatal)")
             else:
                 logger.info("database_initialized", database="postgres")
+                log_checkpoint("startup_event: db manager init done")
 
                 # Seed default users (non-critical - continue even if this fails)
                 try:
@@ -799,6 +825,7 @@ async def startup_event():
                     logger.warning("seed_default_users_failed", error=str(seed_error), exc_info=True)
                     # Continue startup even if seeding fails - users can be created manually
             
+            log_checkpoint("startup_event: gcs smoke check start")
             # GCS connectivity smoke check (non-fatal, but logs errors)
             try:
                 from .utils.gcs_client import get_gcs_client, _is_cloud_run
@@ -887,6 +914,7 @@ async def startup_event():
                     exc_info=True
                 )
             
+            log_checkpoint("startup_event: db connection check start")
             # Run database connection check (non-fatal)
             if db_manager is not None:
                 try:
@@ -908,8 +936,12 @@ async def startup_event():
             db_state["last_error"] = f"{type(db_error).__name__}: {str(db_error)}"
             db_manager = None
             saved_response_manager = None
-    
-        # Resolve RAG storage path and initialize RAG pipeline
+        
+        log_checkpoint("startup_event: db init done")
+        
+        # RAG initialization is now FULLY LAZY - deferred to first /query request
+        # This prevents startup from blocking on GCS download or model loading
+        log_checkpoint("startup_event: rag setup start (lazy)")
         from backend.utils.storage_path import resolve_storage_path
         from backend.utils.test_mode import is_test_mode, get_index_dir
         
@@ -917,45 +949,8 @@ async def startup_event():
         storage_path = None
         
         try:
-            # In production mode, download index from GCS BEFORE checking if files exist
-            # This ensures files are available when RAG pipeline initializes
-            print(f"[DEBUG] ENV check: ENV={os.getenv('ENV')}, settings.ENV={settings.ENV}, is_prod={settings.is_prod}", flush=True)
-            if settings.is_prod:
-                print("[RAG] ✅ Production mode detected - starting GCS index download...", flush=True)
-                logger.info(
-                    "[RAG] Production mode — downloading index from GCS on startup",
-                    rag_index_bucket=getattr(settings, "RAG_INDEX_GCS_BUCKET", None),
-                    rag_index_prefix=getattr(settings, "RAG_INDEX_GCS_PREFIX", None),
-                    rag_index_local_dir=getattr(settings, "RAG_INDEX_LOCAL_DIR", None),
-                )
-                try:
-                    from backend.rag.startup_downloader import download_index_from_gcs
-                    print("[RAG] Calling download_index_from_gcs()...", flush=True)
-                    download_success = download_index_from_gcs()
-                    if not download_success:
-                        print("[RAG] ❌ Index download FAILED - RAG will be disabled", flush=True)
-                        logger.error("[RAG] Index download failed during startup — RAG will be disabled")
-                        logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
-                    else:
-                        print("[RAG] ✅ Index download completed successfully", flush=True)
-                        logger.info("[RAG] Index download completed successfully during startup")
-                except Exception as e:
-                    print(f"[RAG] ❌ Exception during download: {type(e).__name__}: {str(e)}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-                    logger.error(
-                        "[RAG] Exception during startup index download — RAG will be disabled",
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        exc_info=True
-                    )
-                    logger.warning("[RAG] Continuing startup without RAG. Check GCS bucket and service account permissions.")
-            else:
-                print(f"[RAG] ⚠️ Not in production mode - skipping download (ENV={os.getenv('ENV')}, is_prod={settings.is_prod})", flush=True)
-            
-            # Resolve storage path (handles prod vs dev paths)
-            logger.info("rag_storage_path_resolution_starting", message="Resolving RAG storage path")
-            
+            # Resolve storage path (handles prod vs dev paths) - this is fast, no I/O
+            log_checkpoint("startup_event: resolving storage path")
             if is_test_mode():
                 storage_path = get_index_dir()
                 logger.info("test_mode_enabled", storage_path=storage_path)
@@ -965,69 +960,35 @@ async def startup_event():
                 storage_path_obj = resolve_storage_path()
                 if storage_path_obj is None:
                     storage_path = None
-                    logger.error("rag_storage_path_resolution_failed", 
-                               message="resolve_storage_path() returned None - no valid index directory found. "
-                                      "RAG will be disabled until index is available. "
-                                      "In production, this should never happen - check Cloud Run volume mount configuration.")
+                    logger.warning("rag_storage_path_resolution_failed", 
+                               message="resolve_storage_path() returned None - RAG will lazy-load on first query")
                 else:
                     storage_path = str(storage_path_obj)
-                    # Ensure it's absolute (should always be in prod)
                     storage_path_abs = Path(storage_path).resolve()
                     storage_path = str(storage_path_abs)
-                    
                     logger.info("rag_storage_path_resolved", 
                               storage_path=storage_path,
-                              is_absolute=storage_path_abs.is_absolute(),
-                              exists=storage_path_abs.exists(),
-                              is_dir=storage_path_abs.is_dir() if storage_path_abs.exists() else False,
-                              message=f"RAG storage path resolved: {storage_path} (absolute: {storage_path_abs.is_absolute()})")
+                              message=f"RAG storage path resolved: {storage_path}")
             
-            # Store storage path in app state EARLY so other background init uses the same directory
-            # Also store a last_error slot for observability
+            # Store storage path in app state for lazy initialization
             app.state.rag_storage_path = storage_path or getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
             if not hasattr(app.state, "rag_last_error"):
                 app.state.rag_last_error = None
 
-            # Create pipeline instance
+            # Create pipeline instance (no initialization yet - models/index not loaded)
+            log_checkpoint("startup_event: creating pipeline instance (no init)")
             cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
             rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
             
-            # Initialize RAG state
-            rag_state["status"] = "initializing"
+            # Initialize RAG state (not ready yet - will be initialized lazily)
+            rag_state["status"] = "not_initialized"
             rag_state["last_error"] = None
+            app.state.rag_enabled = False
             
-            # Verify required index files exist before attempting initialization
-            if app.state.rag_storage_path:
-                print("[RAG] Checking if index files exist...", flush=True)
-                missing = _missing_index_files(app.state.rag_storage_path)
-                index_files_exist = len(missing) == 0
-                
-                if not index_files_exist:
-                    print(f"[RAG] ❌ Missing required files: {missing}", flush=True)
-                    logger.error("rag_startup_missing_files", 
-                                storage_path=app.state.rag_storage_path,
-                                missing_files=missing,
-                                message="Required index files missing after GCS download")
-                    rag_state["status"] = "error"
-                    rag_state["last_error"] = f"Missing required files: {missing}"
-                    app.state.rag_last_error = rag_state["last_error"]
-                    app.state.rag_enabled = False
-                else:
-                    print(f"[RAG] ✅ All required files present, starting background initialization...", flush=True)
-                    # Trigger background initialization (non-blocking)
-                    await start_rag_init_if_needed()
-            else:
-                print("[RAG] ⚠️ No storage path available - RAG will be disabled", flush=True)
-                logger.warning(
-                    "rag_index_not_found",
-                    message=(
-                        "RAG index not found. Continuing startup without RAG. "
-                        "Non-RAG endpoints (e.g., /auth/login, /health) will work normally."
-                    ),
-                )
-                rag_state["status"] = "error"
-                rag_state["last_error"] = "No storage path available"
-                app.state.rag_enabled = False
+            log_checkpoint("startup_event: rag setup done (lazy init deferred)")
+            logger.info("rag_startup_deferred", 
+                       message="RAG initialization deferred to lazy loading on first /query request. "
+                              "GCS download and model loading will happen on-demand.")
                 
         except Exception as e:
             # Log the error but DO NOT raise - allow app to start
@@ -1035,15 +996,12 @@ async def startup_event():
                         error=str(e), 
                         error_type=type(e).__name__,
                         exc_info=True,
-                        message=f"Failed during RAG startup: {type(e).__name__}: {str(e)}. "
+                        message=f"Failed during RAG setup: {type(e).__name__}: {str(e)}. "
                                "Server will start normally, but RAG will be disabled.")
-            print(f"[RAG] ❌ RAG startup failed: {type(e).__name__}: {str(e)}", flush=True)
-            import traceback
-            traceback.print_exc()
+            print(f"[RAG] ❌ RAG setup failed: {type(e).__name__}: {str(e)}", flush=True)
             error_msg = f"{type(e).__name__}: {str(e)}"
             storage_path = None
             rag_pipeline = None
-            # Do NOT clear storage path in prod; keep the configured fallback so /query can self-heal
             app.state.rag_storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
             app.state.rag_last_error = error_msg
             app.state.rag_enabled = False
@@ -1054,6 +1012,7 @@ async def startup_event():
         if not hasattr(app.state, 'rag_enabled'):
             app.state.rag_enabled = False
         
+        log_checkpoint("startup_event: query summarizer init start")
         # Initialize query summarizer
         try:
             query_summarizer = QuerySummarizer(
@@ -1061,13 +1020,16 @@ async def startup_event():
                 min_length=500  # Summarize queries >500 chars
             )
             logger.info("query_summarizer_initialized", enabled=True, min_length=500)
+            log_checkpoint("startup_event: query summarizer init done")
         except Exception as e:
             logger.warning("query_summarizer_init_failed", error=str(e), exc_info=True)
             query_summarizer = None
+            log_checkpoint("startup_event: query summarizer init failed (non-fatal)")
         
         # Set startup time for uptime calculation
         app.state.start_time = time.time()
         
+        log_checkpoint("startup_event: complete")
         logger.info("server_started", environment=settings.ENV, startup_time=time.time(), rag_enabled=app.state.rag_enabled)
         
     except Exception as e:
@@ -1427,6 +1389,24 @@ async def health_check():
         response.database_error = database_error
     
     return response
+
+
+@app.get("/healthz")
+# Note: /healthz endpoint is NOT rate limited and has ZERO dependencies
+async def healthz_check():
+    """
+    Zero-dependency health check endpoint for Cloud Run and CI.
+    
+    This endpoint returns 200 immediately without touching:
+    - Database
+    - GCS
+    - Embeddings/Reranker models
+    - RAG index
+    - Any other heavy dependencies
+    
+    Use this for Cloud Run health checks and CI/CD pipelines.
+    """
+    return {"ok": True}
 
 
 class RAGStatusResponse(BaseModel):
