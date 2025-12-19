@@ -952,13 +952,52 @@ async def startup_event():
             load_state = get_index_load_state()
             
             # Attempt to load index during startup (this will download from GCS if needed)
-            logger.info("rag_startup_load_attempt", message="Attempting to load RAG index during startup")
+            # Use a timeout to prevent blocking startup indefinitely
+            # Cloud Run startup timeout is typically 240s, but gunicorn worker timeout may be shorter
+            load_timeout = int(os.getenv("RAG_STARTUP_LOAD_TIMEOUT_SEC", "180"))  # Default 3 minutes
+            
+            logger.info(
+                "rag_startup_load_attempt",
+                timeout_seconds=load_timeout,
+                message=f"Attempting to load RAG index during startup (timeout: {load_timeout}s)"
+            )
             try:
-                await load_state.ensure_loaded()
-                logger.info("rag_startup_load_success", message="RAG index loaded successfully during startup")
-                app.state.rag_enabled = True
-                rag_state["status"] = "ready"
-                rag_state["last_error"] = None
+                # Load with timeout - if it takes too long, mark as failed and continue startup
+                await asyncio.wait_for(load_state.ensure_loaded(), timeout=load_timeout)
+                
+                # Verify state is ready after load
+                final_state = load_state.get_state()
+                if final_state["status"] == "ready":
+                    logger.info("rag_startup_load_success", message="RAG index loaded successfully during startup")
+                    app.state.rag_enabled = True
+                    rag_state["status"] = "ready"
+                    rag_state["last_error"] = None
+                else:
+                    # Load completed but state is not ready
+                    error_msg = final_state.get("error") or "Index load completed but state is not ready"
+                    logger.error(
+                        "rag_startup_load_not_ready",
+                        final_status=final_state["status"],
+                        error=error_msg,
+                        message=f"Index load completed but status is {final_state['status']}: {error_msg}"
+                    )
+                    app.state.rag_enabled = False
+                    app.state.rag_last_error = error_msg
+                    rag_state["status"] = "error"
+                    rag_state["last_error"] = error_msg
+            except asyncio.TimeoutError:
+                error_msg = f"Index loading timed out after {load_timeout}s during startup"
+                logger.error(
+                    "rag_startup_load_timeout",
+                    timeout_seconds=load_timeout,
+                    message=error_msg
+                )
+                print(f"[RAG] ❌ {error_msg}", flush=True)
+                app.state.rag_enabled = False
+                app.state.rag_last_error = error_msg
+                rag_state["status"] = "error"
+                rag_state["last_error"] = error_msg
+                # Don't update load_state here - let it continue in background if possible
             except RuntimeError as e:
                 # Index load failed - log error but keep app running
                 error_msg = str(e)

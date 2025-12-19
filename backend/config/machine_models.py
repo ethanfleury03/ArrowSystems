@@ -120,11 +120,43 @@ def normalize_machine_models(raw) -> list[str]:
     # Handle list
     if isinstance(raw, list):
         try:
-            allowed = set(get_allowed_machine_models())
+            # Get allowed models from DB (case-insensitive matching)
+            # Use is_valid_machine_model for each item to ensure case-insensitive matching
+            # This matches the validation logic and prevents filtering out valid models
+            normalized = []
+            for m in raw:
+                if isinstance(m, str) and m.strip():
+                    # Check if valid (case-insensitive) - this matches validation logic
+                    if is_valid_machine_model(m):
+                        # If valid, normalize the case/whitespace to match DB exactly
+                        # This ensures stored value matches what's in the DB
+                        try:
+                            db_names = _get_db_machine_model_names()
+                            # Find matching name (case-insensitive)
+                            normalized_str = " ".join(m.upper().split())
+                            matched = None
+                            for db_name in db_names:
+                                if " ".join(db_name.upper().split()) == normalized_str:
+                                    matched = db_name  # Use exact DB value
+                                    break
+                            if matched:
+                                normalized.append(matched)
+                            elif m in {GENERAL_MACHINE, ANY_MACHINE}:
+                                # Special tokens use exact match
+                                normalized.append(m)
+                        except Exception:
+                            # If DB lookup fails, fall back to exact match
+                            allowed = get_allowed_machine_models()
+                            if m in allowed:
+                                normalized.append(m)
+            return normalized
         except Exception:
-            allowed = {GENERAL_MACHINE, ANY_MACHINE}
-        normalized = [m for m in raw if isinstance(m, str) and m in allowed]
-        return normalized
+            # Fallback to exact match if validation fails
+            try:
+                allowed = set(get_allowed_machine_models())
+                return [m for m in raw if isinstance(m, str) and m in allowed]
+            except Exception:
+                return []
     
     return []
 
