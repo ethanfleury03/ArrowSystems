@@ -177,126 +177,113 @@ class DatabaseManager:
         machine_model_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         def _update() -> Dict[str, Any]:
-            # Use a fresh session to avoid detached instance issues
-            session = SessionLocal()
-            try:
-                # Use select() instead of session.get() to ensure we get a fresh instance from this session
-                from sqlalchemy import inspect
-                user = session.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
-                if not user:
-                    raise ValueError("User not found")
-                
-                # Diagnostic log for session state
-                logger.debug({
-                    "event": "update_user_session_state",
-                    "user_id": user_id,
-                    "persistent": inspect(user).persistent,
-                    "detached": inspect(user).detached,
-                    "transient": inspect(user).transient,
-                })
+            # Use context manager to ensure proper session lifecycle
+            with SessionLocal() as session:
+                try:
+                    # Load user in THIS session - critical for session.refresh() to work
+                    user = session.get(User, user_id)
+                    if not user:
+                        raise ValueError("User not found")
 
-                if email:
-                    normalized = email.strip().lower()
-                    if not normalized:
-                        raise ValueError("Email cannot be empty")
-                    existing = (
-                        session.execute(
-                            select(User).where(func.lower(User.email) == normalized, User.id != user_id)
-                        ).scalars().first()
-                    )
-                    if existing:
-                        raise ValueError("Email already in use")
-                    user.email = normalized
+                    if email:
+                        normalized = email.strip().lower()
+                        if not normalized:
+                            raise ValueError("Email cannot be empty")
+                        existing = (
+                            session.execute(
+                                select(User).where(func.lower(User.email) == normalized, User.id != user_id)
+                            ).scalars().first()
+                        )
+                        if existing:
+                            raise ValueError("Email already in use")
+                        user.email = normalized
 
-                if name is not None:
-                    if not name.strip():
-                        raise ValueError("Name cannot be empty")
-                    user.name = name.strip()
+                    if name is not None:
+                        if not name.strip():
+                            raise ValueError("Name cannot be empty")
+                        user.name = name.strip()
 
-                if role:
-                    role_upper = role.strip().upper()
-                    if role_upper not in ["ADMIN", "TECHNICIAN", "CUSTOMER"]:
-                        raise ValueError(f"Invalid role: {role}. Must be ADMIN, TECHNICIAN, or CUSTOMER")
-                    user.role = role_upper
+                    if role:
+                        role_upper = role.strip().upper()
+                        if role_upper not in ["ADMIN", "TECHNICIAN", "CUSTOMER"]:
+                            raise ValueError(f"Invalid role: {role}. Must be ADMIN, TECHNICIAN, or CUSTOMER")
+                        user.role = role_upper
 
-                if password:
-                    if not password.strip():
-                        raise ValueError("Password cannot be empty")
-                    user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                    if password:
+                        if not password.strip():
+                            raise ValueError("Password cannot be empty")
+                        user.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-                if company_name is not None:
-                    user.company_name = company_name.strip() if company_name else None
+                    if company_name is not None:
+                        user.company_name = company_name.strip() if company_name else None
 
-                if contact_name is not None:
-                    user.contact_name = contact_name.strip() if contact_name else None
+                    if contact_name is not None:
+                        user.contact_name = contact_name.strip() if contact_name else None
 
-                if contact_phone is not None:
-                    user.contact_phone = contact_phone.strip() if contact_phone else None
+                    if contact_phone is not None:
+                        user.contact_phone = contact_phone.strip() if contact_phone else None
 
-                # Handle machine models - support both IDs and names
-                # Initialize variable to track what to set (None means don't change)
-                updated_machine_models = None
-                
-                if machine_model_ids is not None:
-                    # Convert IDs to names via DB lookup in the same session
-                    from ..utils.db import MachineModel
-                    # Deduplicate IDs
-                    unique_ids = sorted(set(machine_model_ids))
+                    # Handle machine models - support both IDs and names
+                    # Initialize variable to avoid UnboundLocalError
+                    updated_machine_models = None
                     
-                    if len(unique_ids) == 0:
-                        # Empty list means clear all machine models
-                        updated_machine_models = []
-                    else:
-                        # Look up models by IDs
-                        models = session.execute(
-                            select(MachineModel).where(MachineModel.id.in_(unique_ids))
-                        ).scalars().all()
-                        found_ids = {m.id for m in models}
-                        missing_ids = sorted(set(unique_ids) - found_ids)
-                        if missing_ids:
-                            raise ValueError(f"Invalid machine model IDs: {missing_ids}")
-                        # Store as names (JSON column)
+                    if machine_model_ids is not None:
+                        # Convert IDs to names via DB lookup in the same session
+                        from ..utils.db import MachineModel
+                        # Convert to list of ints and deduplicate
+                        ids = [int(x) for x in machine_model_ids]
+                        unique_ids = sorted(set(ids))
+                        
+                        if len(unique_ids) == 0:
+                            # Empty list means clear all machine models
+                            updated_machine_models = []
+                        else:
+                            # Load machine models in THIS session
+                            models = session.execute(
+                                select(MachineModel).where(MachineModel.id.in_(unique_ids))
+                            ).scalars().all()
+                            found_ids = {m.id for m in models}
+                            missing_ids = sorted(set(unique_ids) - found_ids)
+                            if missing_ids:
+                                raise ValueError(f"Invalid machine model IDs: {missing_ids}")
+                            # Store as names (JSON column)
+                            from ..config.machine_models import normalize_machine_models
+                            updated_machine_models = normalize_machine_models([m.name for m in models])
+                    elif machine_models is not None:
+                        # Normalize machine_models using the helper (names provided directly)
                         from ..config.machine_models import normalize_machine_models
-                        updated_machine_models = normalize_machine_models([m.name for m in models])
-                elif machine_models is not None:
-                    # Normalize machine_models using the helper (names provided directly)
-                    from ..config.machine_models import normalize_machine_models
-                    # Validate input type
-                    if not isinstance(machine_models, list):
-                        raise ValueError(f"machine_models must be a list, got {type(machine_models).__name__}")
-                    # Normalize and validate
-                    updated_machine_models = normalize_machine_models(machine_models)
-                
-                # Only update user.machine_models if we have a value to set
-                if updated_machine_models is not None:
-                    user.machine_models = updated_machine_models
-                # If both machine_model_ids and machine_models are None, don't touch user.machine_models
+                        # Validate input type
+                        if not isinstance(machine_models, list):
+                            raise ValueError(f"machine_models must be a list, got {type(machine_models).__name__}")
+                        # Normalize and validate
+                        updated_machine_models = normalize_machine_models(machine_models)
+                    
+                    # Only update user.machine_models if we have a value to set
+                    if updated_machine_models is not None:
+                        user.machine_models = updated_machine_models
+                    # If both machine_model_ids and machine_models are None, don't touch user.machine_models
 
-                # Commit transaction with retry on lock
-                _retry_on_locked(session.commit)
-                # Refresh to ensure we have latest state
-                session.refresh(user)
-                # Serialize BEFORE closing session to ensure user is still attached
-                # Use persisted state from user object, not local variables
-                result = self._serialize_user(user)
-                return result
-            except ValueError:
-                # Re-raise validation errors
-                session.rollback()
-                raise
-            except SQLAlchemyError as e:
-                # Database errors - rollback and re-raise
-                session.rollback()
-                logger.error(f"Database error updating user {user_id}: {e}")
-                raise ValueError(f"Database error: {str(e)}")
-            except Exception as e:
-                # Unexpected errors - rollback and re-raise
-                session.rollback()
-                logger.error(f"Unexpected error updating user {user_id}: {e}")
-                raise ValueError(f"Failed to update user: {str(e)}")
-            finally:
-                # Always close the session
-                session.close()
+                    # Commit transaction with retry on lock
+                    _retry_on_locked(session.commit)
+                    # Refresh to ensure we have latest state (user must be in this session)
+                    session.refresh(user)
+                    # Serialize BEFORE session closes (user is still attached)
+                    result = self._serialize_user(user)
+                    return result
+                except ValueError:
+                    # Re-raise validation errors
+                    session.rollback()
+                    raise
+                except SQLAlchemyError as e:
+                    # Database errors - rollback and re-raise
+                    session.rollback()
+                    logger.error(f"Database error updating user {user_id}: {e}")
+                    raise ValueError(f"Database error: {str(e)}")
+                except Exception as e:
+                    # Unexpected errors - rollback and re-raise
+                    session.rollback()
+                    logger.error(f"Unexpected error updating user {user_id}: {e}")
+                    raise ValueError(f"Failed to update user: {str(e)}")
 
         return await run_sync(_update)
     

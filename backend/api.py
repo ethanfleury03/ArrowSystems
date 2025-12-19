@@ -945,56 +945,61 @@ async def startup_event():
         
         log_checkpoint("startup_event: db init done")
         
-        # RAG initialization is now FULLY LAZY - deferred to first /query request
-        # This prevents startup from blocking on GCS download or model loading
-        log_checkpoint("startup_event: rag setup start (lazy)")
-        from backend.utils.storage_path import resolve_storage_path
-        from backend.utils.test_mode import is_test_mode, get_index_dir
-        
-        rag_pipeline = None
-        storage_path = None
-        
+        # RAG index loading - deterministic Cloud Run-safe loading during startup
+        log_checkpoint("startup_event: rag index load start")
         try:
-            # Resolve storage path (handles prod vs dev paths) - this is fast, no I/O
-            log_checkpoint("startup_event: resolving storage path")
+            from backend.rag.index_manager import get_index_load_state
+            load_state = get_index_load_state()
+            
+            # Attempt to load index during startup (this will download from GCS if needed)
+            logger.info("rag_startup_load_attempt", message="Attempting to load RAG index during startup")
+            try:
+                await load_state.ensure_loaded()
+                logger.info("rag_startup_load_success", message="RAG index loaded successfully during startup")
+                app.state.rag_enabled = True
+                rag_state["status"] = "ready"
+                rag_state["last_error"] = None
+            except RuntimeError as e:
+                # Index load failed - log error but keep app running
+                error_msg = str(e)
+                logger.error(
+                    "rag_startup_load_failed",
+                    error=error_msg,
+                    exc_info=True,
+                    message=f"RAG index load failed during startup: {error_msg}. "
+                           "Server will start, but queries will return 503 until index is loaded."
+                )
+                print(f"[RAG] ❌ Index load failed during startup: {error_msg}", flush=True)
+                app.state.rag_enabled = False
+                app.state.rag_last_error = error_msg
+                rag_state["status"] = "error"
+                rag_state["last_error"] = error_msg
+            except Exception as e:
+                # Unexpected error during load
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(
+                    "rag_startup_load_exception",
+                    error=error_msg,
+                    exc_info=True,
+                    message=f"Unexpected error during RAG index load: {error_msg}"
+                )
+                print(f"[RAG] ❌ Unexpected error during index load: {error_msg}", flush=True)
+                app.state.rag_enabled = False
+                app.state.rag_last_error = error_msg
+                rag_state["status"] = "error"
+                rag_state["last_error"] = error_msg
+            
+            # Store storage path for reference (used by query handler)
+            from backend.utils.storage_path import resolve_storage_path
+            from backend.utils.test_mode import is_test_mode, get_index_dir
             if is_test_mode():
                 storage_path = get_index_dir()
-                logger.info("test_mode_enabled", storage_path=storage_path)
-                if not os.path.exists(storage_path):
-                    os.makedirs(storage_path, exist_ok=True)
             else:
                 storage_path_obj = resolve_storage_path()
-                if storage_path_obj is None:
-                    storage_path = None
-                    logger.warning("rag_storage_path_resolution_failed", 
-                               message="resolve_storage_path() returned None - RAG will lazy-load on first query")
-                else:
-                    storage_path = str(storage_path_obj)
-                    storage_path_abs = Path(storage_path).resolve()
-                    storage_path = str(storage_path_abs)
-                    logger.info("rag_storage_path_resolved", 
-                              storage_path=storage_path,
-                              message=f"RAG storage path resolved: {storage_path}")
+                storage_path = str(storage_path_obj.resolve()) if storage_path_obj else getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+            app.state.rag_storage_path = storage_path
             
-            # Store storage path in app state for lazy initialization
-            app.state.rag_storage_path = storage_path or getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
-            if not hasattr(app.state, "rag_last_error"):
-                app.state.rag_last_error = None
-
-            # Create pipeline instance (no initialization yet - models/index not loaded)
-            log_checkpoint("startup_event: creating pipeline instance (no init)")
-            cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
-            
-            # Initialize RAG state (not ready yet - will be initialized lazily)
-            rag_state["status"] = "not_initialized"
-            rag_state["last_error"] = None
-            app.state.rag_enabled = False
-            
-            log_checkpoint("startup_event: rag setup done (lazy init deferred)")
-            logger.info("rag_startup_deferred", 
-                       message="RAG initialization deferred to lazy loading on first /query request. "
-                              "GCS download and model loading will happen on-demand.")
+            log_checkpoint("startup_event: rag index load done")
                 
         except Exception as e:
             # Log the error but DO NOT raise - allow app to start
@@ -1006,8 +1011,6 @@ async def startup_event():
                                "Server will start normally, but RAG will be disabled.")
             print(f"[RAG] ❌ RAG setup failed: {type(e).__name__}: {str(e)}", flush=True)
             error_msg = f"{type(e).__name__}: {str(e)}"
-            storage_path = None
-            rag_pipeline = None
             app.state.rag_storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
             app.state.rag_last_error = error_msg
             app.state.rag_enabled = False
@@ -1414,7 +1417,99 @@ async def healthz_check():
     Available at both /healthz and /api/healthz for compatibility.
     Use this for Cloud Run health checks and CI/CD pipelines.
     """
-    return {"status": "ok"}
+    # Include index_ready status (read-only, no dependencies)
+    try:
+        from backend.rag.index_state import get_index_state
+        index_state = get_index_state()
+        index_ready = index_state.get("ready", False) and index_state.get("phase") == "ready"
+    except Exception:
+        # If state tracker fails, assume not ready (safe default)
+        index_ready = False
+    
+    return {"status": "ok", "index_ready": index_ready}
+
+
+@app.get("/api/index_status")
+# Note: /api/index_status is NOT rate limited for monitoring purposes
+async def index_status():
+    """
+    Get detailed status of RAG index download and loading.
+    
+    Returns structured information about:
+    - Current phase (idle, downloading, loading, ready, error)
+    - Progress for each file (size, downloaded, elapsed time, errors)
+    - Overall progress (bytes downloaded, files done/total)
+    - Error messages if any
+    
+    This endpoint is fast and has no dependencies (reads from in-memory state).
+    """
+    try:
+        from backend.rag.index_state import get_index_state
+        state = get_index_state()
+        return state
+    except Exception as e:
+        logger.error("index_status_endpoint_error", error=str(e), exc_info=True)
+        return {
+            "ready": False,
+            "phase": "error",
+            "error": f"Failed to get index state: {type(e).__name__}: {str(e)}",
+            "started_at": None,
+            "updated_at": None,
+            "files": {},
+            "total_bytes": 0,
+            "bytes_downloaded": 0,
+            "files_done": 0,
+            "files_total": 0,
+            "bucket": None,
+            "prefix": None,
+            "local_dir": None,
+        }
+
+
+@app.get("/api/readyz")
+# Note: /api/readyz is NOT rate limited for readiness checks
+async def readyz_check():
+    """
+    Readiness check endpoint for Cloud Run.
+    
+    Returns:
+    - 200 if index is ready
+    - 503 if index is loading, failed, or not started
+    
+    This endpoint checks if the RAG index is loaded and ready to serve queries.
+    """
+    try:
+        from backend.rag.index_manager import get_index_load_state
+        load_state = get_index_load_state()
+        state = load_state.get_state()
+        
+        if state["status"] == "ready":
+            return {"status": "ready"}
+        elif state["status"] == "loading":
+            return JSONResponse(
+                status_code=503,
+                content={"status": "loading", "message": "Index is currently loading"}
+            )
+        elif state["status"] == "failed":
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "failed",
+                    "error": state.get("error"),
+                    "message": f"Index loading failed: {state.get('error')}"
+                }
+            )
+        else:  # not_started
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not_started", "message": "Index loading has not started"}
+            )
+    except Exception as e:
+        logger.error("readyz_check_error", error=str(e), exc_info=True)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "error": f"Readiness check failed: {type(e).__name__}: {str(e)}"}
+        )
 
 
 class RAGStatusResponse(BaseModel):
@@ -2403,93 +2498,110 @@ async def query_knowledge_base(request: Request):
     """
     global rag_pipeline, db_manager, saved_response_manager
     
-    # Lazy initialization: ensure RAG is initialized before processing query
-    # IMPORTANT: Do not rely solely on app.state.rag_storage_path; use the same fallback chain as /rag/status.
-    storage_path = getattr(app.state, 'rag_storage_path', None) or _get_rag_storage_path_fallback()
-    if getattr(app.state, "rag_storage_path", None) is None:
-        app.state.rag_storage_path = storage_path
-
-    if not storage_path:
-        logger.warning("rag_query_no_storage_path", path="/query")
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "RAG_NOT_CONFIGURED",
-                "message": "RAG storage path is not configured.",
-                "rag_status": {
-                    "storage_dir": None,
-                    "last_error": getattr(app.state, "rag_last_error", None) or "RAG storage path is not configured",
-                    "initialized": False,
-                    "initializing": False,
-                },
-            },
-        )
-
-    # If index files are missing in prod, kick off download and return warming
-    missing = _missing_index_files(storage_path)
-    if settings.is_prod and missing:
-        if rag_download_state.get("status") == "not_started":
-            rag_download_state["status"] = "downloading"
-        asyncio.create_task(ensure_rag_index_downloaded())
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "RAG_WARMING",
-                "message": "Document search is warming up (downloading index). Please retry shortly.",
-                "rag_status": {
-                    "storage_dir": str(storage_path),
-                    "missing_files": missing,
-                    "download_status": rag_download_state.get("status"),
-                    "last_error": rag_download_state.get("last_error") or getattr(app.state, "rag_last_error", None),
-                    "initialized": False,
-                    "initializing": True,
-                },
-            },
-        )
-    
-    # Ensure pipeline instance exists
-    if rag_pipeline is None:
-        cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-        rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
-    
-    # Attempt lazy initialization if not already initialized
-    if not rag_pipeline.is_initialized():
-        initialized_now = rag_pipeline.ensure_initialized(storage_path)
-        if not initialized_now:
-            # Another request is warming it, or it failed
-            status = rag_pipeline.debug_status()
-            code = "RAG_WARMING" if status["initializing"] else "RAG_NOT_INITIALIZED"
-            message = (
-                "Document search is currently warming up. Please retry shortly."
-                if code == "RAG_WARMING"
-                else "RAG pipeline is not initialized. Please contact the administrator."
-            )
+    # Check index readiness first (Cloud Run-safe deterministic loading)
+    try:
+        from backend.rag.index_manager import get_index_load_state
+        load_state = get_index_load_state()
+        state = load_state.get_state()
+        
+        if state["status"] != "ready":
+            # Index not ready - check if we should wait
+            wait_seconds = float(os.getenv("RAG_WAIT_ON_QUERY_SEC", "0"))
+            if wait_seconds > 0 and state["status"] == "loading":
+                # Wait up to RAG_WAIT_ON_QUERY_SEC for loading to complete
+                try:
+                    ready = await load_state.wait_for_ready(timeout=wait_seconds)
+                    if ready:
+                        # Re-check status after wait
+                        state = load_state.get_state()
+                except Exception:
+                    pass  # If wait fails, continue to return 503
             
-            # Ensure rag_status includes storage_dir and last_error explicitly
-            rag_status_response = {
-                **status,
-                "storage_dir": status.get("storage_dir") or str(storage_path) if storage_path else None,
-                "last_error": status.get("last_error"),
-            }
-            
-            logger.warning("rag_query_rejected_not_ready",
-                         path="/query",
-                         code=code,
-                         initializing=status["initializing"],
-                         last_error=status["last_error"],
-                         storage_dir=rag_status_response.get("storage_dir"))
-            
+            # Still not ready - return 503 with status
+            if state["status"] == "loading":
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "index_not_ready",
+                        "code": "RAG_WARMING",
+                        "message": "Document search is warming up (index is loading). Please retry shortly.",
+                        "status": state["status"],
+                        "detail": "Index is currently loading. This should complete during startup on Cloud Run.",
+                    },
+                )
+            elif state["status"] == "failed":
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "index_not_ready",
+                        "code": "RAG_NOT_INITIALIZED",
+                        "message": f"RAG index failed to load: {state.get('error')}",
+                        "status": state["status"],
+                        "detail": state.get("error"),
+                    },
+                )
+            else:  # not_started
+                # Try to trigger load (but don't wait in request)
+                try:
+                    asyncio.create_task(load_state.ensure_loaded())
+                except Exception:
+                    pass
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "index_not_ready",
+                        "code": "RAG_NOT_INITIALIZED",
+                        "message": "RAG index loading has not started. Please retry shortly.",
+                        "status": state["status"],
+                        "detail": "Index loading should happen during startup. If this persists, check server logs.",
+                    },
+                )
+        
+        # Index is ready - ensure pipeline is available
+        storage_path = getattr(app.state, 'rag_storage_path', None) or _get_rag_storage_path_fallback()
+        if not storage_path:
             raise HTTPException(
                 status_code=503,
                 detail={
-                    "code": code,
-                    "message": message,
-                    "rag_status": rag_status_response,
+                    "code": "RAG_NOT_CONFIGURED",
+                    "message": "RAG storage path is not configured.",
                 },
             )
-    
-    # Update app state to reflect RAG is now ready
-    app.state.rag_enabled = rag_pipeline.is_initialized()
+        
+        # Ensure pipeline instance exists and is initialized
+        if rag_pipeline is None:
+            cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+            rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
+        
+        if not rag_pipeline.is_initialized():
+            # Pipeline not initialized despite index being ready - try to initialize
+            initialized = rag_pipeline.ensure_initialized(storage_path)
+            if not initialized:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "RAG_NOT_INITIALIZED",
+                        "message": "RAG pipeline failed to initialize despite index being ready.",
+                        "last_error": rag_pipeline.debug_status().get("last_error"),
+                    },
+                )
+        
+        # Update app state to reflect RAG is ready
+        app.state.rag_enabled = rag_pipeline.is_initialized()
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (503s)
+        raise
+    except Exception as e:
+        # Unexpected error checking index state
+        logger.error("rag_query_index_check_error", error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "RAG_ERROR",
+                "message": f"Error checking index status: {type(e).__name__}: {str(e)}",
+            },
+        )
     
     try:
         start_time = time.time()

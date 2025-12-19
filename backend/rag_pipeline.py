@@ -96,6 +96,13 @@ class RAGPipeline:
         Raises:
             Exception: If index loading fails
         """
+        # Track loading phase
+        try:
+            from backend.rag.index_state import set_phase
+            set_phase("loading", local_dir=storage_dir)
+        except Exception:
+            pass  # Don't fail if state tracker is unavailable
+        
         # Initialize models first (model loading is always allowed, even on Cloud Run)
         logger.info("rag_pipeline_initializing_models", storage_dir=storage_dir)
         self.orchestrator.initialize_models()
@@ -103,18 +110,47 @@ class RAGPipeline:
         
         # Load index (will handle missing index gracefully if ingestion is disabled)
         logger.info("rag_pipeline_loading_index", storage_dir=storage_dir)
-        self.orchestrator.load_index(storage_dir=storage_dir)
+        try:
+            self.orchestrator.load_index(storage_dir=storage_dir)
+        except Exception as e:
+            # Update state to error if loading fails
+            try:
+                from backend.rag.index_state import set_phase
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                set_phase("error", error=error_msg)
+            except Exception:
+                pass
+            raise
         
         # Check if index was actually loaded (might be None if ingestion disabled)
         if self.orchestrator.index is None:
-            raise RuntimeError("Index is None after load_index() call. Pipeline will not be functional.")
+            error_msg = "Index is None after load_index() call. Pipeline will not be functional."
+            try:
+                from backend.rag.index_state import set_phase
+                set_phase("error", error=error_msg)
+            except Exception:
+                pass
+            raise RuntimeError(error_msg)
         
         # Verify index is a valid object
         if not hasattr(self.orchestrator.index, 'storage_context'):
-            raise RuntimeError(
+            error_msg = (
                 f"Index object is missing storage_context attribute - may be corrupted. "
                 f"Index type: {type(self.orchestrator.index).__name__}"
             )
+            try:
+                from backend.rag.index_state import set_phase
+                set_phase("error", error=error_msg)
+            except Exception:
+                pass
+            raise RuntimeError(error_msg)
+        
+        # Mark as ready after successful load
+        try:
+            from backend.rag.index_state import set_phase
+            set_phase("ready", local_dir=storage_dir)
+        except Exception:
+            pass
         
     def initialize(self, storage_dir="latest_model") -> bool:
         """
@@ -227,6 +263,7 @@ class RAGPipeline:
                            message="Starting lazy RAG pipeline initialization")
                 
                 # Load index (this does the heavy work)
+                # Note: _load_index will update index_state phase to "loading" -> "ready" or "error"
                 self._load_index(storage_dir=storage_dir)
                 
                 # Mark as initialized
@@ -247,6 +284,15 @@ class RAGPipeline:
                 
                 self._initialized = False
                 self._last_error = f"{error_type}: {error_message}"
+                
+                # Update state to error (if not already set by _load_index)
+                try:
+                    from backend.rag.index_state import get_index_state, set_phase
+                    current_state = get_index_state()
+                    if current_state.get("phase") != "error":
+                        set_phase("error", error=f"{error_type}: {error_message}")
+                except Exception:
+                    pass
                 
                 logger.warning("rag_pipeline_lazy_init_failed_soft", 
                              storage_dir=storage_dir,
