@@ -1,22 +1,29 @@
 """
 Diagnostic script to validate ingestion/query contract alignment for RAG system.
 
-Checks five critical alignment points:
+Checks critical alignment points:
 1. Index file naming and presence
 2. Filename normalization (DB vs chunk metadata)
 3. Machine filtering split-brain (document-level vs chunk-level)
 4. Chunk machine_model_ids health
 5. Storage directory resolution consistency
+6. Docstore ↔ vector store node_id join consistency
+7. Embedding dimension match
+8. Text presence / non-empty content
+9. Required metadata type correctness
+10. Customer visibility simulation
 
 Usage:
     python -m backend.tools.diagnose_rag_contract --storage-dir latest_model --role ADMIN
     python -m backend.tools.diagnose_rag_contract --storage-dir latest_model --role CUSTOMER --user-machine "EZCut 330"
+    python -m backend.tools.diagnose_rag_contract --download-from-gcs --role ADMIN
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -812,6 +819,74 @@ def check_chunk_machine_model_ids(storage_dir: Path) -> Tuple[CheckResult, Dict[
     )
 
 
+def get_vector_store_node_ids(vector_store_path: Path) -> Set[str]:
+    """
+    Parse default__vector_store.json to extract all node_ids.
+    
+    LlamaIndex SimpleVectorStore format:
+      {"embedding_dict": {node_id: [vector], ...}}
+      or nested under keys like "data" / "embedding_dict"
+    """
+    if not vector_store_path.exists():
+        return set()
+    
+    try:
+        data = load_json(vector_store_path)
+        
+        # Try direct embedding_dict
+        if "embedding_dict" in data and isinstance(data["embedding_dict"], dict):
+            return set(data["embedding_dict"].keys())
+        
+        # Try nested under data
+        if "data" in data and isinstance(data["data"], dict):
+            if "embedding_dict" in data["data"]:
+                return set(data["data"]["embedding_dict"].keys())
+        
+        # Try other common keys
+        for key in ["embeddings", "vectors", "vector_dict"]:
+            if key in data and isinstance(data[key], dict):
+                return set(data[key].keys())
+        
+        # If top-level is a dict of node_id -> vector, use keys
+        if isinstance(data, dict) and len(data) > 0:
+            # Check if first value looks like a vector (list of numbers)
+            first_val = next(iter(data.values()))
+            if isinstance(first_val, list) and len(first_val) > 0:
+                if isinstance(first_val[0], (int, float)):
+                    return set(data.keys())
+        
+        return set()
+    except Exception as e:
+        safe_print(f"   ⚠️ Failed to parse vector store: {type(e).__name__}: {e}")
+        return set()
+
+
+def get_node_text(node_data: Dict[str, Any]) -> Optional[str]:
+    """Extract text from node data, handling various LlamaIndex formats."""
+    # Check __data__ wrapper
+    if "__data__" in node_data:
+        inner = node_data["__data__"]
+        if isinstance(inner, dict):
+            text = inner.get("text")
+            if isinstance(text, str):
+                return text
+    
+    # Direct text key
+    text = node_data.get("text")
+    if isinstance(text, str):
+        return text
+    
+    # Try _node_data
+    if "_node_data" in node_data:
+        inner = node_data["_node_data"]
+        if isinstance(inner, dict):
+            text = inner.get("text")
+            if isinstance(text, str):
+                return text
+    
+    return None
+
+
 def check_storage_resolution(storage_dir_arg: Optional[str], download_from_gcs: bool = False) -> Tuple[CheckResult, Dict[str, Any], Path]:
     """Check (5): Storage directory resolution consistency."""
     resolved = None
@@ -868,6 +943,623 @@ def check_storage_resolution(storage_dir_arg: Optional[str], download_from_gcs: 
         {"settings_dir": settings_dir, "resolved": resolved, "chosen": str(chosen), "gcs_bucket": gcs_bucket, "gcs_prefix": gcs_prefix},
         chosen,
     )
+
+
+def check_docstore_vector_join(storage_dir: Path) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check (6): Docstore ↔ vector store node_id join consistency."""
+    docstore_path = storage_dir / "docstore.json"
+    vector_store_path = storage_dir / "default__vector_store.json"
+    
+    if not docstore_path.exists():
+        return (
+            CheckResult("Docstore ↔ Vector join", "FAIL", "docstore.json missing", ""),
+            {},
+        )
+    
+    if not vector_store_path.exists():
+        return (
+            CheckResult("Docstore ↔ Vector join", "FAIL", "default__vector_store.json missing", ""),
+            {},
+        )
+    
+    try:
+        docstore = load_json(docstore_path)
+        docstore_nodes = get_docstore_nodes(docstore)
+        docstore_ids = set(docstore_nodes.keys())
+        
+        vector_ids = get_vector_store_node_ids(vector_store_path)
+        
+        docstore_only = sorted(docstore_ids - vector_ids)
+        vector_only = sorted(vector_ids - docstore_ids)
+        
+        total_docstore = len(docstore_ids)
+        total_vector = len(vector_ids)
+        intersection = len(docstore_ids & vector_ids)
+        
+        docstore_diff_rate = len(docstore_only) / max(total_docstore, 1)
+        vector_diff_rate = len(vector_only) / max(total_vector, 1)
+        
+        status = "PASS"
+        notes = f"intersection={intersection}, docstore={total_docstore}, vector={total_vector}"
+        
+        if docstore_diff_rate > 0.005 or vector_diff_rate > 0.005:  # 0.5% threshold
+            status = "FAIL"
+            notes += f" (drift >0.5%: docstore_only={len(docstore_only)}, vector_only={len(vector_only)})"
+        elif docstore_diff_rate > 0.001 or vector_diff_rate > 0.001:  # 0.1% threshold
+            status = "WARN"
+            notes += f" (small drift: docstore_only={len(docstore_only)}, vector_only={len(vector_only)})"
+        
+        return (
+            CheckResult(
+                "Docstore ↔ Vector join",
+                status,
+                f"docstore={total_docstore} vector={total_vector} intersection={intersection}",
+                notes,
+            ),
+            {
+                "docstore_count": total_docstore,
+                "vector_count": total_vector,
+                "intersection": intersection,
+                "docstore_only": docstore_only[:20],
+                "vector_only": vector_only[:20],
+                "docstore_only_count": len(docstore_only),
+                "vector_only_count": len(vector_only),
+            },
+        )
+    except Exception as e:
+        return (
+            CheckResult("Docstore ↔ Vector join", "FAIL", f"Parse error: {type(e).__name__}", str(e)),
+            {},
+        )
+
+
+def check_embedding_dimensions(storage_dir: Path) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check (7): Embedding dimension sanity."""
+    vector_store_path = storage_dir / "default__vector_store.json"
+    
+    if not vector_store_path.exists():
+        return (
+            CheckResult("Embedding dimensions", "FAIL", "default__vector_store.json missing", ""),
+            {},
+        )
+    
+    try:
+        data = load_json(vector_store_path)
+        
+        # Extract embedding_dict
+        embedding_dict = None
+        if "embedding_dict" in data:
+            embedding_dict = data["embedding_dict"]
+        elif "data" in data and "embedding_dict" in data["data"]:
+            embedding_dict = data["data"]["embedding_dict"]
+        elif isinstance(data, dict) and len(data) > 0:
+            first_val = next(iter(data.values()))
+            if isinstance(first_val, list) and len(first_val) > 0 and isinstance(first_val[0], (int, float)):
+                embedding_dict = data
+        
+        if not embedding_dict or not isinstance(embedding_dict, dict):
+            return (
+                CheckResult("Embedding dimensions", "FAIL", "Could not find embedding_dict", ""),
+                {},
+            )
+        
+        # Sample 20 vectors (or all if fewer)
+        sample_size = min(20, len(embedding_dict))
+        sample_ids = list(embedding_dict.keys())[:sample_size]
+        
+        dimensions = []
+        non_numeric = 0
+        has_nan = 0
+        has_inf = 0
+        
+        for node_id in sample_ids:
+            vec = embedding_dict[node_id]
+            if not isinstance(vec, list):
+                non_numeric += 1
+                continue
+            
+            dim = len(vec)
+            dimensions.append(dim)
+            
+            # Check for non-numeric, NaN, or Inf
+            for val in vec:
+                if not isinstance(val, (int, float)):
+                    non_numeric += 1
+                    break
+                if math.isnan(val):
+                    has_nan += 1
+                    break
+                if math.isinf(val):
+                    has_inf += 1
+                    break
+        
+        if not dimensions:
+            return (
+                CheckResult("Embedding dimensions", "FAIL", "No valid vectors found", ""),
+                {},
+            )
+        
+        unique_dims = set(dimensions)
+        expected_dim = dimensions[0] if dimensions else None
+        
+        # Check expected dimension from config (if available)
+        expected_config_dim = None
+        try:
+            from backend.config.env import settings
+            # Common embedding model dimensions
+            embed_model = getattr(settings, "EMBEDDING_MODEL", None) or os.getenv("EMBEDDING_MODEL", "")
+            if "bge-large" in embed_model.lower() or "bge_large" in embed_model.lower():
+                expected_config_dim = 1024
+            elif "bge-base" in embed_model.lower() or "bge_base" in embed_model.lower():
+                expected_config_dim = 768
+            elif "sentence-transformers" in embed_model.lower():
+                # Default for most sentence-transformers
+                expected_config_dim = 384
+        except Exception:
+            pass
+        
+        status = "PASS"
+        notes = f"dim={expected_dim}, sampled={sample_size}"
+        
+        if len(unique_dims) > 1:
+            status = "FAIL"
+            notes += f" (inconsistent dimensions: {unique_dims})"
+        elif expected_config_dim and expected_dim != expected_config_dim:
+            status = "WARN"
+            notes += f" (expected {expected_config_dim} from config, got {expected_dim})"
+        
+        if non_numeric > 0:
+            status = "FAIL"
+            notes += f" (non-numeric values: {non_numeric})"
+        
+        if has_nan > 0:
+            status = "FAIL"
+            notes += f" (NaN values: {has_nan})"
+        
+        if has_inf > 0:
+            status = "WARN"
+            notes += f" (Inf values: {has_inf})"
+        
+        return (
+            CheckResult("Embedding dimensions", status, f"dim={expected_dim}", notes),
+            {
+                "dimension": expected_dim,
+                "unique_dimensions": sorted(unique_dims),
+                "sample_size": sample_size,
+                "non_numeric": non_numeric,
+                "has_nan": has_nan,
+                "has_inf": has_inf,
+                "expected_config_dim": expected_config_dim,
+            },
+        )
+    except Exception as e:
+        return (
+            CheckResult("Embedding dimensions", "FAIL", f"Parse error: {type(e).__name__}", str(e)),
+            {},
+        )
+
+
+def check_text_presence(storage_dir: Path) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check (8): Text presence / non-empty content."""
+    docstore_path = storage_dir / "docstore.json"
+    
+    if not docstore_path.exists():
+        return (
+            CheckResult("Text presence", "FAIL", "docstore.json missing", ""),
+            {},
+        )
+    
+    try:
+        docstore = load_json(docstore_path)
+        nodes = get_docstore_nodes(docstore)
+        
+        if not nodes:
+            return (
+                CheckResult("Text presence", "FAIL", "0 nodes", ""),
+                {},
+            )
+        
+        missing_text = 0
+        empty_text = 0
+        very_short_text = 0
+        text_lengths = []
+        
+        for node_id, node_data in nodes.items():
+            text = get_node_text(node_data)
+            
+            if text is None:
+                missing_text += 1
+            elif not text.strip():
+                empty_text += 1
+            else:
+                text_lengths.append(len(text))
+                if len(text.strip()) < 20:
+                    very_short_text += 1
+        
+        total = len(nodes)
+        empty_rate = (missing_text + empty_text) / max(total, 1)
+        
+        status = "PASS"
+        notes = f"missing={missing_text}, empty={empty_text}, very_short={very_short_text}"
+        
+        if empty_rate > 0.05:  # 5% threshold
+            status = "FAIL"
+            notes += f" ({empty_rate:.1%} empty - exceeds 5%)"
+        elif empty_rate > 0.01:  # 1% threshold
+            status = "WARN"
+            notes += f" ({empty_rate:.1%} empty - exceeds 1%)"
+        
+        avg_length = sum(text_lengths) / max(len(text_lengths), 1) if text_lengths else 0
+        
+        return (
+            CheckResult("Text presence", status, f"total={total} empty={missing_text+empty_text}", notes),
+            {
+                "total_nodes": total,
+                "missing_text": missing_text,
+                "empty_text": empty_text,
+                "very_short_text": very_short_text,
+                "empty_rate": empty_rate,
+                "avg_text_length": avg_length,
+                "min_text_length": min(text_lengths) if text_lengths else 0,
+                "max_text_length": max(text_lengths) if text_lengths else 0,
+            },
+        )
+    except Exception as e:
+        return (
+            CheckResult("Text presence", "FAIL", f"Parse error: {type(e).__name__}", str(e)),
+            {},
+        )
+
+
+def check_metadata_types(storage_dir: Path) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check (9): Required metadata type correctness."""
+    docstore_path = storage_dir / "docstore.json"
+    
+    if not docstore_path.exists():
+        return (
+            CheckResult("Metadata types", "FAIL", "docstore.json missing", ""),
+            {},
+        )
+    
+    try:
+        docstore = load_json(docstore_path)
+        nodes = get_docstore_nodes(docstore)
+        
+        if not nodes:
+            return (
+                CheckResult("Metadata types", "FAIL", "0 nodes", ""),
+                {},
+            )
+        
+        non_list_machine_ids = 0
+        non_int_entries = 0
+        missing_content_type = 0
+        missing_page_label = 0
+        
+        for node_id, node_data in nodes.items():
+            meta = get_node_metadata(node_data)
+            
+            # Check machine_model_ids
+            mm_ids = meta.get("machine_model_ids")
+            if mm_ids is not None:
+                if not isinstance(mm_ids, list):
+                    non_list_machine_ids += 1
+                else:
+                    for entry in mm_ids:
+                        if not isinstance(entry, int):
+                            non_int_entries += 1
+            
+            # Check content_type
+            if "content_type" not in meta:
+                missing_content_type += 1
+            
+            # Check page_label (optional but common)
+            if "page_label" not in meta:
+                missing_page_label += 1
+        
+        total = len(nodes)
+        
+        status = "PASS"
+        notes = f"non_list_mm_ids={non_list_machine_ids}, non_int_entries={non_int_entries}"
+        
+        if non_list_machine_ids > 0:
+            status = "FAIL"
+            notes += " (machine_model_ids must be list)"
+        
+        if non_int_entries > 0:
+            if status == "PASS":
+                status = "WARN"
+            notes += f" (non-int entries in machine_model_ids: {non_int_entries})"
+        
+        return (
+            CheckResult("Metadata types", status, f"total={total}", notes),
+            {
+                "total_nodes": total,
+                "non_list_machine_ids": non_list_machine_ids,
+                "non_int_entries": non_int_entries,
+                "missing_content_type": missing_content_type,
+                "missing_page_label": missing_page_label,
+            },
+        )
+    except Exception as e:
+        return (
+            CheckResult("Metadata types", "FAIL", f"Parse error: {type(e).__name__}", str(e)),
+            {},
+        )
+
+
+def resolve_machine_names_to_ids(machine_names: List[str]) -> Tuple[Dict[str, int], List[str]]:
+    """
+    Resolve machine model names to IDs from database.
+    
+    Returns:
+        (resolved: {name -> id}, unmatched: [names])
+    """
+    resolved = {}
+    unmatched = []
+    
+    if not machine_names:
+        return resolved, unmatched
+    
+    try:
+        from backend.utils.db import SessionLocal, MachineModel  # type: ignore
+        session = SessionLocal()
+        try:
+            all_machines = session.query(MachineModel).all()
+            
+            # Normalize input names for matching
+            normalized_input = {}
+            for name in machine_names:
+                normalized = name.strip().lower().replace(" ", "_").replace("-", "_")
+                normalized_input[normalized] = name
+            
+            # Build lookup: normalized_name -> (id, original_name)
+            machine_lookup = {}
+            for mm in all_machines:
+                db_name = mm.name or ""
+                normalized_db = db_name.strip().lower().replace(" ", "_").replace("-", "_")
+                machine_lookup[normalized_db] = (mm.id, db_name)
+            
+            # Match input to DB
+            for normalized, original in normalized_input.items():
+                matched = False
+                # Exact match
+                if normalized in machine_lookup:
+                    mm_id, db_name = machine_lookup[normalized]
+                    resolved[original] = mm_id
+                    matched = True
+                else:
+                    # Fuzzy match: check if normalized contains or is contained
+                    for norm_db, (mm_id, db_name) in machine_lookup.items():
+                        if normalized in norm_db or norm_db in normalized:
+                            resolved[original] = mm_id
+                            matched = True
+                            break
+                
+                if not matched:
+                    unmatched.append(original)
+            
+            return resolved, unmatched
+        finally:
+            session.close()
+    except Exception as e:
+        safe_print(f"   ⚠️ Failed to resolve machine names: {type(e).__name__}: {e}")
+        return {}, machine_names
+
+
+def get_machine_model_name_map() -> Dict[int, str]:
+    """Get mapping of machine_model_id -> name from database."""
+    try:
+        from backend.utils.db import SessionLocal, MachineModel  # type: ignore
+        session = SessionLocal()
+        try:
+            machines = session.query(MachineModel).all()
+            return {mm.id: mm.name or f"Unknown_{mm.id}" for mm in machines}
+        finally:
+            session.close()
+    except Exception:
+        return {}
+
+
+def get_top_machine_model_candidates(unmatched_names: List[str], limit: int = 10) -> List[Tuple[str, int]]:
+    """Get top N closest machine model names from DB for unmatched input names."""
+    try:
+        from backend.utils.db import SessionLocal, MachineModel  # type: ignore
+        session = SessionLocal()
+        try:
+            all_machines = session.query(MachineModel).all()
+            candidates = []
+            
+            for unmatched in unmatched_names:
+                normalized_unmatched = unmatched.strip().lower().replace(" ", "_").replace("-", "_")
+                for mm in all_machines:
+                    db_name = mm.name or ""
+                    normalized_db = db_name.strip().lower().replace(" ", "_").replace("-", "_")
+                    # Simple similarity: count common substrings
+                    similarity = 0
+                    if normalized_unmatched in normalized_db or normalized_db in normalized_unmatched:
+                        similarity = min(len(normalized_unmatched), len(normalized_db))
+                    candidates.append((db_name, mm.id, similarity))
+            
+            # Sort by similarity (descending) and return top N
+            candidates.sort(key=lambda x: x[2], reverse=True)
+            return [(name, mm_id) for name, mm_id, _ in candidates[:limit]]
+        finally:
+            session.close()
+    except Exception:
+        return []
+
+
+def check_machine_model_distribution(storage_dir: Path) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check chunk machine_model_ids distribution (top 10)."""
+    docstore_path = storage_dir / "docstore.json"
+    
+    if not docstore_path.exists():
+        return (
+            CheckResult("Machine model distribution", "FAIL", "docstore.json missing", ""),
+            {},
+        )
+    
+    try:
+        docstore = load_json(docstore_path)
+        nodes = get_docstore_nodes(docstore)
+        
+        if not nodes:
+            return (
+                CheckResult("Machine model distribution", "FAIL", "0 nodes", ""),
+                {},
+            )
+        
+        # Count machine_model_ids across all nodes
+        mm_id_counts: Counter = Counter()
+        total_with_ids = 0
+        
+        for node_id, node_data in nodes.items():
+            meta = get_node_metadata(node_data)
+            mm_ids = meta.get("machine_model_ids")
+            if isinstance(mm_ids, list):
+                for mm_id in mm_ids:
+                    if isinstance(mm_id, int):
+                        mm_id_counts[mm_id] += 1
+                        total_with_ids += 1
+        
+        # Get top 10
+        top_10_ids = mm_id_counts.most_common(10)
+        
+        # Map IDs to names if DB available
+        id_to_name = get_machine_model_name_map()
+        top_10_with_names = [
+            (mm_id, count, id_to_name.get(mm_id, f"Unknown_{mm_id}"))
+            for mm_id, count in top_10_ids
+        ]
+        
+        return (
+            CheckResult(
+                "Machine model distribution",
+                "PASS",
+                f"total_with_ids={total_with_ids}",
+                f"top_10_ids={len(top_10_ids)}",
+            ),
+            {
+                "total_with_ids": total_with_ids,
+                "top_10": top_10_with_names,
+                "unique_machine_ids": len(mm_id_counts),
+            },
+        )
+    except Exception as e:
+        return (
+            CheckResult("Machine model distribution", "FAIL", f"Parse error: {type(e).__name__}", str(e)),
+            {},
+        )
+
+
+def check_customer_visibility(storage_dir: Path, role: str, user_machines: List[str]) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check (10): Customer visibility simulation."""
+    if role.upper() != "CUSTOMER":
+        return (
+            CheckResult("Customer visibility", "SKIP", f"role={role}", "Only runs for CUSTOMER role"),
+            {},
+        )
+    
+    docstore_path = storage_dir / "docstore.json"
+    if not docstore_path.exists():
+        return (
+            CheckResult("Customer visibility", "FAIL", "docstore.json missing", ""),
+            {},
+        )
+    
+    try:
+        # Load DB documents
+        docs, db_error = load_db_documents()
+        if not docs:
+            return (
+                CheckResult("Customer visibility", "WARN", "DB unavailable", f"Cannot check without DB: {db_error or 'no documents'}"),
+                {},
+            )
+        
+        # Resolve machine names to IDs
+        resolved_machines, unmatched = resolve_machine_names_to_ids(user_machines)
+        resolved_ids = list(resolved_machines.values())
+        
+        # Compute allowed filenames (same logic as orchestrator)
+        allowed_filenames = compute_allowed_filenames(docs, role=role, user_machines=user_machines)
+        
+        # Load docstore
+        docstore = load_json(docstore_path)
+        nodes = get_docstore_nodes(docstore)
+        
+        # Count visible chunks
+        total_chunks = 0
+        visible_chunks = 0
+        excluded_inactive = 0
+        excluded_machine_mismatch = 0
+        excluded_missing_metadata = 0
+        
+        # Build filename -> is_active map from DB
+        filename_to_active = {}
+        filename_to_machines = {}
+        for d in docs:
+            fn = getattr(d, "file_name", None) or ""
+            filename_to_active[fn] = getattr(d, "is_active", True)
+            mm_field = getattr(d, "machine_model", None)
+            filename_to_machines[fn] = parse_machine_model_field(mm_field)
+        
+        for node_id, node_data in nodes.items():
+            total_chunks += 1
+            meta = get_node_metadata(node_data)
+            fn = str(meta.get("file_name", "") or "")
+            
+            # Check if excluded due to inactive doc
+            if fn in filename_to_active and not filename_to_active[fn]:
+                excluded_inactive += 1
+                continue
+            
+            # Check if excluded due to filename not in allowed
+            if fn not in allowed_filenames:
+                excluded_machine_mismatch += 1
+                continue
+            
+            # Check if excluded due to missing machine_model_ids
+            mm_ids = meta.get("machine_model_ids")
+            if not isinstance(mm_ids, list) or len(mm_ids) == 0:
+                excluded_missing_metadata += 1
+                continue
+            
+            # If we get here, chunk is visible
+            visible_chunks += 1
+        
+        status = "PASS"
+        notes = f"allowed_docs={len(allowed_filenames)}, visible_chunks={visible_chunks}/{total_chunks}"
+        
+        if len(allowed_filenames) > 0 and visible_chunks == 0:
+            status = "FAIL"
+            notes += " (allowed docs exist but zero visible chunks)"
+        elif len(allowed_filenames) == 0:
+            status = "FAIL"
+            notes += " (no allowed documents for customer)"
+        elif visible_chunks / max(total_chunks, 1) < 0.05:
+            status = "WARN"
+            notes += f" (very low visibility: {visible_chunks/total_chunks*100:.1f}%)"
+        
+        return (
+            CheckResult("Customer visibility", status, f"visible={visible_chunks}/{total_chunks}", notes),
+            {
+                "allowed_documents": len(allowed_filenames),
+                "total_chunks": total_chunks,
+                "visible_chunks": visible_chunks,
+                "excluded_inactive": excluded_inactive,
+                "excluded_machine_mismatch": excluded_machine_mismatch,
+                "excluded_missing_metadata": excluded_missing_metadata,
+                "resolved_machine_ids": resolved_ids,
+                "resolved_machine_names": resolved_machines,
+                "unmatched_machine_names": unmatched,
+            },
+        )
+    except Exception as e:
+        return (
+            CheckResult("Customer visibility", "FAIL", f"Error: {type(e).__name__}", str(e)),
+            {},
+        )
 
 
 # ---------- Main ----------
@@ -1026,6 +1718,31 @@ Examples:
     results.append(r)
     details["chunk_machine_model_ids"] = d
     
+    # (6) docstore ↔ vector store join
+    r, d = check_docstore_vector_join(storage_dir)
+    results.append(r)
+    details["docstore_vector_join"] = d
+    
+    # (7) embedding dimensions
+    r, d = check_embedding_dimensions(storage_dir)
+    results.append(r)
+    details["embedding_dimensions"] = d
+    
+    # (8) text presence
+    r, d = check_text_presence(storage_dir)
+    results.append(r)
+    details["text_presence"] = d
+    
+    # (9) metadata types
+    r, d = check_metadata_types(storage_dir)
+    results.append(r)
+    details["metadata_types"] = d
+    
+    # (10) customer visibility (if CUSTOMER role)
+    r, d = check_customer_visibility(storage_dir, role=args.role, user_machines=args.user_machine)
+    results.append(r)
+    details["customer_visibility"] = d
+    
     # Print samples with better diagnostics
     docstore_path = storage_dir / "docstore.json"
     if docstore_path.exists():
@@ -1061,6 +1778,66 @@ Examples:
                     )
         except Exception as e:
             safe_print(f"\nDocstore sample nodes: failed to read ({type(e).__name__}: {e})")
+    
+    # Print detailed results for new checks
+    if "docstore_vector_join" in details and details["docstore_vector_join"]:
+        d = details["docstore_vector_join"]
+        if d.get("docstore_only_count", 0) > 0:
+            safe_print(f"\n  ⚠️ Docstore-only node IDs (top 10): {d.get('docstore_only', [])[:10]}")
+        if d.get("vector_only_count", 0) > 0:
+            safe_print(f"\n  ⚠️ Vector-only node IDs (top 10): {d.get('vector_only', [])[:10]}")
+    
+    if "embedding_dimensions" in details and details["embedding_dimensions"]:
+        d = details["embedding_dimensions"]
+        safe_print(f"\n  Embedding dimension: {d.get('dimension', 'unknown')}")
+        if d.get("expected_config_dim"):
+            safe_print(f"  Expected (from config): {d.get('expected_config_dim')}")
+        if d.get("non_numeric", 0) > 0 or d.get("has_nan", 0) > 0:
+            safe_print(f"  ⚠️ Vector quality issues: non_numeric={d.get('non_numeric', 0)}, NaN={d.get('has_nan', 0)}, Inf={d.get('has_inf', 0)}")
+    
+    if "text_presence" in details and details["text_presence"]:
+        d = details["text_presence"]
+        if d.get("empty_rate", 0) > 0:
+            safe_print(f"\n  ⚠️ Text issues: missing={d.get('missing_text', 0)}, empty={d.get('empty_text', 0)}, very_short={d.get('very_short_text', 0)}")
+            safe_print(f"  Text stats: avg_len={d.get('avg_text_length', 0):.0f}, min={d.get('min_text_length', 0)}, max={d.get('max_text_length', 0)}")
+    
+    if "metadata_types" in details and details["metadata_types"]:
+        d = details["metadata_types"]
+        if d.get("non_list_machine_ids", 0) > 0 or d.get("non_int_entries", 0) > 0:
+            safe_print(f"\n  ⚠️ Metadata type issues: non_list_mm_ids={d.get('non_list_machine_ids', 0)}, non_int_entries={d.get('non_int_entries', 0)}")
+    
+    if "machine_model_distribution" in details and details["machine_model_distribution"]:
+        d = details["machine_model_distribution"]
+        safe_print(f"\n  Machine model distribution (top 10):")
+        for mm_id, count, name in d.get("top_10", [])[:10]:
+            safe_print(f"    - {name} (ID {mm_id}): {count} chunks")
+    
+    if "customer_visibility" in details and details["customer_visibility"] and args.role == "CUSTOMER":
+        d = details["customer_visibility"]
+        safe_print(f"\n  Customer visibility breakdown:")
+        
+        # Machine resolution
+        resolved = d.get("resolved_machine_names", {})
+        unmatched = d.get("unmatched_machine_names", [])
+        if resolved:
+            safe_print(f"    Machine name resolution:")
+            for input_name, mm_id in resolved.items():
+                id_to_name = get_machine_model_name_map()
+                db_name = id_to_name.get(mm_id, f"Unknown_{mm_id}")
+                safe_print(f"      '{input_name}' -> ID {mm_id} ({db_name})")
+        if unmatched:
+            safe_print(f"    ⚠️ Unmatched machine names: {unmatched}")
+            candidates = get_top_machine_model_candidates(unmatched, limit=10)
+            if candidates:
+                safe_print(f"    Top 10 closest DB matches:")
+                for name, mm_id in candidates:
+                    safe_print(f"      - {name} (ID {mm_id})")
+        
+        safe_print(f"    - Allowed documents: {d.get('allowed_documents', 0)}")
+        safe_print(f"    - Visible chunks: {d.get('visible_chunks', 0)}/{d.get('total_chunks', 0)}")
+        safe_print(f"    - Excluded (inactive): {d.get('excluded_inactive', 0)}")
+        safe_print(f"    - Excluded (machine mismatch): {d.get('excluded_machine_mismatch', 0)}")
+        safe_print(f"    - Excluded (missing metadata): {d.get('excluded_missing_metadata', 0)}")
     
     # Summary table
     safe_print("\n" + "=" * 110)
