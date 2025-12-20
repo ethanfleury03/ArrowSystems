@@ -21,6 +21,7 @@ from ..ingest import (
     NonTextExtractor
 )
 from .query_summarizer import QuerySummarizer
+from .filenames import ensure_node_has_filename
 from ..logging_config import get_logger
 from ..logging_context import get_user_id
 
@@ -293,10 +294,42 @@ def ingest_single_file(
                 )
                 logger.info("ingestion_embedding_model_initialized", model_name=embed_model_name)
             
-            # Insert nodes into existing index (embeddings generated automatically)
+            # CRITICAL: Validate and repair filename integrity before indexing
+            logger.info(f"Validating filename integrity for {len(all_nodes)} nodes...")
+            validated_nodes = []
+            repaired_count = 0
+            still_missing = 0
+            
+            for node in all_nodes:
+                success, file_name = ensure_node_has_filename(node, strict=True)
+                if success:
+                    if file_name and not (hasattr(node, 'metadata') and node.metadata.get('file_name')):
+                        repaired_count += 1
+                    validated_nodes.append(node)
+                else:
+                    still_missing += 1
+                    node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None) or 'unknown'
+                    logger.warning(f"Node missing file_name and cannot repair: {node_id}")
+            
+            # Strict validation: fail if >0.5% missing
+            missing_rate = still_missing / max(len(all_nodes), 1)
+            if missing_rate > 0.005:  # 0.5% threshold
+                error_msg = (
+                    f"CRITICAL: {still_missing} nodes ({missing_rate:.1%}) missing file_name after repair. "
+                    f"Exceeds 0.5% threshold. Ingestion aborted."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+            
+            if repaired_count > 0:
+                logger.info(f"Repaired {repaired_count} nodes with missing file_name")
+            if still_missing > 0:
+                logger.warning(f"Dropped {still_missing} nodes that could not be repaired (below threshold)")
+            
+            # Insert validated nodes into existing index (embeddings generated automatically)
             batch_size = 50
-            for i in range(0, len(all_nodes), batch_size):
-                batch = all_nodes[i:i + batch_size]
+            for i in range(0, len(validated_nodes), batch_size):
+                batch = validated_nodes[i:i + batch_size]
                 index.insert_nodes(batch)
             
             # Persist the updated index

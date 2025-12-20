@@ -22,6 +22,7 @@ from llama_index.core.schema import TextNode
 
 from backend.utils.db import SessionLocal, DocumentIngestionMetadata
 from backend.utils.query_summarizer import QuerySummarizer
+from backend.utils.filenames import ensure_node_has_filename
 from backend.logging_config import get_logger
 from backend.utils.test_mode import get_chunks_dir, get_index_dir
 
@@ -225,15 +226,47 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
             index = VectorStoreIndex(nodes=[], show_progress=False)
             logger.info(f"embedding_index_created_new", metadata_id=metadata_id, storage_dir=storage_dir)
         
-        # Insert nodes into existing index (incremental addition, not rebuild)
+        # CRITICAL: Validate and repair filename integrity before indexing
+        logger.info(f"Validating filename integrity for {len(nodes)} nodes...")
+        validated_nodes = []
+        repaired_count = 0
+        still_missing = 0
+        
+        for node in nodes:
+            success, file_name = ensure_node_has_filename(node, strict=True)
+            if success:
+                if file_name and not (hasattr(node, 'metadata') and node.metadata.get('file_name')):
+                    repaired_count += 1
+                validated_nodes.append(node)
+            else:
+                still_missing += 1
+                node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None) or 'unknown'
+                logger.warning(f"Node missing file_name and cannot repair: {node_id}")
+        
+        # Strict validation: fail if >0.5% missing
+        missing_rate = still_missing / max(len(nodes), 1)
+        if missing_rate > 0.005:  # 0.5% threshold
+            error_msg = (
+                f"CRITICAL: {still_missing} nodes ({missing_rate:.1%}) missing file_name after repair. "
+                f"Exceeds 0.5% threshold. Embedding aborted."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        
+        if repaired_count > 0:
+            logger.info(f"Repaired {repaired_count} nodes with missing file_name")
+        if still_missing > 0:
+            logger.warning(f"Dropped {still_missing} nodes that could not be repaired (below threshold)")
+        
+        # Insert validated nodes into existing index (incremental addition, not rebuild)
         # Embeddings are generated automatically during insertion
         # This adds the new document's chunks to the existing index without affecting other documents
         batch_size = 50
         successful_inserts = 0
         failed_inserts = 0
         
-        for i in range(0, len(nodes), batch_size):
-            batch = nodes[i:i + batch_size]
+        for i in range(0, len(validated_nodes), batch_size):
+            batch = validated_nodes[i:i + batch_size]
             batch_index = i // batch_size
             try:
                 index.insert_nodes(batch)
@@ -258,7 +291,7 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
                         "request_id": request_id,
                     }
                 )
-                # Try inserting nodes one by one
+                # Try inserting nodes one by one (only validated nodes reach here)
                 for node in batch:
                     try:
                         index.insert_nodes([node])

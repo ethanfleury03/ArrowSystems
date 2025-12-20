@@ -54,6 +54,7 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.schema import NodeWithScore, TextNode, ImageNode, Document
 from backend.utils.embedding_utils import build_offline_embedding
+from backend.utils.filenames import canonicalize_filename
 
 # DOCX and Markdown support
 try:
@@ -2030,8 +2031,10 @@ class DocumentLoader:
                 
                 if file_ext == '.pdf':
                     pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
+                    # Use canonical filename for consistent identity
+                    canonical_name = canonicalize_filename(filename)
                     for doc in pdf_docs:
-                        doc.metadata['file_name'] = filename
+                        doc.metadata['file_name'] = canonical_name  # Canonical for identity matching
                         doc.metadata['file_type'] = 'pdf'
                         doc.metadata['gcs_path'] = gcs_uri  # Store GCS path in metadata
                     documents.extend(pdf_docs)
@@ -2068,10 +2071,14 @@ class DocumentLoader:
             try:
                 file_ext = file_path.suffix.lower()
                 file_name = file_path.name
+                canonical_name = canonicalize_filename(file_name)  # Canonical for identity
                 
                 if file_ext == '.pdf':
                     # Use SimpleDirectoryReader for PDFs (existing logic)
                     pdf_docs = SimpleDirectoryReader(input_files=[str(file_path)]).load_data()
+                    # Set canonical filename in metadata
+                    for doc in pdf_docs:
+                        doc.metadata['file_name'] = canonical_name
                     documents.extend(pdf_docs)
                     
                 elif file_ext == '.docx' and DOCX_AVAILABLE:
@@ -2109,6 +2116,7 @@ class DocumentLoader:
         try:
             doc = DocxDocument(str(file_path))
             file_name = file_path.name
+            canonical_name = canonicalize_filename(file_name)  # Canonical for identity
             
             # Extract text by paragraphs (for section tracking)
             paragraphs = []
@@ -2135,7 +2143,7 @@ class DocumentLoader:
                         doc_obj = Document(
                             text=section_text_combined,
                             metadata={
-                                'file_name': file_name,
+                                'file_name': canonical_name,  # Canonical for identity
                                 'page_label': str(current_section),  # Use section number as page_label
                                 'content_type': 'text',
                                 'file_type': 'docx',
@@ -2155,7 +2163,7 @@ class DocumentLoader:
                     doc_obj = Document(
                         text=section_text_combined,
                         metadata={
-                            'file_name': file_name,
+                            'file_name': canonical_name,  # Canonical for identity
                             'page_label': str(current_section),
                             'content_type': 'text',
                             'file_type': 'docx',
@@ -2198,6 +2206,7 @@ class DocumentLoader:
                 content = f.read()
             
             file_name = file_path.name
+            canonical_name = canonicalize_filename(file_name)  # Canonical for identity
             
             # Split by markdown headers (# Header, ## Header, etc.)
             lines = content.split('\n')
@@ -2245,7 +2254,7 @@ class DocumentLoader:
                 doc_obj = Document(
                     text=section['text'],
                     metadata={
-                        'file_name': file_name,
+                        'file_name': canonical_name,  # Canonical for identity (defined above)
                         'page_label': str(section['section_num']),  # Use section number as page_label
                         'content_type': 'text',
                         'file_type': 'markdown',
@@ -2260,7 +2269,7 @@ class DocumentLoader:
                 doc_obj = Document(
                     text=content,
                     metadata={
-                        'file_name': file_name,
+                        'file_name': canonical_name,  # Canonical for identity (defined above)
                         'page_label': '1',
                         'content_type': 'text',
                         'file_type': 'markdown',
@@ -2545,15 +2554,21 @@ class TechnicalRAGPipeline:
                 key = source_path
             meta = self._required_meta_by_local_path.get(key)
             if meta:
+                # Ensure file_name is canonical
+                if 'file_name' in meta:
+                    meta['file_name'] = canonicalize_filename(meta['file_name'])
                 return meta
             # Loud fallback: stable UUID5 derived from the local source_path string.
             stable_id = _stable_uuid5_from_string(str(source_path))
+            source_basename = os.path.basename(source_path)
+            canonical_file_name = canonicalize_filename(source_basename)
             logger.warning(
                 "Non-text node missing required metadata mapping; using deterministic fallback",
                 extra={"source_path": source_path, "fallback_document_id": stable_id},
             )
             return {
                 "document_id": stable_id,
+                "file_name": canonical_file_name,  # Canonical filename
                 "machine_model_ids": [],
                 "machine_model_names": [],
                 "machine_models": [],
@@ -2940,11 +2955,68 @@ class TechnicalRAGPipeline:
                 show_progress=True
             )
         
-        # Insert all nodes into the index (batch insert for better performance)
-        print(f"   Inserting {len(all_nodes)} nodes into index...")
+        # CRITICAL: Validate and repair filename integrity before indexing
+        print(f"\n🔍 Validating filename integrity for {len(all_nodes)} nodes...")
+        from backend.utils.filenames import ensure_node_has_filename
+        
+        validated_nodes = []
+        missing_before_repair = 0
+        repaired_count = 0
+        still_missing = 0
+        missing_node_ids = []
+        
+        for node in all_nodes:
+            # Check if missing before repair
+            metadata = getattr(node, 'metadata', {}) if hasattr(node, 'metadata') else {}
+            if not metadata.get('file_name', '').strip():
+                missing_before_repair += 1
+            
+            # Attempt repair
+            success, file_name = ensure_node_has_filename(node, strict=True)
+            
+            if success:
+                if file_name and file_name not in [m.get('file_name', '') for m in [metadata] if isinstance(m, dict)]:
+                    repaired_count += 1
+                validated_nodes.append(node)
+            else:
+                # Cannot repair - drop node
+                still_missing += 1
+                node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None) or str(node)[:50]
+                missing_node_ids.append(node_id)
+                if still_missing <= 5:  # Log first 5
+                    logger.warning(f"Node missing file_name and cannot repair: {node_id}, metadata keys: {list(metadata.keys()) if isinstance(metadata, dict) else 'N/A'}")
+        
+        # Strict validation: fail if >0.5% missing
+        missing_rate = still_missing / max(len(all_nodes), 1)
+        if missing_rate > 0.005:  # 0.5% threshold
+            error_msg = (
+                f"❌ CRITICAL: {still_missing} nodes ({missing_rate:.1%}) missing file_name after repair attempt. "
+                f"This exceeds 0.5% threshold. Index build aborted to prevent broken index.\n"
+                f"   - Missing before repair: {missing_before_repair}\n"
+                f"   - Repaired: {repaired_count}\n"
+                f"   - Still missing: {still_missing}\n"
+                f"   - Sample missing node IDs: {missing_node_ids[:10]}"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        
+        if still_missing > 0:
+            logger.warning(
+                f"⚠️ Dropped {still_missing} nodes missing file_name (below 0.5% threshold). "
+                f"Repaired {repaired_count} nodes. Sample missing IDs: {missing_node_ids[:5]}"
+            )
+        
+        if repaired_count > 0:
+            print(f"   ✅ Repaired {repaired_count} nodes with missing file_name")
+        if still_missing > 0:
+            print(f"   ⚠️ Dropped {still_missing} nodes that could not be repaired (below threshold)")
+        print(f"   ✅ Validated {len(validated_nodes)}/{len(all_nodes)} nodes for indexing")
+        
+        # Insert validated nodes into the index (batch insert for better performance)
+        print(f"\n   Inserting {len(validated_nodes)} validated nodes into index...")
         batch_size = 100  # Insert in batches
-        for i in tqdm(range(0, len(all_nodes), batch_size), desc="   Inserting nodes", unit="batch"):
-            batch = all_nodes[i:i + batch_size]
+        for i in tqdm(range(0, len(validated_nodes), batch_size), desc="   Inserting nodes", unit="batch"):
+            batch = validated_nodes[i:i + batch_size]
             try:
                 self.index.insert_nodes(batch)
             except RuntimeError as e:
