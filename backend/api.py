@@ -56,6 +56,7 @@ from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
 from .orchestrator import StructuredResponse, QueryIntent
 from .utils.database_manager import DatabaseManager
 from .utils.db import engine, check_database_integrity, DATABASE_URL, SessionLocal, DocumentIngestionMetadata, MachineModel, run_sync
+from .utils.filenames import canonicalize_filename
 from sqlalchemy.orm import Session
 from .utils.migration_runner import run_migrations, check_pending_migrations, check_migration_status
 from .utils.query_summarizer import QuerySummarizer
@@ -5730,10 +5731,13 @@ async def upload_document(
         # Generate unique ID for metadata record
         metadata_id = str(uuid.uuid4())
         
-        # Sanitize filename for GCS (remove path separators, special chars)
+        # Canonicalize filename for consistent document identity
+        original_filename = file.filename
+        canonical_filename = canonicalize_filename(original_filename)
+        
+        # Sanitize filename for GCS (use canonical for storage)
         import re
-        sanitized_filename = re.sub(r'[^\w\s.-]', '_', file.filename)
-        sanitized_filename = sanitized_filename.replace(' ', '_')
+        sanitized_filename = canonical_filename  # Already sanitized by canonicalize_filename
         
         # CRITICAL FIX: Transactional upload flow - all in one sync function
         # 1. Create DB record and flush to get metadata_id
@@ -5761,9 +5765,10 @@ async def upload_document(
                 )
                 
                 # Step 1: Create metadata record and flush (get ID without committing)
+                # Store original filename in metadata for reference, but use canonical for Document.file_name
                 metadata = DocumentIngestionMetadata(
                     id=metadata_id,
-                    filename=file.filename,
+                    filename=original_filename,  # Keep original for metadata record
                     # Keep a single string here for compatibility (non-null column)
                     machine_model=selected_machine_model_names[0] if selected_machine_model_names else "",
                     status="PENDING_INGESTION",
@@ -5894,9 +5899,10 @@ async def upload_document(
                 metadata.file_path = gcs_path
                 
                 # Create or update Document record with GCS path
-                # CRITICAL: Document record MUST have gcs_path - no exceptions
+                # CRITICAL: Document.file_name uses CANONICAL filename for consistent identity
+                # Document.display_name stores the original filename for UI display
                 doc_record = session.query(Document).filter(
-                    Document.file_name == file.filename
+                    Document.file_name == canonical_filename
                 ).first()
                 
                 if doc_record:
@@ -5904,14 +5910,18 @@ async def upload_document(
                     doc_record.gcs_path = gcs_path  # Always set from successful GCS upload
                     doc_record.file_size_bytes = file_size
                     doc_record.machine_model = legacy_machine_model_str
+                    doc_record.display_name = original_filename  # Update display name if changed
                     doc_record.updated_at = datetime.utcnow()
                     # Ensure is_active is True for re-uploads
                     if not doc_record.is_active:
                         doc_record.is_active = True
                 else:
                     # Create new record - gcs_path is REQUIRED
+                    # file_name = canonical (for identity matching)
+                    # display_name = original (for UI display)
                     doc_record = Document(
-                        file_name=file.filename,
+                        file_name=canonical_filename,  # CANONICAL for identity
+                        display_name=original_filename,  # Original for display
                         gcs_path=gcs_path,  # REQUIRED - must not be None
                         file_size_bytes=file_size,
                         machine_model=legacy_machine_model_str,

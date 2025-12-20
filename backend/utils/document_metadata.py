@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from .db import Document, MachineModel, SessionLocal
+from .filenames import canonicalize_filename
 
 # Special values historically used by orchestrator for "global" docs.
 # These are not MachineModel table rows; treat them as reserved tokens.
@@ -195,11 +196,14 @@ def upsert_document(
     Upsert a document record.
     Creates a new record if file_name doesn't exist, updates if it does.
     
+    IMPORTANT: file_name is canonicalized for consistent document identity.
+    display_name preserves the original filename for UI display.
+    
     Args:
         session: SQLAlchemy session
-        file_name: Original filename
+        file_name: Filename (will be canonicalized for Document.file_name)
         gcs_path: Cloud Storage path
-        display_name: Display name (defaults to file_name)
+        display_name: Display name (defaults to original file_name before canonicalization)
         machine_model: Machine model(s) - can be string, list, or JSON string
         category: Document category
         product_family: Product family
@@ -211,6 +215,9 @@ def upsert_document(
     Returns:
         Document object
     """
+    # Canonicalize filename for consistent identity
+    canonical_file_name = canonicalize_filename(file_name)
+    original_display_name = display_name or file_name
     # Normalize machine_model to JSON string (legacy column) and update M2M join table.
     machine_model_str = None
     if machine_model is not None:
@@ -233,15 +240,15 @@ def upsert_document(
                 if requires_admin_review is None:
                     requires_admin_review = True
     
-    # Check if document exists
-    doc = get_document_by_filename(session, file_name)
+    # Check if document exists (by canonical filename)
+    doc = get_document_by_filename(session, canonical_file_name)
     
     if doc is None:
-        # Create new document
+        # Create new document with canonical file_name
         doc = Document(
-            file_name=file_name,
+            file_name=canonical_file_name,  # Canonical for identity
             gcs_path=gcs_path,
-            display_name=display_name or file_name,
+            display_name=original_display_name,  # Original for display
             machine_model=machine_model_str,
             category=category,
             product_family=product_family,
@@ -253,10 +260,11 @@ def upsert_document(
         session.add(doc)
     else:
         # Update existing document
+        # Note: file_name should remain canonical (don't change it)
         if gcs_path is not None:
             doc.gcs_path = gcs_path
-        if display_name is not None:
-            doc.display_name = display_name
+        if original_display_name is not None:
+            doc.display_name = original_display_name
         if machine_model_str is not None:
             doc.machine_model = machine_model_str
         if category is not None:

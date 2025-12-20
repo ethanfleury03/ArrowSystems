@@ -364,3 +364,4 @@ python backend/scripts/verify_document_counts.py
 - Verify embedding model loaded correctly
 - Check that nodes were actually indexed (17,427 nodes expected)
 
+

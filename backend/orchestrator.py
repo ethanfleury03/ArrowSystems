@@ -30,6 +30,7 @@ import hashlib
 from .logging_config import get_logger
 from .logging_context import get_user_id, get_user_role
 from .config.env import settings
+from .utils.filenames import canonicalize_filename, normalize_filename_for_comparison
 
 logger = get_logger(__name__)
 
@@ -1189,6 +1190,24 @@ class HybridRetriever:
                 f"({len(effective_machines)} machines)"
             )
             
+            from .utils.filenames import canonicalize_filename, normalize_filename_for_comparison
+            from .utils.db import Document, SessionLocal
+            
+            # Build allowed set using canonical filenames from DB
+            # Also include display_name if present (for migration tolerance)
+            session = SessionLocal()
+            try:
+                db_docs = session.query(Document).filter(Document.is_active == True).all()
+                db_canonical_filenames = set()
+                db_display_filenames = set()
+                for doc in db_docs:
+                    canonical = canonicalize_filename(doc.file_name)
+                    db_canonical_filenames.add(canonical)
+                    if doc.display_name:
+                        db_display_filenames.add(canonicalize_filename(doc.display_name))
+            finally:
+                session.close()
+            
             for filename, metadata in all_metadata.items():
                 machine_model = metadata.get("machine_model")
                 is_active = metadata.get("is_active", True)
@@ -1197,11 +1216,16 @@ class HybridRetriever:
                 if not is_active:
                     continue
                 
+                # Canonicalize filename for comparison
+                canonical_filename = canonicalize_filename(filename)
+                
                 # Exclude documents with machine_model = None or empty list (for customers)
                 # Admins/technicians see everything, so we include None for them
                 if machine_model is None:
                     if role_upper in ["ADMIN", "TECHNICIAN"]:
                         # Admins/technicians can see documents without machine_model
+                        # Add both canonical and original (for migration tolerance)
+                        allowed_filenames.add(canonical_filename)
                         allowed_filenames.add(filename)
                     # Customers cannot see documents without machine_model
                     continue
@@ -1214,28 +1238,33 @@ class HybridRetriever:
                     if len(doc_machine_models) == 0:
                         # Empty list = no machine assigned
                         if role_upper in ["ADMIN", "TECHNICIAN"]:
+                            allowed_filenames.add(canonical_filename)
                             allowed_filenames.add(filename)
                         continue
                 else:
                     # Invalid type
                     if role_upper in ["ADMIN", "TECHNICIAN"]:
+                        allowed_filenames.add(canonical_filename)
                         allowed_filenames.add(filename)
                     continue
                 
                 # Check if document applies to any machine
                 if ANY_MACHINE in doc_machine_models:
                     # Document with "Any" applies to all machines
+                    allowed_filenames.add(canonical_filename)
                     allowed_filenames.add(filename)
                     continue
                 
                 # Check if document is GENERAL (always included for everyone)
                 if GENERAL_MACHINE in doc_machine_models:
+                    allowed_filenames.add(canonical_filename)
                     allowed_filenames.add(filename)
                     continue
                 
                 # Check if any of the document's machine models match effective machines
                 doc_machine_models_set = set(doc_machine_models)
                 if doc_machine_models_set.intersection(effective_machines_set):
+                    allowed_filenames.add(canonical_filename)
                     allowed_filenames.add(filename)
             
             logger.info(
@@ -1268,9 +1297,50 @@ class HybridRetriever:
                 return None  # Full access on error
             return set()  # No access on error for customers
     
+    def get_node_filename(self, node: Any) -> str:
+        """
+        Extract and canonicalize filename from node metadata.
+        
+        Checks multiple metadata keys and returns canonicalized basename.
+        Tolerant during migration - handles file_name, filename, source_path, gcs_path.
+        
+        Args:
+            node: Node object (can be NodeWithScore or raw node)
+            
+        Returns:
+            Canonical filename string (empty if not found)
+        """
+        metadata = None
+        if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
+            if hasattr(node.node, 'metadata') and node.node.metadata:
+                metadata = node.node.metadata
+        elif hasattr(node, 'metadata') and node.metadata:
+            metadata = node.metadata
+        
+        if not metadata:
+            return ""
+        
+        # Try multiple keys in order of preference
+        filename = (
+            metadata.get('file_name') or
+            metadata.get('filename') or
+            metadata.get('source_path') or
+            metadata.get('gcs_path') or
+            ""
+        )
+        
+        if not filename:
+            return ""
+        
+        # Canonicalize for consistent matching
+        return canonicalize_filename(filename)
+    
     def _filter_by_allowed_filenames(self, nodes: List[NodeWithScore], allowed_filenames: Optional[set]) -> List[NodeWithScore]:
         """
         Filter nodes to only include those from allowed filenames.
+        
+        Uses canonical filename matching for consistent identity.
+        STRICT MODE: Missing filenames are dropped by default (unless ALLOW_MISSING_FILENAMES=true).
         
         Args:
             nodes: List of nodes to filter
@@ -1282,17 +1352,45 @@ class HybridRetriever:
         if allowed_filenames is None:
             return nodes
         
+        # Check if missing filenames should be allowed (for migration/backward compatibility)
+        allow_missing = os.getenv("ALLOW_MISSING_FILENAMES", "false").lower() in ("true", "1", "yes")
+        
         filtered = []
+        empty_filename_count = 0
+        dropped_missing_count = 0
+        
         for node in nodes:
-            filename = ""
-            if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
-                if hasattr(node.node, 'metadata') and node.node.metadata:
-                    filename = node.node.metadata.get('file_name', '')
-            elif hasattr(node, 'metadata') and node.metadata:
-                filename = node.metadata.get('file_name', '')
+            canonical_filename = self.get_node_filename(node)
             
-            if filename and filename in allowed_filenames:
+            if not canonical_filename:
+                # Empty filename handling - STRICT by default
+                empty_filename_count += 1
+                
+                if allow_missing:
+                    # Migration mode: allow missing filenames with warning
+                    from .logging_context import get_user_role
+                    role = get_user_role()
+                    if role and role.upper() in ["ADMIN", "TECHNICIAN"]:
+                        logger.warning(f"Node with empty filename allowed (ALLOW_MISSING_FILENAMES=true) for {role}")
+                        filtered.append(node)
+                    # CUSTOMER: always drop even in migration mode
+                else:
+                    # STRICT MODE: drop all nodes without filenames
+                    dropped_missing_count += 1
+                    logger.debug(f"Dropping node with empty filename (strict mode)")
+                continue
+            
+            # Check if canonical filename is in allowed set
+            # Also check normalized version for migration tolerance
+            normalized = normalize_filename_for_comparison(canonical_filename)
+            if canonical_filename in allowed_filenames or normalized in allowed_filenames:
                 filtered.append(node)
+        
+        if empty_filename_count > 0:
+            if allow_missing:
+                logger.warning(f"Found {empty_filename_count} nodes with empty filenames (ALLOW_MISSING_FILENAMES=true, allowing for ADMIN/TECH)")
+            else:
+                logger.warning(f"Dropped {dropped_missing_count} nodes with empty filenames (strict mode)")
         
         return filtered
     
