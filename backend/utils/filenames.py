@@ -69,8 +69,16 @@ def canonicalize_filename(name: str) -> str:
         canonical = canonical.replace("'", "")
         canonical = canonical.replace('"', "")
     
-    # Collapse repeated underscores
-    canonical = re.sub(r'_+', '_', canonical)
+    # Collapse repeated underscores and hyphens
+    canonical = re.sub(r'[_-]+', '_', canonical)
+    
+    # Strip trailing underscores/dashes before file extension
+    # Pattern: remove trailing _- before .ext
+    if '.' in canonical:
+        name_part, ext = canonical.rsplit('.', 1)
+        # Remove trailing underscores/dashes from name part
+        name_part = name_part.rstrip('_-')
+        canonical = f"{name_part}.{ext}"
     
     # Remove leading/trailing underscores
     canonical = canonical.strip('_')
