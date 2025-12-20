@@ -3946,16 +3946,21 @@ def main():
         print(f"[INGEST] PID={pid} (kill -USR1 {pid} to dump stacks)")
     
     # Env/config (supports both new and existing env names)
-    from backend.config.env import normalize_gcs_prefix
-
+    # Read directly from env vars to avoid Settings() initialization (which requires all secrets)
+    # Use existing _normalize_prefix function instead of importing from config.env
+    
     docs_bucket = os.getenv("GCS_DOCS_BUCKET") or os.getenv("DOCS_GCS_BUCKET") or "arrow-rag-support-prod-docs"
 
     # IMPORTANT: empty prefix is valid and must remain empty (bucket root).
     # Use os.environ.get to preserve explicit empty strings.
+    # Also handle "ROOT" sentinel (maps to empty string)
     raw_docs_prefix = os.environ.get("GCS_DOCS_PREFIX")
     if raw_docs_prefix is None:
         raw_docs_prefix = os.environ.get("DOCS_GCS_PREFIX")
-    docs_prefix = normalize_gcs_prefix(raw_docs_prefix)
+    # Handle "ROOT" sentinel (means bucket root)
+    if raw_docs_prefix and raw_docs_prefix.strip().upper() == "ROOT":
+        raw_docs_prefix = ""
+    docs_prefix = _normalize_prefix(raw_docs_prefix) if raw_docs_prefix else ""
 
     rag_bucket = os.getenv("GCS_RAG_BUCKET") or os.getenv("RAG_INDEX_GCS_BUCKET") or "arrow-rag-support-prod-rag"
     latest_prefix = os.getenv("GCS_RAG_LATEST_PREFIX") or os.getenv("RAG_INDEX_GCS_PREFIX") or "latest_model/"
