@@ -2543,9 +2543,42 @@ class TechnicalRAGPipeline:
         logger.info(f"✅ Non-text processing complete: {len(all_tables)} tables, {len(all_images)} images, {len(all_captions)} captions")
         return all_tables, all_images, all_captions
     
-    def create_non_text_nodes(self, tables: List[Dict], images: List[Dict], captions: List[Dict]) -> List[TextNode]:
-        """Create TextNode objects for non-text content to be embedded."""
+    def create_non_text_nodes(self, tables: List[Dict], images: List[Dict], captions: List[Dict], report_mode: bool = False) -> Tuple[List[TextNode], Dict[str, Any]]:
+        """
+        Create TextNode objects for non-text content to be embedded.
+        
+        Args:
+            tables: List of table dictionaries
+            images: List of image dictionaries
+            captions: List of caption dictionaries
+            report_mode: If True, return detailed statistics
+            
+        Returns:
+            (nodes, stats) where stats contains filtering/reporting information
+        """
         nodes = []
+        stats = {
+            "images_before_filter": len(images),
+            "images_after_filter": 0,
+            "images_skipped": {
+                "missing_dimensions": 0,
+                "area_too_small": 0,
+                "min_side_too_small": 0,
+                "file_size_too_small": 0,
+                "aspect_ratio_extreme": 0,
+                "duplicate_in_doc": 0,
+                "global_duplicate": 0,
+            },
+            "images_by_document": {},
+            "image_area_distribution": {
+                "<10k": 0,
+                "10k-50k": 0,
+                "50k-200k": 0,
+                "200k-500k": 0,
+                "500k-1M": 0,
+                ">1M": 0,
+            },
+        }
 
         def _required_meta_for_source_path(source_path: str) -> dict[str, Any]:
             try:
@@ -2872,11 +2905,64 @@ class TechnicalRAGPipeline:
         tables, images, captions = self.process_non_text_content(data_dir)
         print(f"   ✅ Extracted {len(tables)} tables, {len(images)} images, {len(captions)} captions")
         
-        # Step 4: Create Non-Text Nodes
+        # Step 4: Create Non-Text Nodes (with image filtering)
         print("\n[Step 4/7] 📊 Creating searchable nodes from extracted content...")
-        non_text_nodes = self.create_non_text_nodes(tables, images, captions)
-        print(f"   ✅ Created {len(non_text_nodes)} non-text nodes")
-        logger.info(f"Created {len(non_text_nodes)} non-text nodes")
+        report_mode = os.getenv("REPORT_NONTEXT", "false").lower() in {"true", "1", "yes", "on"}
+        non_text_nodes, image_stats = self.create_non_text_nodes(tables, images, captions, report_mode=report_mode)
+        
+        # Log image filtering results
+        if image_stats["images_before_filter"] > 0:
+            kept = image_stats["images_after_filter"]
+            total = image_stats["images_before_filter"]
+            skipped = total - kept
+            print(f"   ✅ Created {len(non_text_nodes)} non-text nodes")
+            print(f"   📸 Images: {kept}/{total} kept ({skipped} filtered out)")
+            
+            if skipped > 0:
+                print(f"      Filter breakdown:")
+                for reason, count in image_stats["images_skipped"].items():
+                    if count > 0:
+                        print(f"        - {reason}: {count}")
+        
+        # Print report if requested
+        if report_mode and image_stats["images_by_document"]:
+            print("\n" + "="*70)
+            print("📊 IMAGE FILTERING REPORT")
+            print("="*70)
+            
+            # Top 10 docs by image count
+            doc_counts = sorted(
+                [(doc, info["total"]) for doc, info in image_stats["images_by_document"].items()],
+                key=lambda x: x[1],
+                reverse=True
+            )[:10]
+            
+            print(f"\nTop 10 documents by image count:")
+            for i, (doc_path, count) in enumerate(doc_counts, 1):
+                doc_name = Path(doc_path).name
+                info = image_stats["images_by_document"][doc_path]
+                kept = info["kept"]
+                print(f"  {i:2d}. {doc_name}: {count} total, {kept} kept, {count - kept} skipped")
+            
+            # Skip percentages
+            total_skipped = sum(image_stats["images_skipped"].values())
+            if total_skipped > 0:
+                print(f"\nSkip percentages:")
+                for reason, count in image_stats["images_skipped"].items():
+                    if count > 0:
+                        pct = (count / image_stats["images_before_filter"]) * 100
+                        print(f"  - {reason}: {count} ({pct:.1f}%)")
+            
+            # Area distribution
+            print(f"\nImage area distribution:")
+            for bucket, count in image_stats["image_area_distribution"].items():
+                if count > 0:
+                    pct = (count / image_stats["images_before_filter"]) * 100
+                    print(f"  - {bucket}: {count} ({pct:.1f}%)")
+            
+            print("="*70 + "\n")
+        
+        logger.info(f"Created {len(non_text_nodes)} non-text nodes (images: {image_stats['images_after_filter']}/{image_stats['images_before_filter']} kept)")
         
         # Step 5: Smart Chunking with Text Nodes
         print("\n[Step 5/7] 🧠 Smart chunking and filtering...")
@@ -2957,6 +3043,10 @@ class TechnicalRAGPipeline:
         
         # Combine all nodes
         all_nodes = filtered_nodes + non_text_nodes
+        
+        # Store image stats for later reporting if needed
+        if hasattr(self, '_last_image_stats'):
+            self._last_image_stats = image_stats
         
         # Create index from nodes (LlamaIndex API)
         if storage_context:
@@ -3934,7 +4024,16 @@ def main():
         default=3,
         help="Number of documents to process in dry-run mode (default: 3)"
     )
+    parser.add_argument(
+        "--report-nontext",
+        action="store_true",
+        help="Print detailed report on image filtering statistics"
+    )
     args = parser.parse_args()
+    
+    # Set REPORT_NONTEXT env var if flag is set
+    if args.report_nontext:
+        os.environ["REPORT_NONTEXT"] = "true"
     
     dry_run = args.dry_run
     dry_run_sample_size = args.dry_run_sample_size
