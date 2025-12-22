@@ -2657,6 +2657,7 @@ class TechnicalRAGPipeline:
                 nodes.append(node)
         
         # Process images (create text nodes for captions and metadata only - no base64)
+        images_kept = 0
         for image in images:
             image_text = f"Image from {Path(image['source_path']).name}, page {image['page_number']}: {image['caption']}"
             
@@ -2675,8 +2676,12 @@ class TechnicalRAGPipeline:
                 }
             )
             nodes.append(node)
+            images_kept += 1
         
-        return nodes
+        # Update stats with actual counts
+        stats["images_after_filter"] = images_kept
+        
+        return nodes, stats
     
     def setup_qdrant_storage(self) -> StorageContext:
         """Setup Qdrant vector store for hybrid search."""
