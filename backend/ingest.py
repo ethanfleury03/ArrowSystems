@@ -1995,7 +1995,16 @@ class DocumentLoader:
         logger.info(f"Loading documents from GCS bucket: {self.gcs_bucket}, prefix: {self.gcs_prefix}")
         
         # List all objects in GCS bucket with prefix
-        object_infos = list_objects(self.gcs_bucket, self.gcs_prefix)
+        try:
+            object_infos = list_objects(self.gcs_bucket, self.gcs_prefix)
+        except Exception as e:
+            error_msg = (
+                f"Failed to list objects from gs://{self.gcs_bucket}/{self.gcs_prefix}. "
+                f"This usually indicates an authentication or permission issue. "
+                f"Error: {type(e).__name__}: {e}"
+            )
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
         object_names = [o.name for o in object_infos]
         
         # Filter to PDFs (case-insensitive)
@@ -3699,7 +3708,16 @@ def stage_gcs_documents_to_workdir(
     supported = {".pdf", ".docx", ".md", ".markdown"}
 
     logger.info(f"Listing docs from gs://{docs_bucket}/{docs_prefix}")
-    blobs = list_objects(docs_bucket, docs_prefix)
+    try:
+        blobs = list_objects(docs_bucket, docs_prefix)
+    except Exception as e:
+        error_msg = (
+            f"Failed to list objects from gs://{docs_bucket}/{docs_prefix}. "
+            f"This usually indicates an authentication or permission issue. "
+            f"Error: {type(e).__name__}: {e}"
+        )
+        logger.error(error_msg, exc_info=True)
+        raise RuntimeError(error_msg) from e
 
     # Best-effort DB session (optional)
     session = None
@@ -4029,6 +4047,11 @@ def main():
         action="store_true",
         help="Print detailed report on image filtering statistics"
     )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Run preflight checks only: verify env vars, test GCS authentication, list objects, and stage manifest. No model loads or indexing."
+    )
     args = parser.parse_args()
     
     # Set REPORT_NONTEXT env var if flag is set
@@ -4037,6 +4060,7 @@ def main():
     
     dry_run = args.dry_run
     dry_run_sample_size = args.dry_run_sample_size
+    preflight = args.preflight
     
     # Print PID for stack dump debugging
     pid = os.getpid()
@@ -4074,7 +4098,97 @@ def main():
     # Keep extracted content in the same workdir for deterministic debugging
     os.environ.setdefault("EXTRACTED_CONTENT_DIR", str(workdir / "extracted_content"))
 
-    if not dry_run:
+    if preflight:
+        print("\n" + "=" * 80)
+        print("🔍 PREFLIGHT: GCS Authentication and Document Staging Check")
+        print("=" * 80)
+        print(f"Docs source:  gs://{docs_bucket}/{_normalize_prefix(docs_prefix)}")
+        print(f"Workdir:      {str(workdir)}")
+        print("=" * 80)
+        
+        # Print relevant env vars
+        print("\n[Environment Variables]")
+        env_keys = [
+            'GOOGLE_APPLICATION_CREDENTIALS',
+            'GCS_DOCS_BUCKET', 'DOCS_GCS_BUCKET',
+            'GCS_DOCS_PREFIX', 'DOCS_GCS_PREFIX',
+            'GCS_RAG_BUCKET', 'RAG_INDEX_GCS_BUCKET',
+            'GCS_RAG_LATEST_PREFIX', 'RAG_INDEX_GCS_PREFIX',
+            'GCS_RAG_OLD_PREFIX',
+            'PROMOTE_INDEX',
+            'DATABASE_URL'
+        ]
+        for key in env_keys:
+            value = os.environ.get(key)
+            if value:
+                # Mask sensitive values
+                if 'CREDENTIALS' in key or 'DATABASE_URL' in key:
+                    if value:
+                        # Show first/last few chars
+                        if len(value) > 20:
+                            print(f"  {key}={value[:10]}...{value[-10:]}")
+                        else:
+                            print(f"  {key}=***")
+                    else:
+                        print(f"  {key}=(not set)")
+                else:
+                    print(f"  {key}={value}")
+            else:
+                print(f"  {key}=(not set)")
+        
+        # Verify key file is readable
+        creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        print("\n[Credentials File Check]")
+        if creds_path:
+            from pathlib import Path
+            creds_file = Path(creds_path)
+            if creds_file.exists():
+                size = creds_file.stat().st_size
+                print(f"  Path: {creds_path}")
+                print(f"  Exists: True")
+                print(f"  Size: {size} bytes")
+            else:
+                print(f"  Path: {creds_path}")
+                print(f"  Exists: False ❌")
+        else:
+            print("  GOOGLE_APPLICATION_CREDENTIALS not set")
+        
+        # Test raw google client
+        print("\n[Testing Raw Google Cloud Storage Client]")
+        try:
+            from google.cloud import storage
+            client = storage.Client()
+            print("  ✅ Raw storage.Client() initialized successfully")
+            
+            # Try listing a few objects
+            try:
+                blobs = list(client.list_blobs(docs_bucket, max_results=5))
+                print(f"  ✅ list_blobs() works: found {len(blobs)} objects (showing first 5)")
+                for i, blob in enumerate(blobs, 1):
+                    print(f"     {i}. {blob.name}")
+            except Exception as e:
+                print(f"  ❌ list_blobs() failed: {type(e).__name__}: {e}")
+        except Exception as e:
+            print(f"  ❌ Raw storage.Client() failed: {type(e).__name__}: {e}")
+        
+        # Test repo wrapper
+        print("\n[Testing backend.utils.gcs_client.list_objects()]")
+        try:
+            from backend.utils.gcs_client import list_objects
+            objs = list_objects(docs_bucket, docs_prefix)
+            print(f"  ✅ list_objects() works: found {len(objs)} objects")
+            if len(objs) > 0:
+                print("  First 5 objects:")
+                for i, obj in enumerate(objs[:5], 1):
+                    print(f"     {i}. {obj.name}")
+            else:
+                print("  ⚠️  WARNING: list_objects() returned 0 objects")
+        except Exception as e:
+            print(f"  ❌ list_objects() failed: {type(e).__name__}: {e}")
+            import sys
+            sys.exit(1)
+        
+    if not dry_run and not preflight:
         print("\n" + "=" * 80)
         print("Arrow Production Ingestion + (Optional) Index Promotion")
         print("=" * 80)
@@ -4085,7 +4199,7 @@ def main():
         print(f"RAG bucket:   gs://{rag_bucket}/")
         print(f"Latest pref:  {_normalize_prefix(latest_prefix)}")
         print(f"Old pref:     {_normalize_prefix(old_prefix)}")
-    else:
+    elif dry_run and not preflight:
         print("\n" + "=" * 80)
         print("🧪 DRY-RUN: Arrow Production Ingestion Test")
         print("=" * 80)
@@ -4102,21 +4216,47 @@ def main():
         docs_prefix=docs_prefix,
         workdir=workdir,
     )
+    
+    # Fail fast if no documents staged (before model downloads)
+    if len(entries) == 0:
+        error_msg = (
+            f"\n❌ ERROR: No documents staged (0 documents found).\n"
+            f"   Bucket: {docs_bucket}\n"
+            f"   Prefix: {docs_prefix or '(root)'}\n"
+            f"   This usually indicates:\n"
+            f"   - Authentication failure (check GOOGLE_APPLICATION_CREDENTIALS)\n"
+            f"   - Wrong bucket/prefix configuration\n"
+            f"   - Bucket is actually empty\n"
+            f"\n   Run with --preflight to diagnose authentication and listing issues.\n"
+        )
+        logger.error(error_msg)
+        print(error_msg)
+        import sys
+        sys.exit(1)
+    
+    if preflight:
+        print(f"\n✅ PREFLIGHT PASSED")
+        print(f"   - Staged {len(entries)} documents")
+        print(f"   - Manifest: {doc_manifest_path}")
+        print(f"   - Documents directory: {docs_dir}")
+        import sys
+        sys.exit(0)
 
-    # Build index from staged docs
-    os.environ["INGEST_DOC_MANIFEST_PATH"] = str(doc_manifest_path)
-    pipeline = TechnicalRAGPipeline()
-    use_qdrant = _env_bool("USE_QDRANT", default=False)
-    if use_qdrant:
-        raise RuntimeError("Production promotion flow requires local index artifacts; USE_QDRANT must be false.")
+    # Build index from staged docs (skip in preflight mode)
+    if not preflight:
+        os.environ["INGEST_DOC_MANIFEST_PATH"] = str(doc_manifest_path)
+        pipeline = TechnicalRAGPipeline()
+        use_qdrant = _env_bool("USE_QDRANT", default=False)
+        if use_qdrant:
+            raise RuntimeError("Production promotion flow requires local index artifacts; USE_QDRANT must be false.")
 
-    pipeline.build_index(
-        data_dir=str(docs_dir),
-        storage_dir=str(index_out_dir),
-        use_qdrant=False,
-        dry_run=dry_run,
-        dry_run_sample_size=dry_run_sample_size,
-    )
+        pipeline.build_index(
+            data_dir=str(docs_dir),
+            storage_dir=str(index_out_dir),
+            use_qdrant=False,
+            dry_run=dry_run,
+            dry_run_sample_size=dry_run_sample_size,
+        )
     
     # Skip verification and promotion in dry-run mode
     if dry_run:
