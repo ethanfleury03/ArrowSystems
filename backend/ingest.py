@@ -4140,7 +4140,6 @@ def main():
         creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
         print("\n[Credentials File Check]")
         if creds_path:
-            from pathlib import Path
             creds_file = Path(creds_path)
             if creds_file.exists():
                 size = creds_file.stat().st_size
