@@ -4184,6 +4184,9 @@ def main():
                 print("  ⚠️  WARNING: list_objects() returned 0 objects")
         except Exception as e:
             print(f"  ❌ list_objects() failed: {type(e).__name__}: {e}")
+            print("\n❌ PREFLIGHT FAILED: Cannot list objects from GCS.")
+            print("   This indicates an authentication or permission issue.")
+            print("   Please set GOOGLE_APPLICATION_CREDENTIALS to a valid service account JSON file.")
             import sys
             sys.exit(1)
         
