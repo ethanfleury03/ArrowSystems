@@ -73,21 +73,6 @@ class Settings:
         
         # Rate Limiting Configuration
         self._load_rate_limit_config()
-    
-    def _load_metadata_snapshot_config(self) -> None:
-        """
-        Load metadata snapshot configuration.
-        
-        Optional:
-        - METADATA_SNAPSHOT_GCS_URI: GCS URI for metadata snapshot JSON file
-          Used by ingest.py when DATABASE_URL is unavailable (e.g., RunPod).
-          Format: gs://bucket/path/metadata_snapshot.json
-        """
-        self.METADATA_SNAPSHOT_GCS_URI = os.getenv("METADATA_SNAPSHOT_GCS_URI")
-        if self.METADATA_SNAPSHOT_GCS_URI:
-            logger.info(f"Metadata snapshot configured: {self.METADATA_SNAPSHOT_GCS_URI}")
-        else:
-            logger.debug("METADATA_SNAPSHOT_GCS_URI not set (optional - only needed when DB unavailable)")
         
         # Anthropic API Key (optional - for Claude LLM integration)
         self._load_anthropic_key()
@@ -103,6 +88,21 @@ class Settings:
         
         # Metadata Snapshot Configuration (optional - for ingestion without DB)
         self._load_metadata_snapshot_config()
+    
+    def _load_metadata_snapshot_config(self) -> None:
+        """
+        Load metadata snapshot configuration.
+        
+        Optional:
+        - METADATA_SNAPSHOT_GCS_URI: GCS URI for metadata snapshot JSON file
+          Used by ingest.py when DATABASE_URL is unavailable (e.g., RunPod).
+          Format: gs://bucket/path/metadata_snapshot.json
+        """
+        self.METADATA_SNAPSHOT_GCS_URI = os.getenv("METADATA_SNAPSHOT_GCS_URI")
+        if self.METADATA_SNAPSHOT_GCS_URI:
+            logger.info(f"Metadata snapshot configured: {self.METADATA_SNAPSHOT_GCS_URI}")
+        else:
+            logger.debug("METADATA_SNAPSHOT_GCS_URI not set (optional - only needed when DB unavailable)")
     
     def _load_ingestion_config(self) -> None:
         """
