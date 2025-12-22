@@ -3547,21 +3547,57 @@ def _parse_machine_models(raw: Any) -> list[str]:
     return []
 
 
+def _load_metadata_snapshot(snapshot_uri: str) -> dict[str, dict[str, Any]]:
+    """
+    Load metadata snapshot from GCS and build lookup by source_gcs.
+    
+    Returns:
+        Dictionary mapping source_gcs -> document metadata dict
+    """
+    from backend.utils.gcs_client import download_blob, parse_gcs_path
+    
+    bucket_name, blob_name = parse_gcs_path(snapshot_uri)
+    if not bucket_name or not blob_name:
+        raise ValueError(f"Invalid GCS URI format: {snapshot_uri}")
+    
+    logger.info(f"Loading metadata snapshot from {snapshot_uri}...")
+    json_bytes = download_blob(bucket_name, blob_name)
+    if not json_bytes:
+        raise RuntimeError(f"Failed to download snapshot from {snapshot_uri}")
+    
+    snapshot = json.loads(json_bytes.decode("utf-8"))
+    
+    # Build lookup by source_gcs
+    lookup: dict[str, dict[str, Any]] = {}
+    for doc in snapshot.get("documents", []):
+        source_gcs = doc.get("source_gcs")
+        if source_gcs:
+            lookup[source_gcs] = doc
+    
+    logger.info(
+        f"Metadata snapshot loaded: generated_at={snapshot.get('generated_at')}, "
+        f"count={snapshot.get('count', 0)}, lookup_size={len(lookup)}"
+    )
+    return lookup
+
+
 def _resolve_authoritative_doc_metadata(
     session,
     docs_bucket: str,
     docs_prefix: str,
     object_name: str,
     object_custom_metadata: dict[str, Any] | None,
+    metadata_snapshot_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Resolve document_id (non-empty string) and machine model metadata for a GCS object.
 
     Source of truth order:
-    1) DB Document (match by gcs_path)
-    2) DB DocumentIngestionMetadata (match by metadata_id parsed from object path, or file_path)
-    3) GCS object custom metadata (document_id, machine_model_ids, machine_model_names / machine_models)
-    4) Deterministic fallback (UUID5(gs://bucket/object); machine_models=[])
+    1) DB Document (match by gcs_path) - if session available
+    2) Metadata snapshot (match by source_gcs) - if DB unavailable and snapshot loaded
+    3) DB DocumentIngestionMetadata (match by metadata_id parsed from object path, or file_path) - if session available
+    4) GCS object custom metadata (document_id, machine_model_ids, machine_model_names / machine_models)
+    5) Deterministic fallback (UUID5(gs://bucket/object); machine_models=[])
     """
     source_gcs = f"gs://{docs_bucket}/{object_name}"
 
@@ -3569,6 +3605,24 @@ def _resolve_authoritative_doc_metadata(
     machine_model_names: list[str] = []
     machine_model_ids: list[int] = []
     ingestion_metadata_id: str | None = None
+    file_name: str | None = None
+    
+    # Try metadata snapshot first if DB unavailable
+    if session is None and metadata_snapshot_lookup:
+        snapshot_doc = metadata_snapshot_lookup.get(source_gcs)
+        if snapshot_doc:
+            db_doc_id = snapshot_doc.get("document_id")
+            machine_model_names = snapshot_doc.get("machine_model_names", [])
+            # Convert machine_model_ids to list of ints
+            raw_ids = snapshot_doc.get("machine_model_ids", [])
+            machine_model_ids = []
+            for v in raw_ids:
+                try:
+                    machine_model_ids.append(int(str(v).strip()))
+                except Exception:
+                    continue
+            file_name = snapshot_doc.get("file_name")
+            logger.debug(f"Found document in snapshot: {source_gcs} -> document_id={db_doc_id}")
 
     # Cache whether the join table exists in this DB (avoids repeating to_regclass on every doc)
     global _dmm_table_exists_cache  # type: ignore
@@ -3674,12 +3728,15 @@ def _resolve_authoritative_doc_metadata(
                 db_doc_id = v if v else None
 
     # Deterministic fallback for document_id: UUID5(gs://bucket/object)
+    # Only use fallback if we didn't get document_id from snapshot
     if db_doc_id is None:
         fallback_id = _stable_uuid5_from_string(source_gcs)
-        logger.warning(
-            "Missing DB/GCS document_id; using deterministic UUID5 fallback (check DB metadata alignment!)",
-            extra={"source_gcs": source_gcs, "fallback_document_id": fallback_id},
-        )
+        # Only warn if we're not using snapshot (snapshot missing is tracked separately)
+        if not (session is None and metadata_snapshot_lookup):
+            logger.warning(
+                "Missing DB/GCS document_id; using deterministic UUID5 fallback (check DB metadata alignment!)",
+                extra={"source_gcs": source_gcs, "fallback_document_id": fallback_id},
+            )
         db_doc_id = str(fallback_id)
 
     return {
@@ -3688,6 +3745,7 @@ def _resolve_authoritative_doc_metadata(
         "machine_model_ids": machine_model_ids,
         "source_gcs": source_gcs,
         "ingestion_metadata_id": ingestion_metadata_id,
+        "file_name": file_name,  # Include file_name if available from snapshot
     }
 
 
@@ -3732,9 +3790,23 @@ def stage_gcs_documents_to_workdir(
     except Exception as e:
         logger.warning(f"DB not available for metadata resolution; will use GCS metadata/fallbacks only: {e}")
         session = None
+    
+    # Load metadata snapshot if DB unavailable and snapshot URI is set
+    metadata_snapshot_lookup: dict[str, dict[str, Any]] = {}
+    if session is None:
+        snapshot_uri = os.getenv("METADATA_SNAPSHOT_GCS_URI")
+        if snapshot_uri:
+            try:
+                metadata_snapshot_lookup = _load_metadata_snapshot(snapshot_uri)
+                logger.info(f"Loaded metadata snapshot: {len(metadata_snapshot_lookup)} documents")
+            except Exception as e:
+                logger.warning(f"Failed to load metadata snapshot from {snapshot_uri}: {e}")
+                metadata_snapshot_lookup = {}
 
     entries: list[dict[str, Any]] = []
     sample_logged = 0
+    snapshot_matched = 0
+    snapshot_missing = 0
     try:
         for b in tqdm(blobs, desc="Staging GCS documents"):
             object_name = b.name
@@ -3760,7 +3832,17 @@ def stage_gcs_documents_to_workdir(
                 docs_prefix=docs_prefix,
                 object_name=object_name,
                 object_custom_metadata=custom_md,
+                metadata_snapshot_lookup=metadata_snapshot_lookup if metadata_snapshot_lookup else None,
             )
+            
+            # Track snapshot matches for validation
+            if session is None and metadata_snapshot_lookup:
+                source_gcs = resolved.get("source_gcs")
+                if source_gcs in metadata_snapshot_lookup:
+                    snapshot_matched += 1
+                else:
+                    snapshot_missing += 1
+            
             if sample_logged < 3:
                 logger.info(
                     {
@@ -3800,7 +3882,7 @@ def stage_gcs_documents_to_workdir(
                     "machine_model_ids": resolved["machine_model_ids"],
                     "source_gcs": resolved["source_gcs"],
                     "gcs_object_name": object_name,
-                    "filename": Path(object_name).name,
+                    "filename": resolved.get("file_name") or Path(object_name).name,
                     "local_path": str(local_path),
                     "file_size_bytes": int(b.size) if b.size is not None else (local_path.stat().st_size if local_path.exists() else None),
                     "updated": b.updated.isoformat() if getattr(b, "updated", None) else None,
@@ -3813,6 +3895,26 @@ def stage_gcs_documents_to_workdir(
                 session.close()
         except Exception:
             pass
+    
+    # Validate snapshot coverage if using snapshot
+    if session is None and metadata_snapshot_lookup:
+        total_processed = snapshot_matched + snapshot_missing
+        if total_processed > 0:
+            missing_pct = (snapshot_missing / total_processed) * 100
+            logger.info(
+                f"Metadata snapshot coverage: {snapshot_matched} matched, {snapshot_missing} missing "
+                f"({missing_pct:.2f}% missing)"
+            )
+            
+            if missing_pct > 0.5:
+                error_msg = (
+                    f"Metadata snapshot coverage insufficient: {missing_pct:.2f}% of documents missing from snapshot. "
+                    f"This exceeds the 0.5% threshold. "
+                    f"Matched: {snapshot_matched}, Missing: {snapshot_missing}, Total: {total_processed}. "
+                    f"Please regenerate the snapshot using: python backend/tools/export_metadata_snapshot.py"
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
     # Write manifest deterministically
     manifest_obj = {
