@@ -18,6 +18,7 @@ import faulthandler
 import threading
 import asyncio
 import warnings
+import hmac
 
 # Prevent Python from generating bytecode caches (read-only behavior)
 sys.dont_write_bytecode = True
@@ -3986,6 +3987,227 @@ async def get_all_documents(request: Request):
     except Exception as e:
         logger.error(f"Error fetching documents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=get_error_detail(e, "An internal error occurred while fetching documents"))
+
+
+def is_valid_metadata_export_key(request: Request) -> bool:
+    """
+    Check if request has valid metadata export key.
+    
+    Returns True if:
+    - ARROW_METADATA_EXPORT_KEY env var is set
+    - Request header X-Metadata-Export-Key matches the env var value
+    
+    Returns False otherwise.
+    
+    Uses constant-time comparison to prevent timing attacks.
+    """
+    export_key = os.getenv("ARROW_METADATA_EXPORT_KEY")
+    if not export_key:
+        return False
+    
+    header_key = request.headers.get("X-Metadata-Export-Key")
+    if not header_key:
+        return False
+    
+    # Use constant-time comparison to prevent timing attacks
+    return hmac.compare_digest(export_key, header_key)
+
+
+@app.get("/admin/documents/export-metadata")
+async def export_documents_metadata(request: Request):
+    """
+    Export document metadata for offline ingestion.
+    
+    Returns JSON manifest with all required fields for ingestion:
+    - document_id, canonical_file_name, display_name, gcs_path, is_active
+    - machine_model_ids (list[int]) and machine_model_names (list[str])
+    
+    This endpoint is gated behind ARROW_ENABLE_METADATA_EXPORT=true (default: false).
+    
+    Authentication (either method required):
+    1. Export key: Set ARROW_METADATA_EXPORT_KEY and provide X-Metadata-Export-Key header
+    2. Admin JWT: Provide X-User-Token header with valid ADMIN JWT (fallback)
+    
+    The manifest can be used with sync_docs_from_gcp.py and ingest.py --manifest
+    to build indexes without Cloud SQL proxy.
+    """
+    from backend.config.env import settings
+    
+    # Gate behind environment variable
+    enable_export = os.getenv("ARROW_ENABLE_METADATA_EXPORT", "false").lower() in {"true", "1", "yes", "on"}
+    if not enable_export:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Metadata export is disabled. Set ARROW_ENABLE_METADATA_EXPORT=true to enable."
+        )
+    
+    # Check export key authentication first
+    if is_valid_metadata_export_key(request):
+        # Export key is valid, skip admin auth
+        pass
+    else:
+        # Fall back to admin authentication (same pattern as other admin endpoints)
+        global db_manager
+        if not db_manager:
+            ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.3, max_delay_s=2.0)
+            if ok:
+                pass
+
+        if not db_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=_db_unavailable_detail(),
+            )
+
+        token = request.headers.get("X-User-Token")
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing authentication. Provide either X-Metadata-Export-Key header (if ARROW_METADATA_EXPORT_KEY is set) or X-User-Token header with valid ADMIN JWT.",
+            )
+
+        try:
+            from .security import decode_access_token
+            payload = decode_access_token(token)
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+            ) from None
+        except jwt.PyJWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+            ) from None
+
+        email = payload.get("email")
+        role = payload.get("role")
+        if not email or not role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token payload"
+            )
+
+        user = await db_manager.get_user_by_email(email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User no longer exists",
+            )
+        if user.get("role") != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin privileges required",
+            )
+    
+    # Export metadata
+    def _export_metadata():
+        from backend.utils.db import SessionLocal, Document, MachineModel, document_machine_models
+        from sqlalchemy import text
+        from datetime import datetime, timezone
+        from backend.ingest import _parse_machine_models
+        
+        session = SessionLocal()
+        try:
+            # Query all active documents with GCS paths
+            query = (
+                session.query(Document)
+                .filter(Document.is_active == True)
+                .filter(Document.gcs_path.isnot(None))
+                .order_by(Document.file_name.asc())  # Stable sort
+            )
+            
+            documents = []
+            doc_ids = []
+            
+            for doc in query.all():
+                doc_ids.append(doc.id)
+                documents.append({
+                    "document": doc,
+                    "machine_model_ids": [],
+                    "machine_model_names": [],
+                })
+            
+            # Batch load machine model associations
+            if doc_ids:
+                try:
+                    rows = session.execute(
+                        text("""
+                            SELECT dmm.document_id, mm.id, mm.name
+                            FROM document_machine_models dmm
+                            JOIN machine_models mm ON mm.id = dmm.machine_model_id
+                            WHERE dmm.document_id = ANY(:doc_ids)
+                        """),
+                        {"doc_ids": doc_ids}
+                    ).fetchall()
+                    
+                    # Map document_id -> machine models
+                    doc_to_models: dict[int, list[tuple[int, str]]] = {}
+                    for r in rows:
+                        doc_id = int(r.document_id)
+                        if doc_id not in doc_to_models:
+                            doc_to_models[doc_id] = []
+                        doc_to_models[doc_id].append((int(r.id), str(r.name)))
+                    
+                    # Assign to documents
+                    for doc_entry in documents:
+                        doc_id = doc_entry["document"].id
+                        if doc_id in doc_to_models:
+                            models = doc_to_models[doc_id]
+                            doc_entry["machine_model_ids"] = [m[0] for m in models]
+                            doc_entry["machine_model_names"] = [m[1] for m in models]
+                except Exception as e:
+                    logger.warning(f"Failed to query machine model associations: {e}")
+            
+            # Fallback: resolve from legacy machine_model field
+            for doc_entry in documents:
+                doc = doc_entry["document"]
+                if not doc_entry["machine_model_names"] and doc.machine_model:
+                    # Parse legacy field
+                    names = _parse_machine_models(doc.machine_model)
+                    if names:
+                        # Resolve names to IDs
+                        try:
+                            rows = session.query(MachineModel).filter(
+                                MachineModel.name.in_(names)
+                            ).all()
+                            doc_entry["machine_model_ids"] = [int(r.id) for r in rows if hasattr(r, "id")]
+                            doc_entry["machine_model_names"] = [str(r.name) for r in rows if hasattr(r, "name")]
+                        except Exception:
+                            # If resolution fails, keep names only
+                            doc_entry["machine_model_names"] = names
+            
+            # Build manifest entries
+            manifest_entries = []
+            for doc_entry in documents:
+                doc = doc_entry["document"]
+                manifest_entries.append({
+                    "document_id": str(doc.id),
+                    "canonical_file_name": doc.file_name,  # Already canonical in DB
+                    "display_name": doc.display_name or doc.file_name,
+                    "gcs_path": doc.gcs_path,
+                    "is_active": doc.is_active,
+                    "machine_model_ids": doc_entry["machine_model_ids"],
+                    "machine_model_names": doc_entry["machine_model_names"],
+                    "category": doc.category,
+                    "product_family": doc.product_family,
+                    "file_size_bytes": doc.file_size_bytes,
+                })
+            
+            return {
+                "version": 1,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "documents": manifest_entries
+            }
+        finally:
+            session.close()
+    
+    try:
+        manifest = await run_sync(_export_metadata)
+        return JSONResponse(content=manifest)
+    except Exception as e:
+        logger.error(f"Error exporting metadata: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=get_error_detail(e, "An internal error occurred while exporting metadata")
+        )
 
 
 @app.get("/admin/chunks")
