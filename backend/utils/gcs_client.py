@@ -96,18 +96,105 @@ def get_gcs_client():
         logger.error("Google Cloud Storage library not installed. Install with: pip install google-cloud-storage")
         return None
     
-    if _gcs_client is None:
+    # Check if we need to retry (client was None due to previous failure)
+    # This allows retries if credentials are fixed after initial failure
+    should_retry = (_gcs_client is None and _gcs_last_init_error is not None)
+    
+    if _gcs_client is None or should_retry:
+        # Reset error state for retry
+        if should_retry:
+            _gcs_last_init_error = None
+        
         try:
             from google.cloud import storage
+            from google.auth.exceptions import DefaultCredentialsError
             
-            # Create client - this will use ADC automatically
+            # Check for debug logging
+            debug_mode = os.getenv("GCS_DEBUG", "false").lower() in {"1", "true", "yes", "on"}
+            
+            # Get GOOGLE_APPLICATION_CREDENTIALS path
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            
+            if debug_mode:
+                logger.info(f"[GCS_DEBUG] GOOGLE_APPLICATION_CREDENTIALS={creds_path}")
+                if creds_path:
+                    creds_file = Path(creds_path)
+                    logger.info(f"[GCS_DEBUG] Credentials file exists={creds_file.exists()}, size={creds_file.stat().st_size if creds_file.exists() else 'N/A'}")
+            
+            # Try to create client - this will use ADC automatically
             # On Cloud Run: uses metadata server (service account)
             # On local: uses GOOGLE_APPLICATION_CREDENTIALS if set, otherwise ADC
-            _gcs_client = storage.Client()
-            _gcs_last_init_error = None
+            try:
+                _gcs_client = storage.Client()
+                _gcs_last_init_error = None
+                auth_path = "ADC (automatic)"
+                
+            except DefaultCredentialsError as e:
+                # If DefaultCredentialsError and GOOGLE_APPLICATION_CREDENTIALS is set,
+                # try explicitly loading the service account file
+                if creds_path:
+                    creds_file = Path(creds_path)
+                    if creds_file.exists() and creds_file.is_file():
+                        if debug_mode:
+                            logger.info(f"[GCS_DEBUG] DefaultCredentialsError caught, attempting explicit service account file load from {creds_path}")
+                        
+                        try:
+                            from google.oauth2 import service_account
+                            creds = service_account.Credentials.from_service_account_file(str(creds_file))
+                            project_id = creds.project_id
+                            _gcs_client = storage.Client(project=project_id, credentials=creds)
+                            _gcs_last_init_error = None
+                            auth_path = f"service_account_file ({creds_path})"
+                            
+                            if debug_mode:
+                                logger.info(f"[GCS_DEBUG] Successfully loaded credentials from service account file, project_id={project_id}")
+                        except Exception as file_load_error:
+                            error_msg = f"Failed to load service account file {creds_path}: {file_load_error}"
+                            error_type = type(file_load_error).__name__
+                            _gcs_last_init_error = f"{error_type}: {error_msg}"
+                            
+                            if debug_mode:
+                                logger.error(f"[GCS_DEBUG] {error_msg}", exc_info=True)
+                            
+                            logger.error(
+                                {
+                                    "event": "gcs_auth_failed",
+                                    "environment": "local_dev",
+                                    "error_type": error_type,
+                                    "error_message": error_msg,
+                                    "creds_file": str(creds_path),
+                                },
+                                exc_info=True,
+                            )
+                            return None
+                    else:
+                        error_msg = f"GOOGLE_APPLICATION_CREDENTIALS points to non-existent file: {creds_path}"
+                        _gcs_last_init_error = f"DefaultCredentialsError: {error_msg}"
+                        
+                        if debug_mode:
+                            logger.error(f"[GCS_DEBUG] {error_msg}")
+                        
+                        logger.error(
+                            {
+                                "event": "gcs_auth_failed",
+                                "environment": "local_dev",
+                                "error_type": "DefaultCredentialsError",
+                                "error_message": error_msg,
+                                "creds_file": str(creds_path),
+                            },
+                            exc_info=True,
+                        )
+                        return None
+                else:
+                    # No GOOGLE_APPLICATION_CREDENTIALS set, re-raise the original error
+                    raise
             
-            # Log authentication info on first initialization
+            # Log authentication info on successful initialization
             auth_info = _get_auth_info()
+            if debug_mode:
+                logger.info(f"[GCS_DEBUG] Auth path used: {auth_path}")
+                logger.info(f"[GCS_DEBUG] Project: {auth_info.get('project')}, Creds type: {auth_info.get('creds_type')}")
+            
             if auth_info["is_cloud_run"]:
                 logger.info(
                     {
@@ -127,6 +214,7 @@ def get_gcs_client():
                         "project": auth_info["project"],
                         "creds_type": auth_info["creds_type"],
                         "has_goog_app_creds": auth_info["has_goog_app_creds"],
+                        "auth_path": auth_path if debug_mode else None,
                         "message": "Using Application Default Credentials (local dev mode)",
                     }
                 )
@@ -136,6 +224,9 @@ def get_gcs_client():
             error_type = type(e).__name__
             is_cloud_run = _is_cloud_run()
             _gcs_last_init_error = f"{error_type}: {error_msg}"
+            
+            # Don't cache None on failure - allow retries
+            _gcs_client = None
             
             if "Could not automatically determine credentials" in error_msg or "DefaultCredentialsError" in error_type:
                 # Log real underlying error; avoid blanket IAM advice unless we know it's permission-related
@@ -498,11 +589,22 @@ def list_objects(bucket_name: str, prefix: str = "") -> List[BlobInfo]:
 
     Returns:
         List[BlobInfo] with (name, size, updated, metadata if available).
+        
+    Raises:
+        RuntimeError: If GCS client is not available or authentication fails.
+        Exception: Re-raises GCS API exceptions (e.g., permission errors).
     """
     client = get_gcs_client()
     if not client:
-        logger.error("GCS client not available for listing")
-        return []
+        last_error = get_gcs_last_init_error()
+        error_msg = f"GCS client not available for listing objects in {bucket_name}"
+        if last_error:
+            error_msg += f". Last init error: {last_error}"
+        logger.error(error_msg)
+        raise RuntimeError(
+            f"{error_msg}. "
+            f"Check GOOGLE_APPLICATION_CREDENTIALS environment variable and ensure credentials are valid."
+        )
 
     try:
         bucket = client.bucket(bucket_name)
@@ -520,8 +622,33 @@ def list_objects(bucket_name: str, prefix: str = "") -> List[BlobInfo]:
         logger.debug(f"Listed {len(infos)} objects from {bucket_name} with prefix '{prefix}'")
         return infos
     except Exception as e:
-        logger.error(f"Failed to list objects from {bucket_name} with prefix '{prefix}': {e}", exc_info=True)
-        return []
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        # Check if this is an authentication/authorization error
+        is_auth_error = (
+            "DefaultCredentialsError" in error_type or
+            "Could not automatically determine credentials" in error_msg or
+            "PermissionDenied" in error_type or
+            "Forbidden" in error_type or
+            "401" in error_msg or
+            "403" in error_msg
+        )
+        
+        logger.error(
+            f"Failed to list objects from {bucket_name} with prefix '{prefix}': {error_type}: {error_msg}",
+            exc_info=True
+        )
+        
+        if is_auth_error:
+            raise RuntimeError(
+                f"Authentication/authorization failed when listing objects in gs://{bucket_name}/{prefix}. "
+                f"Error: {error_type}: {error_msg}. "
+                f"Check GOOGLE_APPLICATION_CREDENTIALS and ensure the service account has storage.objects.list permission."
+            ) from e
+        else:
+            # Re-raise other exceptions (e.g., network errors, bucket not found)
+            raise
 
 
 def list_object_names(bucket_name: str, prefix: str = "") -> List[str]:
