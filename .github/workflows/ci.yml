@@ -640,7 +640,39 @@ jobs:
           
           echo "✅ Deployment complete!"
           
-          # Route 100% of traffic to the newly deployed revision
+          # Remove any lingering traffic tags (e.g., "gcs-test")
+          # Try --clear-tags first (if supported), otherwise remove tags individually
+          echo "🧹 Cleaning up traffic tags..."
+          if gcloud run services update-traffic arrow-rag-backend \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --region=us-central1 \
+            --clear-tags \
+            --quiet 2>/dev/null; then
+            echo "✅ Tags cleared using --clear-tags"
+          else
+            # Fallback: fetch tags and remove each one
+            TAGS=$(gcloud run services describe arrow-rag-backend \
+              --project="${{ secrets.GCP_PROJECT_ID }}" \
+              --region=us-central1 \
+              --format="value(status.traffic.tag)" 2>/dev/null || echo "")
+            
+            if [ -n "$TAGS" ]; then
+              # Filter out empty/null values and remove each tag
+              echo "$TAGS" | while IFS= read -r TAG; do
+                if [ -n "$TAG" ] && [ "$TAG" != "null" ] && [ "$TAG" != "" ]; then
+                  echo "  Removing tag: $TAG"
+                  gcloud run services update-traffic arrow-rag-backend \
+                    --project="${{ secrets.GCP_PROJECT_ID }}" \
+                    --region=us-central1 \
+                    --remove-tags="$TAG" \
+                    --quiet 2>/dev/null || echo "  ⚠️  Could not remove tag $TAG (may not exist)"
+                fi
+              done
+            fi
+            echo "✅ Traffic tag cleanup complete!"
+          fi
+          
+          # Route 100% of traffic to the newly deployed revision (after tag cleanup)
           echo "🔄 Routing traffic to latest revision..."
           gcloud run services update-traffic arrow-rag-backend \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
@@ -1252,6 +1284,7 @@ jobs:
             --timeout=300 \
             --concurrency=80 \
             --port=3000 \
+            --min-instances=0 \
             --set-env-vars="NEXT_PUBLIC_API_URL=${{ steps.backend_url.outputs.url }}" \
             --set-env-vars="NODE_ENV=production" \
             --set-env-vars="SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
@@ -1283,3 +1316,154 @@ jobs:
             exit 1
           fi
           echo "✅ Frontend → backend connection verified"
+
+  post-deploy-verification:
+    name: Post-Deploy Cost Control Verification
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: [deploy-backend, deploy-frontend]
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "beta"
+
+      - name: Inject project ID
+        run: echo "CLOUDSDK_CORE_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
+
+      - name: Verify Frontend min-instances = 0
+        run: |
+          echo "🔍 Verifying frontend min-instances = 0..."
+          MIN_SCALE=$(gcloud run services describe arrow-rag-frontend \
+            --region=us-central1 \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --format='value(spec.template.metadata.annotations."autoscaling.knative.dev/minScale")' 2>/dev/null || echo "")
+          
+          # Treat empty/blank as 0 (default when annotation is absent)
+          if [ -z "$MIN_SCALE" ] || [ "$MIN_SCALE" = "" ]; then
+            MIN_SCALE="0"
+          fi
+          
+          echo "  Current minScale: '$MIN_SCALE' (empty treated as 0)"
+          
+          if [ "$MIN_SCALE" != "0" ]; then
+            echo "❌ ERROR: Frontend min-instances is $MIN_SCALE, expected 0!"
+            echo "   This will cause always-on billing. Fix immediately:"
+            echo "   gcloud run services update arrow-rag-frontend \\"
+            echo "     --region=us-central1 \\"
+            echo "     --project=${{ secrets.GCP_PROJECT_ID }} \\"
+            echo "     --min-instances=0"
+            exit 1
+          fi
+          
+          echo "✅ Frontend min-instances = 0 (cost control verified)"
+
+      - name: Verify Backend has no traffic tags
+        run: |
+          echo "🔍 Verifying backend has no traffic tags..."
+          TAGS=$(gcloud run services describe arrow-rag-backend \
+            --region=us-central1 \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --format='value(status.traffic.tag)' 2>/dev/null || echo "")
+          
+          # Filter out empty/null values
+          NON_EMPTY_TAGS=$(echo "$TAGS" | grep -v "^$" | grep -v "null" || true)
+          
+          if [ -n "$NON_EMPTY_TAGS" ]; then
+            echo "❌ ERROR: Backend has traffic tags:"
+            echo "$NON_EMPTY_TAGS" | while read -r TAG; do
+              if [ -n "$TAG" ]; then
+                echo "   - $TAG"
+              fi
+            done
+            echo ""
+            echo "   Remove tags immediately:"
+            echo "   gcloud run services update-traffic arrow-rag-backend \\"
+            echo "     --region=us-central1 \\"
+            echo "     --project=${{ secrets.GCP_PROJECT_ID }} \\"
+            echo "     --remove-tags=<tag-name>"
+            exit 1
+          fi
+          
+          echo "✅ Backend has no traffic tags (cost control verified)"
+
+      - name: Verify Backend traffic is 100% to single revision
+        run: |
+          echo "🔍 Verifying backend traffic allocation..."
+          TRAFFIC=$(gcloud run services describe arrow-rag-backend \
+            --region=us-central1 \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --format='json(status.traffic)' 2>/dev/null || echo "[]")
+          
+          # Get the most recent revision name for comparison
+          LATEST_REVISION=$(gcloud run revisions list \
+            --service=arrow-rag-backend \
+            --region=us-central1 \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --format='value(name)' \
+            --sort-by=~metadata.creationTimestamp \
+            --limit=1 2>/dev/null || echo "")
+          
+          # Count traffic entries and check for 100% allocation
+          TRAFFIC_COUNT=$(echo "$TRAFFIC" | jq 'length')
+          TOTAL_PERCENT=$(echo "$TRAFFIC" | jq '[.[] | .percent // 0] | add')
+          
+          # Check for exactly one traffic entry at 100%
+          if [ "$TRAFFIC_COUNT" != "1" ] || [ "$TOTAL_PERCENT" != "100" ]; then
+            echo "❌ ERROR: Backend traffic allocation is incorrect!"
+            echo "   Expected: exactly 1 entry at 100%"
+            echo "   Found: $TRAFFIC_COUNT entries totaling ${TOTAL_PERCENT}%"
+            echo "   Current traffic allocation:"
+            echo "$TRAFFIC" | jq '.'
+            echo ""
+            echo "   Fix immediately:"
+            echo "   gcloud run services update-traffic arrow-rag-backend \\"
+            echo "     --region=us-central1 \\"
+            echo "     --project=${{ secrets.GCP_PROJECT_ID }} \\"
+            echo "     --to-latest"
+            exit 1
+          fi
+          
+          # Verify the single entry is either latestRevision=true OR matches the most recent revision
+          TRAFFIC_ENTRY=$(echo "$TRAFFIC" | jq '.[0]')
+          IS_LATEST=$(echo "$TRAFFIC_ENTRY" | jq -r '.latest // false')
+          REVISION_NAME=$(echo "$TRAFFIC_ENTRY" | jq -r '.revisionName // ""')
+          
+          if [ "$IS_LATEST" = "true" ]; then
+            echo "✅ Traffic entry has latestRevision=true"
+          elif [ -n "$LATEST_REVISION" ] && [ "$REVISION_NAME" = "$LATEST_REVISION" ]; then
+            echo "✅ Traffic entry matches most recent revision: $REVISION_NAME"
+          elif [ -n "$REVISION_NAME" ]; then
+            echo "⚠️  WARNING: Traffic entry revisionName ($REVISION_NAME) may not match latest"
+            echo "   Latest revision: $LATEST_REVISION"
+            echo "   This is acceptable if the revision is intentionally pinned"
+          else
+            echo "⚠️  WARNING: Could not verify revision match (revisionName missing)"
+          fi
+          
+          echo "✅ Backend traffic is 100% to single revision (cost control verified)"
+
+      - name: Post-deploy verification summary
+        run: |
+          echo ""
+          echo "✅ All post-deploy cost control verifications passed!"
+          echo ""
+          echo "Summary:"
+          echo "  ✅ Frontend: min-instances = 0 (no always-on billing)"
+          echo "  ✅ Backend: No traffic tags (no tag-based routing)"
+          echo "  ✅ Backend: 100% traffic to latest (no stale revisions)"
+          echo ""

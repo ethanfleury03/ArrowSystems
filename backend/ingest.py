@@ -1606,7 +1606,13 @@ class DocumentLoader:
                     logger.warning("Skipping manifest entry (local file missing)", extra={"local_path": local_path})
                     continue
 
-                filename = entry.get("filename") or file_path.name
+                # Use canonical_file_name from manifest (required for offline mode)
+                canonical_file_name = entry.get("canonical_file_name")
+                if not canonical_file_name:
+                    # Fallback: canonicalize from filename or local_path
+                    filename = entry.get("filename") or file_path.name
+                    canonical_file_name = canonicalize_filename(filename)
+                
                 file_ext = file_path.suffix.lower()
                 if file_ext not in self.supported_extensions:
                     continue
@@ -1675,7 +1681,7 @@ class DocumentLoader:
                 document_id = str(document_id)
 
                 base_meta = {
-                    "file_name": filename,
+                    "file_name": canonical_file_name,  # Always canonical
                     "file_type": file_ext.lstrip(".") if file_ext else "unknown",
                     "gcs_path": source_gcs,  # historical key used elsewhere
                     "source_gcs": source_gcs,
@@ -1764,7 +1770,7 @@ class DocumentLoader:
             # Query all DocumentIngestionMetadata records that have gcs_path
             # Join with Document table to get gcs_path
             # Only process documents that are active and have GCS paths
-            from sqlalchemy import or_, func
+            from sqlalchemy import or_, func, text
             
             # First, get total counts for validation
             total_metadata_count = session.query(func.count(DocumentIngestionMetadata.id)).scalar() or 0
@@ -2793,13 +2799,19 @@ class TechnicalRAGPipeline:
                                 if iv not in seen:
                                     mm_ids_int.append(iv)
                                     seen.add(iv)
+                        canonical_file_name = entry.get("canonical_file_name")
+                        if not canonical_file_name:
+                            # Fallback: canonicalize from local_path basename
+                            canonical_file_name = canonicalize_filename(os.path.basename(lp))
+                        
                         mapping[str(Path(lp).resolve())] = {
                             "document_id": str(entry.get("document_id")) if entry.get("document_id") is not None else "0",
+                            "file_name": canonical_file_name,  # Required for non-text nodes
                             "machine_model_ids": mm_ids_int,
                             "machine_model_names": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
                             "machine_models": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
-                            "source_gcs": entry.get("source_gcs"),
-                            "gcs_path": entry.get("source_gcs"),
+                            "source_gcs": entry.get("gcs_path") or entry.get("source_gcs"),
+                            "gcs_path": entry.get("gcs_path") or entry.get("source_gcs"),
                             # Orchestrator filter uses machine_model as list[str]
                             "machine_model": [str(x) for x in mm_names if isinstance(x, str) and x.strip()],
                         }
@@ -2809,26 +2821,36 @@ class TechnicalRAGPipeline:
             except Exception as e:
                 logger.warning(f"Failed to load manifest for non-text metadata propagation: {e}")
         else:
-            # Check if GCS is configured for document storage
-            from backend.config.env import settings
-            use_gcs = bool(settings.DOCS_GCS_BUCKET)
-
-            # Always try to load from database first (only processes documents in DB)
-            # Falls back to GCS/local if database loading fails or returns no documents
-            loader = None
-            if use_gcs:
-                print(f"   📦 Loading from database (documents with GCS paths)...")
-                loader = DocumentLoader(
-                    gcs_bucket=settings.DOCS_GCS_BUCKET,
-                    gcs_prefix=settings.DOCS_GCS_PREFIX
-                )
-            else:
-                print(f"   📁 Loading from database (documents with GCS paths)...")
+            # Check if --no-db flag is set (offline mode)
+            no_db = os.getenv("INGEST_NO_DB", "false").lower() in {"true", "1", "yes", "on"}
+            
+            if no_db:
+                # Offline mode: load from local directory only
+                print(f"   📁 Loading from local directory: {data_dir} (no DB)")
                 loader = DocumentLoader(data_dir=data_dir)
+                documents = loader.load_documents(use_database=False)
+                use_gcs = False
+            else:
+                # Production mode: Check if GCS is configured for document storage
+                from backend.config.env import settings
+                use_gcs = bool(settings.DOCS_GCS_BUCKET)
 
-            # Load from database (preferred) - only processes documents in database
-            # This ensures we only ingest documents that are tracked in the database
-            documents = loader.load_documents(use_database=True)
+                # Always try to load from database first (only processes documents in DB)
+                # Falls back to GCS/local if database loading fails or returns no documents
+                loader = None
+                if use_gcs:
+                    print(f"   📦 Loading from database (documents with GCS paths)...")
+                    loader = DocumentLoader(
+                        gcs_bucket=settings.DOCS_GCS_BUCKET,
+                        gcs_prefix=settings.DOCS_GCS_PREFIX
+                    )
+                else:
+                    print(f"   📁 Loading from database (documents with GCS paths)...")
+                    loader = DocumentLoader(data_dir=data_dir)
+
+                # Load from database (preferred) - only processes documents in database
+                # This ensures we only ingest documents that are tracked in the database
+                documents = loader.load_documents(use_database=True)
 
         # Safety: never build/upload an empty index unless explicitly allowed
         allow_empty = os.getenv("ALLOW_EMPTY_INDEX", "false").lower() in {"1", "true", "yes", "on"}
@@ -3574,6 +3596,7 @@ def _resolve_authoritative_doc_metadata(
     if session is not None:
         try:
             from backend.utils.db import Document as DBDocument, DocumentIngestionMetadata, MachineModel
+            from sqlalchemy import text
 
             doc = session.query(DBDocument).filter(DBDocument.gcs_path == source_gcs).first()
             if not doc and parts:
@@ -4029,6 +4052,19 @@ def main():
         action="store_true",
         help="Print detailed report on image filtering statistics"
     )
+    parser.add_argument(
+        "--docs-dir",
+        help="Local directory containing documents (for offline mode). If provided, skips GCS staging."
+    )
+    parser.add_argument(
+        "--manifest",
+        help="Path to manifest.json file (for offline mode). If provided, skips GCS staging and DB lookups."
+    )
+    parser.add_argument(
+        "--no-db",
+        action="store_true",
+        help="Disable database lookups (use only manifest/local files). Required for offline ingestion."
+    )
     args = parser.parse_args()
     
     # Set REPORT_NONTEXT env var if flag is set
@@ -4096,15 +4132,60 @@ def main():
 
     workdir.mkdir(parents=True, exist_ok=True)
 
-    # Stage docs + write manifest
-    docs_dir, doc_manifest_path, entries = stage_gcs_documents_to_workdir(
-        docs_bucket=docs_bucket,
-        docs_prefix=docs_prefix,
-        workdir=workdir,
-    )
+    # Offline mode: use provided manifest and docs-dir
+    if args.manifest:
+        manifest_path = Path(args.manifest).resolve()
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+        
+        # Use provided docs-dir or extract from manifest
+        if args.docs_dir:
+            docs_dir = Path(args.docs_dir).resolve()
+        else:
+            # Try to infer from manifest (use parent of first local_path)
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest_data = json.load(f)
+            entries = manifest_data.get("documents", [])
+            if entries and entries[0].get("local_path"):
+                docs_dir = Path(entries[0]["local_path"]).parent.resolve()
+            else:
+                raise ValueError("Cannot determine docs-dir. Provide --docs-dir or ensure manifest has local_path entries.")
+        
+        if not docs_dir.exists():
+            raise FileNotFoundError(f"Docs directory not found: {docs_dir}")
+        
+        print(f"\n📋 Offline mode:")
+        print(f"   Manifest: {manifest_path}")
+        print(f"   Docs dir: {docs_dir}")
+        
+        # Set manifest path for build_index
+        os.environ["INGEST_DOC_MANIFEST_PATH"] = str(manifest_path)
+        
+        # Force no DB if --no-db or manifest mode
+        if args.no_db:
+            os.environ["INGEST_NO_DB"] = "true"
+        
+    elif args.docs_dir:
+        # Local directory mode (no manifest, no DB)
+        docs_dir = Path(args.docs_dir).resolve()
+        if not docs_dir.exists():
+            raise FileNotFoundError(f"Docs directory not found: {docs_dir}")
+        
+        print(f"\n📁 Local directory mode:")
+        print(f"   Docs dir: {docs_dir}")
+        
+        if args.no_db:
+            os.environ["INGEST_NO_DB"] = "true"
+    else:
+        # Production mode: Stage docs + write manifest
+        docs_dir, doc_manifest_path, entries = stage_gcs_documents_to_workdir(
+            docs_bucket=docs_bucket,
+            docs_prefix=docs_prefix,
+            workdir=workdir,
+        )
 
-    # Build index from staged docs
-    os.environ["INGEST_DOC_MANIFEST_PATH"] = str(doc_manifest_path)
+        # Build index from staged docs
+        os.environ["INGEST_DOC_MANIFEST_PATH"] = str(doc_manifest_path)
     pipeline = TechnicalRAGPipeline()
     use_qdrant = _env_bool("USE_QDRANT", default=False)
     if use_qdrant:
