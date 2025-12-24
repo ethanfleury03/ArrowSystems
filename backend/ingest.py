@@ -2001,7 +2001,16 @@ class DocumentLoader:
         logger.info(f"Loading documents from GCS bucket: {self.gcs_bucket}, prefix: {self.gcs_prefix}")
         
         # List all objects in GCS bucket with prefix
-        object_infos = list_objects(self.gcs_bucket, self.gcs_prefix)
+        try:
+            object_infos = list_objects(self.gcs_bucket, self.gcs_prefix)
+        except Exception as e:
+            error_msg = (
+                f"Failed to list objects from gs://{self.gcs_bucket}/{self.gcs_prefix}. "
+                f"This usually indicates an authentication or permission issue. "
+                f"Error: {type(e).__name__}: {e}"
+            )
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
         object_names = [o.name for o in object_infos]
         
         # Filter to PDFs (case-insensitive)
@@ -2654,6 +2663,7 @@ class TechnicalRAGPipeline:
                 nodes.append(node)
         
         # Process images (create text nodes for captions and metadata only - no base64)
+        images_kept = 0
         for image in images:
             image_text = f"Image from {Path(image['source_path']).name}, page {image['page_number']}: {image['caption']}"
             
@@ -2672,8 +2682,12 @@ class TechnicalRAGPipeline:
                 }
             )
             nodes.append(node)
+            images_kept += 1
         
-        return nodes
+        # Update stats with actual counts
+        stats["images_after_filter"] = images_kept
+        
+        return nodes, stats
     
     def setup_qdrant_storage(self) -> StorageContext:
         """Setup Qdrant vector store for hybrid search."""
@@ -3555,21 +3569,57 @@ def _parse_machine_models(raw: Any) -> list[str]:
     return []
 
 
+def _load_metadata_snapshot(snapshot_uri: str) -> dict[str, dict[str, Any]]:
+    """
+    Load metadata snapshot from GCS and build lookup by source_gcs.
+    
+    Returns:
+        Dictionary mapping source_gcs -> document metadata dict
+    """
+    from backend.utils.gcs_client import download_blob, parse_gcs_path
+    
+    bucket_name, blob_name = parse_gcs_path(snapshot_uri)
+    if not bucket_name or not blob_name:
+        raise ValueError(f"Invalid GCS URI format: {snapshot_uri}")
+    
+    logger.info(f"Loading metadata snapshot from {snapshot_uri}...")
+    json_bytes = download_blob(bucket_name, blob_name)
+    if not json_bytes:
+        raise RuntimeError(f"Failed to download snapshot from {snapshot_uri}")
+    
+    snapshot = json.loads(json_bytes.decode("utf-8"))
+    
+    # Build lookup by source_gcs
+    lookup: dict[str, dict[str, Any]] = {}
+    for doc in snapshot.get("documents", []):
+        source_gcs = doc.get("source_gcs")
+        if source_gcs:
+            lookup[source_gcs] = doc
+    
+    logger.info(
+        f"Metadata snapshot loaded: generated_at={snapshot.get('generated_at')}, "
+        f"count={snapshot.get('count', 0)}, lookup_size={len(lookup)}"
+    )
+    return lookup
+
+
 def _resolve_authoritative_doc_metadata(
     session,
     docs_bucket: str,
     docs_prefix: str,
     object_name: str,
     object_custom_metadata: dict[str, Any] | None,
+    metadata_snapshot_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Resolve document_id (non-empty string) and machine model metadata for a GCS object.
 
     Source of truth order:
-    1) DB Document (match by gcs_path)
-    2) DB DocumentIngestionMetadata (match by metadata_id parsed from object path, or file_path)
-    3) GCS object custom metadata (document_id, machine_model_ids, machine_model_names / machine_models)
-    4) Deterministic fallback (UUID5(gs://bucket/object); machine_models=[])
+    1) DB Document (match by gcs_path) - if session available
+    2) Metadata snapshot (match by source_gcs) - if DB unavailable and snapshot loaded
+    3) DB DocumentIngestionMetadata (match by metadata_id parsed from object path, or file_path) - if session available
+    4) GCS object custom metadata (document_id, machine_model_ids, machine_model_names / machine_models)
+    5) Deterministic fallback (UUID5(gs://bucket/object); machine_models=[])
     """
     source_gcs = f"gs://{docs_bucket}/{object_name}"
 
@@ -3577,6 +3627,24 @@ def _resolve_authoritative_doc_metadata(
     machine_model_names: list[str] = []
     machine_model_ids: list[int] = []
     ingestion_metadata_id: str | None = None
+    file_name: str | None = None
+    
+    # Try metadata snapshot first if DB unavailable
+    if session is None and metadata_snapshot_lookup:
+        snapshot_doc = metadata_snapshot_lookup.get(source_gcs)
+        if snapshot_doc:
+            db_doc_id = snapshot_doc.get("document_id")
+            machine_model_names = snapshot_doc.get("machine_model_names", [])
+            # Convert machine_model_ids to list of ints
+            raw_ids = snapshot_doc.get("machine_model_ids", [])
+            machine_model_ids = []
+            for v in raw_ids:
+                try:
+                    machine_model_ids.append(int(str(v).strip()))
+                except Exception:
+                    continue
+            file_name = snapshot_doc.get("file_name")
+            logger.debug(f"Found document in snapshot: {source_gcs} -> document_id={db_doc_id}")
 
     # Cache whether the join table exists in this DB (avoids repeating to_regclass on every doc)
     global _dmm_table_exists_cache  # type: ignore
@@ -3683,12 +3751,15 @@ def _resolve_authoritative_doc_metadata(
                 db_doc_id = v if v else None
 
     # Deterministic fallback for document_id: UUID5(gs://bucket/object)
+    # Only use fallback if we didn't get document_id from snapshot
     if db_doc_id is None:
         fallback_id = _stable_uuid5_from_string(source_gcs)
-        logger.warning(
-            "Missing DB/GCS document_id; using deterministic UUID5 fallback (check DB metadata alignment!)",
-            extra={"source_gcs": source_gcs, "fallback_document_id": fallback_id},
-        )
+        # Only warn if we're not using snapshot (snapshot missing is tracked separately)
+        if not (session is None and metadata_snapshot_lookup):
+            logger.warning(
+                "Missing DB/GCS document_id; using deterministic UUID5 fallback (check DB metadata alignment!)",
+                extra={"source_gcs": source_gcs, "fallback_document_id": fallback_id},
+            )
         db_doc_id = str(fallback_id)
 
     return {
@@ -3697,6 +3768,7 @@ def _resolve_authoritative_doc_metadata(
         "machine_model_ids": machine_model_ids,
         "source_gcs": source_gcs,
         "ingestion_metadata_id": ingestion_metadata_id,
+        "file_name": file_name,  # Include file_name if available from snapshot
     }
 
 
@@ -3722,7 +3794,16 @@ def stage_gcs_documents_to_workdir(
     supported = {".pdf", ".docx", ".md", ".markdown"}
 
     logger.info(f"Listing docs from gs://{docs_bucket}/{docs_prefix}")
-    blobs = list_objects(docs_bucket, docs_prefix)
+    try:
+        blobs = list_objects(docs_bucket, docs_prefix)
+    except Exception as e:
+        error_msg = (
+            f"Failed to list objects from gs://{docs_bucket}/{docs_prefix}. "
+            f"This usually indicates an authentication or permission issue. "
+            f"Error: {type(e).__name__}: {e}"
+        )
+        logger.error(error_msg, exc_info=True)
+        raise RuntimeError(error_msg) from e
 
     # Best-effort DB session (optional)
     session = None
@@ -3732,9 +3813,23 @@ def stage_gcs_documents_to_workdir(
     except Exception as e:
         logger.warning(f"DB not available for metadata resolution; will use GCS metadata/fallbacks only: {e}")
         session = None
+    
+    # Load metadata snapshot if DB unavailable and snapshot URI is set
+    metadata_snapshot_lookup: dict[str, dict[str, Any]] = {}
+    if session is None:
+        snapshot_uri = os.getenv("METADATA_SNAPSHOT_GCS_URI")
+        if snapshot_uri:
+            try:
+                metadata_snapshot_lookup = _load_metadata_snapshot(snapshot_uri)
+                logger.info(f"Loaded metadata snapshot: {len(metadata_snapshot_lookup)} documents")
+            except Exception as e:
+                logger.warning(f"Failed to load metadata snapshot from {snapshot_uri}: {e}")
+                metadata_snapshot_lookup = {}
 
     entries: list[dict[str, Any]] = []
     sample_logged = 0
+    snapshot_matched = 0
+    snapshot_missing = 0
     try:
         for b in tqdm(blobs, desc="Staging GCS documents"):
             object_name = b.name
@@ -3760,7 +3855,17 @@ def stage_gcs_documents_to_workdir(
                 docs_prefix=docs_prefix,
                 object_name=object_name,
                 object_custom_metadata=custom_md,
+                metadata_snapshot_lookup=metadata_snapshot_lookup if metadata_snapshot_lookup else None,
             )
+            
+            # Track snapshot matches for validation
+            if session is None and metadata_snapshot_lookup:
+                source_gcs = resolved.get("source_gcs")
+                if source_gcs in metadata_snapshot_lookup:
+                    snapshot_matched += 1
+                else:
+                    snapshot_missing += 1
+            
             if sample_logged < 3:
                 logger.info(
                     {
@@ -3800,7 +3905,7 @@ def stage_gcs_documents_to_workdir(
                     "machine_model_ids": resolved["machine_model_ids"],
                     "source_gcs": resolved["source_gcs"],
                     "gcs_object_name": object_name,
-                    "filename": Path(object_name).name,
+                    "filename": resolved.get("file_name") or Path(object_name).name,
                     "local_path": str(local_path),
                     "file_size_bytes": int(b.size) if b.size is not None else (local_path.stat().st_size if local_path.exists() else None),
                     "updated": b.updated.isoformat() if getattr(b, "updated", None) else None,
@@ -3813,6 +3918,26 @@ def stage_gcs_documents_to_workdir(
                 session.close()
         except Exception:
             pass
+    
+    # Validate snapshot coverage if using snapshot
+    if session is None and metadata_snapshot_lookup:
+        total_processed = snapshot_matched + snapshot_missing
+        if total_processed > 0:
+            missing_pct = (snapshot_missing / total_processed) * 100
+            logger.info(
+                f"Metadata snapshot coverage: {snapshot_matched} matched, {snapshot_missing} missing "
+                f"({missing_pct:.2f}% missing)"
+            )
+            
+            if missing_pct > 0.5:
+                error_msg = (
+                    f"Metadata snapshot coverage insufficient: {missing_pct:.2f}% of documents missing from snapshot. "
+                    f"This exceeds the 0.5% threshold. "
+                    f"Matched: {snapshot_matched}, Missing: {snapshot_missing}, Total: {total_processed}. "
+                    f"Please regenerate the snapshot using: python backend/tools/export_metadata_snapshot.py"
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
     # Write manifest deterministically
     manifest_obj = {
@@ -4065,6 +4190,11 @@ def main():
         action="store_true",
         help="Disable database lookups (use only manifest/local files). Required for offline ingestion."
     )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Run preflight checks only: verify env vars, test GCS authentication, list objects, and stage manifest. No model loads or indexing."
+    )
     args = parser.parse_args()
     
     # Set REPORT_NONTEXT env var if flag is set
@@ -4073,6 +4203,7 @@ def main():
     
     dry_run = args.dry_run
     dry_run_sample_size = args.dry_run_sample_size
+    preflight = args.preflight
     
     # Print PID for stack dump debugging
     pid = os.getpid()
@@ -4110,7 +4241,99 @@ def main():
     # Keep extracted content in the same workdir for deterministic debugging
     os.environ.setdefault("EXTRACTED_CONTENT_DIR", str(workdir / "extracted_content"))
 
-    if not dry_run:
+    if preflight:
+        print("\n" + "=" * 80)
+        print("🔍 PREFLIGHT: GCS Authentication and Document Staging Check")
+        print("=" * 80)
+        print(f"Docs source:  gs://{docs_bucket}/{_normalize_prefix(docs_prefix)}")
+        print(f"Workdir:      {str(workdir)}")
+        print("=" * 80)
+        
+        # Print relevant env vars
+        print("\n[Environment Variables]")
+        env_keys = [
+            'GOOGLE_APPLICATION_CREDENTIALS',
+            'GCS_DOCS_BUCKET', 'DOCS_GCS_BUCKET',
+            'GCS_DOCS_PREFIX', 'DOCS_GCS_PREFIX',
+            'GCS_RAG_BUCKET', 'RAG_INDEX_GCS_BUCKET',
+            'GCS_RAG_LATEST_PREFIX', 'RAG_INDEX_GCS_PREFIX',
+            'GCS_RAG_OLD_PREFIX',
+            'PROMOTE_INDEX',
+            'DATABASE_URL'
+        ]
+        for key in env_keys:
+            value = os.environ.get(key)
+            if value:
+                # Mask sensitive values
+                if 'CREDENTIALS' in key or 'DATABASE_URL' in key:
+                    if value:
+                        # Show first/last few chars
+                        if len(value) > 20:
+                            print(f"  {key}={value[:10]}...{value[-10:]}")
+                        else:
+                            print(f"  {key}=***")
+                    else:
+                        print(f"  {key}=(not set)")
+                else:
+                    print(f"  {key}={value}")
+            else:
+                print(f"  {key}=(not set)")
+        
+        # Verify key file is readable
+        creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        print("\n[Credentials File Check]")
+        if creds_path:
+            creds_file = Path(creds_path)
+            if creds_file.exists():
+                size = creds_file.stat().st_size
+                print(f"  Path: {creds_path}")
+                print(f"  Exists: True")
+                print(f"  Size: {size} bytes")
+            else:
+                print(f"  Path: {creds_path}")
+                print(f"  Exists: False ❌")
+        else:
+            print("  GOOGLE_APPLICATION_CREDENTIALS not set")
+        
+        # Test raw google client
+        print("\n[Testing Raw Google Cloud Storage Client]")
+        try:
+            from google.cloud import storage
+            client = storage.Client()
+            print("  ✅ Raw storage.Client() initialized successfully")
+            
+            # Try listing a few objects
+            try:
+                blobs = list(client.list_blobs(docs_bucket, max_results=5))
+                print(f"  ✅ list_blobs() works: found {len(blobs)} objects (showing first 5)")
+                for i, blob in enumerate(blobs, 1):
+                    print(f"     {i}. {blob.name}")
+            except Exception as e:
+                print(f"  ❌ list_blobs() failed: {type(e).__name__}: {e}")
+        except Exception as e:
+            print(f"  ❌ Raw storage.Client() failed: {type(e).__name__}: {e}")
+        
+        # Test repo wrapper
+        print("\n[Testing backend.utils.gcs_client.list_objects()]")
+        try:
+            from backend.utils.gcs_client import list_objects
+            objs = list_objects(docs_bucket, docs_prefix)
+            print(f"  ✅ list_objects() works: found {len(objs)} objects")
+            if len(objs) > 0:
+                print("  First 5 objects:")
+                for i, obj in enumerate(objs[:5], 1):
+                    print(f"     {i}. {obj.name}")
+            else:
+                print("  ⚠️  WARNING: list_objects() returned 0 objects")
+        except Exception as e:
+            print(f"  ❌ list_objects() failed: {type(e).__name__}: {e}")
+            print("\n❌ PREFLIGHT FAILED: Cannot list objects from GCS.")
+            print("   This indicates an authentication or permission issue.")
+            print("   Please set GOOGLE_APPLICATION_CREDENTIALS to a valid service account JSON file.")
+            import sys
+            sys.exit(1)
+        
+    if not dry_run and not preflight:
         print("\n" + "=" * 80)
         print("Arrow Production Ingestion + (Optional) Index Promotion")
         print("=" * 80)
@@ -4121,7 +4344,7 @@ def main():
         print(f"RAG bucket:   gs://{rag_bucket}/")
         print(f"Latest pref:  {_normalize_prefix(latest_prefix)}")
         print(f"Old pref:     {_normalize_prefix(old_prefix)}")
-    else:
+    elif dry_run and not preflight:
         print("\n" + "=" * 80)
         print("🧪 DRY-RUN: Arrow Production Ingestion Test")
         print("=" * 80)
@@ -4183,21 +4406,49 @@ def main():
             docs_prefix=docs_prefix,
             workdir=workdir,
         )
+        
+        # Fail fast if no documents staged (before model downloads)
+        if len(entries) == 0:
+            error_msg = (
+                f"\n❌ ERROR: No documents staged (0 documents found).\n"
+                f"   Bucket: {docs_bucket}\n"
+                f"   Prefix: {docs_prefix or '(root)'}\n"
+                f"   This usually indicates:\n"
+                f"   - Authentication failure (check GOOGLE_APPLICATION_CREDENTIALS)\n"
+                f"   - Wrong bucket/prefix configuration\n"
+                f"   - Bucket is actually empty\n"
+                f"\n   Run with --preflight to diagnose authentication and listing issues.\n"
+            )
+            logger.error(error_msg)
+            print(error_msg)
+            import sys
+            sys.exit(1)
+        
+        if preflight:
+            print(f"\n✅ PREFLIGHT PASSED")
+            print(f"   - Staged {len(entries)} documents")
+            print(f"   - Manifest: {doc_manifest_path}")
+            print(f"   - Documents directory: {docs_dir}")
+            import sys
+            sys.exit(0)
 
         # Build index from staged docs
         os.environ["INGEST_DOC_MANIFEST_PATH"] = str(doc_manifest_path)
-    pipeline = TechnicalRAGPipeline()
-    use_qdrant = _env_bool("USE_QDRANT", default=False)
-    if use_qdrant:
-        raise RuntimeError("Production promotion flow requires local index artifacts; USE_QDRANT must be false.")
+    
+    # Initialize pipeline (skip in preflight mode)
+    if not preflight:
+        pipeline = TechnicalRAGPipeline()
+        use_qdrant = _env_bool("USE_QDRANT", default=False)
+        if use_qdrant:
+            raise RuntimeError("Production promotion flow requires local index artifacts; USE_QDRANT must be false.")
 
-    pipeline.build_index(
-        data_dir=str(docs_dir),
-        storage_dir=str(index_out_dir),
-        use_qdrant=False,
-        dry_run=dry_run,
-        dry_run_sample_size=dry_run_sample_size,
-    )
+        pipeline.build_index(
+            data_dir=str(docs_dir),
+            storage_dir=str(index_out_dir),
+            use_qdrant=False,
+            dry_run=dry_run,
+            dry_run_sample_size=dry_run_sample_size,
+        )
     
     # Skip verification and promotion in dry-run mode
     if dry_run:
