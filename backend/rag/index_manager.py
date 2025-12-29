@@ -145,17 +145,36 @@ class IndexLoadState:
                 self._finished_at = None
             
             # Start loading
+            load_start_time = time.time()
             self._status = "loading"
-            self._started_at = time.time()
+            self._started_at = load_start_time
             self._error = None
             self._ready_event.clear()
+            
+            # Determine trigger source for logging
+            import traceback
+            stack = traceback.extract_stack()
+            trigger_source = "unknown"
+            for frame in reversed(stack[-10:]):  # Check last 10 frames
+                filename = frame.filename
+                if "startup" in filename or "api.py" in filename:
+                    if "startup_event" in str(frame):
+                        trigger_source = "startup"
+                        break
+                    elif "/query" in str(frame) or "query_knowledge_base" in str(frame):
+                        trigger_source = "/query"
+                        break
+                    elif "/rag/status" in str(frame) or "rag_status" in str(frame):
+                        trigger_source = "/rag/status"
+                        break
             
             try:
                 logger.info(
                     "rag_index_load_start",
                     status=self._status,
                     started_at=self._started_at,
-                    message="Starting RAG index download and load"
+                    trigger=trigger_source,
+                    message=f"Starting RAG index download and load (triggered by: {trigger_source})"
                 )
                 
                 # Resolve storage path
@@ -327,7 +346,8 @@ class IndexLoadState:
                     load_duration_s=load_duration if 'load_duration' in locals() else None,
                     started_at=self._started_at,
                     finished_at=self._finished_at,
-                    message=f"RAG index load completed successfully in {total_elapsed:.2f}s{timing_msg}"
+                    trigger=trigger_source,
+                    message=f"RAG index load completed successfully in {total_elapsed:.2f}s{timing_msg} (triggered by: {trigger_source})"
                 )
                 
             except asyncio.CancelledError:
@@ -362,8 +382,9 @@ class IndexLoadState:
                     error_type=type(e).__name__,
                     error_message=error_str,
                     elapsed_s=elapsed,
+                    trigger=trigger_source,
                     exc_info=True,
-                    message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {error_str}"
+                    message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {error_str} (triggered by: {trigger_source})"
                 )
                 raise RuntimeError(self._error) from e
             

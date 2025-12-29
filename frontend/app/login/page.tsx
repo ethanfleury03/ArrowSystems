@@ -33,10 +33,17 @@ function LoginForm() {
       }
     }
     
-    // Check if user is already authenticated
+    // Check if user is already authenticated (with timeout to prevent blocking)
     const checkAuth = async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
+      
       try {
-        const response = await fetch('/api/auth/me');
+        const response = await fetch('/api/auth/me', {
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        
         if (response.ok) {
           const data = await response.json();
           // User is authenticated, redirect to home
@@ -44,8 +51,14 @@ function LoginForm() {
           window.location.href = redirectPath;
         }
       } catch (error) {
-        // Not authenticated, stay on login page
-        console.log('User not authenticated, showing login form');
+        clearTimeout(timeoutId);
+        // Not authenticated or timeout - stay on login page
+        // Don't block UI - login form is already visible
+        if (error instanceof Error && error.name === 'AbortError') {
+          console.log('Auth check timed out, showing login form');
+        } else {
+          console.log('User not authenticated, showing login form');
+        }
       }
     };
     

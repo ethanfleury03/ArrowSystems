@@ -1789,9 +1789,10 @@ class HybridRetriever:
             return hybrid_results[:top_k]
         
         # PERFORMANCE: Skip LLM evaluation on CPU or for simple queries (saves 30-60s)
+        doc_evaluator = self._ensure_document_evaluator()
         if (enable_llm_evaluation and 
-            self.document_evaluator and 
-            self.document_evaluator.claude_client):
+            doc_evaluator and 
+            doc_evaluator.claude_client):
             
             import torch
             # Only use LLM evaluation on GPU or when explicitly needed (it's slow!)
@@ -1800,7 +1801,7 @@ class HybridRetriever:
                 logger.info(f"🤖 Applying LLM document evaluation to {len(hybrid_results)} documents")
                 try:
                     # Evaluate documents with LLM (limit to top 15 for better coverage)
-                    evaluated_results = self.document_evaluator.evaluate_retrieved_documents(
+                    evaluated_results = doc_evaluator.evaluate_retrieved_documents(
                         query=query,
                         nodes=hybrid_results,
                         max_documents=min(15, len(hybrid_results))  # Increased from 3 to 15 for better coverage
@@ -3401,16 +3402,32 @@ class RAGOrchestrator:
         
         # Components
         self.query_rewriter = QueryRewriter()  # Rule-based fallback
-        self.intent_classifier = ClaudeIntentClassifier()  # 🎯 Claude-powered intent classification
-        self.response_generator = ResponseGenerator()
-        self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
-        self.answer_generator = ClaudeAnswerGenerator() if enable_llm_answers else None
         
-        # 🚀 NEW: Claude-powered retrieval enhancements
-        self.claude_query_rewriter = ClaudeQueryRewriter()  # Semantic query expansion
-        self.claude_query_decomposer = ClaudeQueryDecomposer()  # Query decomposition
-        self.claude_metadata_filter_generator = ClaudeMetadataFilterGenerator()  # Metadata filtering
-        self.claude_iterative_retriever = ClaudeIterativeRetriever()  # Iterative retrieval
+        # Check if LLM warmup is enabled (prevents HTTP calls during startup/login)
+        llm_warmup_enabled = os.getenv("LLM_WARMUP_ON_STARTUP", "0") == "1"
+        
+        if llm_warmup_enabled:
+            # Initialize Claude components immediately (old behavior)
+            self.intent_classifier = ClaudeIntentClassifier()  # 🎯 Claude-powered intent classification
+            self.document_evaluator = DocumentEvaluator() if enable_llm_evaluation else None
+            self.answer_generator = ClaudeAnswerGenerator() if enable_llm_answers else None
+            # 🚀 NEW: Claude-powered retrieval enhancements
+            self.claude_query_rewriter = ClaudeQueryRewriter()  # Semantic query expansion
+            self.claude_query_decomposer = ClaudeQueryDecomposer()  # Query decomposition
+            self.claude_metadata_filter_generator = ClaudeMetadataFilterGenerator()  # Metadata filtering
+            self.claude_iterative_retriever = ClaudeIterativeRetriever()  # Iterative retrieval
+        else:
+            # Lazy initialization - create instances but don't initialize Claude clients
+            # This prevents HTTP calls during startup/login
+            self.intent_classifier = None  # Will be initialized on first use
+            self.document_evaluator = None if not enable_llm_evaluation else None  # Will be initialized on first use
+            self.answer_generator = None if not enable_llm_answers else None  # Will be initialized on first use
+            self.claude_query_rewriter = None  # Will be initialized on first use
+            self.claude_query_decomposer = None  # Will be initialized on first use
+            self.claude_metadata_filter_generator = None  # Will be initialized on first use
+            self.claude_iterative_retriever = None  # Will be initialized on first use
+        
+        self.response_generator = ResponseGenerator()
         
         # 🤖 Machine name matcher for query boosting
         self.machine_matcher = MachineNameMatcher()
@@ -3418,6 +3435,48 @@ class RAGOrchestrator:
         # User-validated cache (only stores answers marked helpful)
         self.cache = QueryCache(max_size=1000)
         self.semantic_cache = None  # Initialized after models are ready
+    
+    def _ensure_intent_classifier(self):
+        """Lazy initialization of intent classifier if not already initialized."""
+        if self.intent_classifier is None:
+            self.intent_classifier = ClaudeIntentClassifier()
+        return self.intent_classifier
+    
+    def _ensure_claude_query_rewriter(self):
+        """Lazy initialization of Claude query rewriter if not already initialized."""
+        if self.claude_query_rewriter is None:
+            self.claude_query_rewriter = ClaudeQueryRewriter()
+        return self.claude_query_rewriter
+    
+    def _ensure_claude_query_decomposer(self):
+        """Lazy initialization of Claude query decomposer if not already initialized."""
+        if self.claude_query_decomposer is None:
+            self.claude_query_decomposer = ClaudeQueryDecomposer()
+        return self.claude_query_decomposer
+    
+    def _ensure_claude_metadata_filter_generator(self):
+        """Lazy initialization of Claude metadata filter generator if not already initialized."""
+        if self.claude_metadata_filter_generator is None:
+            self.claude_metadata_filter_generator = ClaudeMetadataFilterGenerator()
+        return self.claude_metadata_filter_generator
+    
+    def _ensure_claude_iterative_retriever(self):
+        """Lazy initialization of Claude iterative retriever if not already initialized."""
+        if self.claude_iterative_retriever is None:
+            self.claude_iterative_retriever = ClaudeIterativeRetriever()
+        return self.claude_iterative_retriever
+    
+    def _ensure_answer_generator(self):
+        """Lazy initialization of answer generator if not already initialized."""
+        if self.answer_generator is None and self.enable_llm_answers:
+            self.answer_generator = ClaudeAnswerGenerator()
+        return self.answer_generator
+    
+    def _ensure_document_evaluator(self):
+        """Lazy initialization of document evaluator if not already initialized."""
+        if self.document_evaluator is None and self.enable_llm_evaluation:
+            self.document_evaluator = DocumentEvaluator()
+        return self.document_evaluator
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         try:
@@ -4055,7 +4114,7 @@ class RAGOrchestrator:
                     logger.info(f"⚡ Served from validated Q&A database! (helpful_count: {validated['helpful_count']})")
                     
                     # Classify intent for metadata (fast)
-                    intent = self.intent_classifier.classify(query)
+                    intent = self._ensure_intent_classifier().classify(query)
                     
                     # Build response from validated Q&A
                     sources = []
@@ -4084,11 +4143,11 @@ class RAGOrchestrator:
         logger.info(f"📋 Intent: {intent.intent_type} (confidence: {intent.confidence:.2%})")
         
         # 🚀 NEW: Step 1.5 - Query Decomposition (for complex queries)
-        sub_queries = self.claude_query_decomposer.decompose(query, intent)
+        sub_queries = self._ensure_claude_query_decomposer().decompose(query, intent)
         logger.info(f"🔀 Query decomposition: {len(sub_queries)} sub-query(s)")
         
         # 🚀 NEW: Step 1.6 - Generate metadata filters
-        claude_metadata_filters = self.claude_metadata_filter_generator.generate_filters(query)
+        claude_metadata_filters = self._ensure_claude_metadata_filter_generator().generate_filters(query)
         # Merge with user-provided metadata filters
         if metadata_filters:
             metadata_filters = {**claude_metadata_filters, **metadata_filters}
@@ -4124,7 +4183,7 @@ class RAGOrchestrator:
         for sub_query in sub_queries:
             # Expand each sub-query with Claude
             try:
-                expanded_queries = self.claude_query_rewriter.expand_query(sub_query, intent)
+                expanded_queries = self._ensure_claude_query_rewriter().expand_query(sub_query, intent)
                 all_search_queries.extend(expanded_queries)
             except Exception as e:
                 logger.warning(f"Query expansion failed for '{sub_query}': {e}. Using original sub-query.")
@@ -4204,9 +4263,9 @@ class RAGOrchestrator:
             )
         
         # 🚀 NEW: Step 4 - Iterative Retrieval (if needed)
-        if self.claude_iterative_retriever.should_iterate(query, unique_nodes, intent):
+        if self._ensure_claude_iterative_retriever().should_iterate(query, unique_nodes, intent):
             logger.info("🔄 Performing iterative retrieval...")
-            refined_query = self.claude_iterative_retriever.refine_query(query, unique_nodes, intent)
+            refined_query = self._ensure_claude_iterative_retriever().refine_query(query, unique_nodes, intent)
             
             if refined_query:
                 # Retrieve additional results with refined query
