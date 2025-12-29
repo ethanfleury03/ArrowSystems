@@ -189,7 +189,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
           {isUser ? (
             <p className="whitespace-pre-wrap text-pretty">{message.content}</p>
           ) : (
-            <div className="prose prose-sm dark:prose-invert max-w-none">
+            <div className="prose prose-slate prose-sm dark:prose-invert max-w-none text-foreground">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {message.content}
               </ReactMarkdown>
