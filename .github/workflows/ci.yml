@@ -1497,16 +1497,23 @@ jobs:
       - name: Verify Backend RAG startup env vars
         run: |
           echo "🔍 Verifying backend RAG startup environment variables..."
-          ENV_VARS=$(gcloud run services describe arrow-rag-backend \
+          SERVICE_JSON=$(gcloud run services describe arrow-rag-backend \
             --region=us-central1 \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --format='json(spec.template.spec.containers[0].env)' 2>/dev/null || echo "[]")
+            --format='json' 2>/dev/null || echo "{}")
           
-          # Extract env var values
-          RAG_EAGER=$(echo "$ENV_VARS" | jq -r '.[] | select(.name=="RAG_EAGER_LOAD_ON_STARTUP") | .value // "not_set"')
-          RAG_BACKGROUND=$(echo "$ENV_VARS" | jq -r '.[] | select(.name=="RAG_BACKGROUND_LOAD_ON_STARTUP") | .value // "not_set"')
-          LLM_WARMUP=$(echo "$ENV_VARS" | jq -r '.[] | select(.name=="LLM_WARMUP_ON_STARTUP") | .value // "not_set"')
-          GUNICORN_WORKERS=$(echo "$ENV_VARS" | jq -r '.[] | select(.name=="GUNICORN_WORKERS") | .value // "not_set"')
+          # Extract env vars array from the full service JSON
+          ENV_VARS=$(echo "$SERVICE_JSON" | jq '.spec.template.spec.containers[0].env // []')
+          
+          # Debug: Show all env var names for troubleshooting
+          echo "  Debug: Found $(echo "$ENV_VARS" | jq 'length') environment variables"
+          
+          # Extract env var values using a more robust jq query
+          # This handles cases where the variable might not exist
+          RAG_EAGER=$(echo "$ENV_VARS" | jq -r 'map(select(.name=="RAG_EAGER_LOAD_ON_STARTUP")) | if length > 0 then .[0].value // "" else "" end')
+          RAG_BACKGROUND=$(echo "$ENV_VARS" | jq -r 'map(select(.name=="RAG_BACKGROUND_LOAD_ON_STARTUP")) | if length > 0 then .[0].value // "" else "" end')
+          LLM_WARMUP=$(echo "$ENV_VARS" | jq -r 'map(select(.name=="LLM_WARMUP_ON_STARTUP")) | if length > 0 then .[0].value // "" else "" end')
+          GUNICORN_WORKERS=$(echo "$ENV_VARS" | jq -r 'map(select(.name=="GUNICORN_WORKERS")) | if length > 0 then .[0].value // "" else "" end')
           
           echo "  RAG_EAGER_LOAD_ON_STARTUP: '$RAG_EAGER' (expected: '0')"
           echo "  RAG_BACKGROUND_LOAD_ON_STARTUP: '$RAG_BACKGROUND' (expected: '1')"
