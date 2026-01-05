@@ -11,6 +11,7 @@ Key behaviors:
 
 import os
 import time
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -248,7 +249,64 @@ def download_index_from_gcs() -> bool:
                 attempt=1,
             )
             
-            blob.download_to_filename(str(local_file_path))
+            # Wrap download in timeout to prevent indefinite hangs
+            # Default timeout: 10 minutes per file (configurable via env var)
+            download_timeout = int(os.getenv("RAG_DOWNLOAD_TIMEOUT_SEC", "600"))  # 10 minutes default
+            
+            # Configure retry with timeout to prevent indefinite retries
+            from google.api_core import retry as api_retry
+            
+            # Custom retry that respects timeout
+            custom_retry = api_retry.Retry(
+                predicate=api_retry.if_exception_type(Exception),
+                initial=1.0,  # Initial delay 1 second
+                maximum=60.0,  # Max delay 60 seconds
+                multiplier=2.0,  # Exponential backoff
+                timeout=download_timeout,  # Total timeout for all retries
+            )
+            
+            # Use threading timeout as additional safety net
+            download_result = [None]
+            download_exception = [None]
+            
+            def _download_with_timeout():
+                try:
+                    # Pass custom retry to download method
+                    download_result[0] = blob.download_to_filename(
+                        str(local_file_path),
+                        retry=custom_retry
+                    )
+                except Exception as e:
+                    download_exception[0] = e
+            
+            download_thread = threading.Thread(target=_download_with_timeout, daemon=True)
+            download_thread.start()
+            download_thread.join(timeout=download_timeout + 10)  # Add 10s buffer for thread overhead
+            
+            if download_thread.is_alive():
+                # Thread is still running - timeout occurred
+                elapsed = time.time() - t0
+                error_msg = (
+                    f"Download timed out after {download_timeout} seconds. "
+                    f"This usually indicates network issues, very large files, or GCS connectivity problems. "
+                    f"File: {filename}, Size: {size_bytes:,} bytes. "
+                    f"Check GCS bucket permissions and network connectivity."
+                )
+                logger.error(
+                    "[RAG] Download timeout",
+                    filename=filename,
+                    gcs_path=gcs_path,
+                    timeout_seconds=download_timeout,
+                    elapsed_s=elapsed,
+                    size_bytes=size_bytes,
+                    message=error_msg,
+                )
+                update_file_error(filename, error_msg, elapsed)
+                return False
+            
+            if download_exception[0]:
+                # Re-raise the exception from the thread
+                raise download_exception[0]
             
             if not local_file_path.exists():
                 elapsed = time.time() - t0

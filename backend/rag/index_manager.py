@@ -71,6 +71,8 @@ class IndexLoadState:
     
     def get_state(self) -> Dict[str, Any]:
         """Get full state dictionary."""
+        # Check for stuck states and auto-transition to error
+        self._check_stuck_state()
         return {
             "status": self._status,
             "error": self._error,
@@ -78,6 +80,39 @@ class IndexLoadState:
             "finished_at": self._finished_at,
             "elapsed_s": (self._finished_at - self._started_at) if (self._started_at and self._finished_at) else None,
         }
+    
+    def _check_stuck_state(self) -> None:
+        """
+        Check if state has been stuck in loading/downloading for too long.
+        Auto-transition to 'failed' if stuck beyond timeout threshold.
+        """
+        if self._status not in ("loading", "not_started"):
+            return
+        
+        if self._started_at is None:
+            return
+        
+        # Get timeout from environment (default: 15 minutes)
+        max_load_time = int(os.getenv("RAG_MAX_LOAD_TIME_SEC", "900"))  # 15 minutes default
+        
+        elapsed = time.time() - self._started_at
+        if elapsed > max_load_time:
+            error_msg = (
+                f"Index loading timed out after {elapsed:.0f} seconds (max: {max_load_time}s). "
+                f"This usually indicates a stuck download or index load operation. "
+                f"Check GCS permissions, network connectivity, and file sizes."
+            )
+            logger.error(
+                "rag_index_load_timeout_auto_fail",
+                elapsed_seconds=elapsed,
+                max_time_seconds=max_load_time,
+                status=self._status,
+                message=error_msg,
+            )
+            self._status = "failed"
+            self._error = error_msg
+            self._finished_at = time.time()
+            self._ready_event.set()  # Unblock any waiters
     
     async def wait_for_ready(self, timeout: Optional[float] = None) -> bool:
         """
