@@ -31,16 +31,12 @@ numpy==1.26.4
 # LlamaIndex
 # -----------------------------
 # LlamaIndex works with CPU-only PyTorch and transformers
-llama-index==0.14.5
+# IMPORTANT: Install only specific packages we use, NOT the meta-package
+# The meta-package pulls in many optional deps with loose constraints causing resolution loops
 llama-index-core==0.14.5
 llama-index-embeddings-huggingface==0.6.1
 llama-index-vector-stores-qdrant==0.8.6  # Optional: Only needed if USE_QDRANT=true
 qdrant-client==1.12.2  # Optional: Only needed if USE_QDRANT=true
-
-# Pin llama-parse dependencies to prevent dependency resolution loops
-# These are transitive deps from llama-index but need explicit pins
-llama-parse>=0.5.0,<0.7.0
-llama-cloud-services>=0.5.0,<0.7.0
 
 # -----------------------------
 # Google Cloud Storage
