@@ -10,6 +10,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 import os
 import re
+import threading
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -3809,6 +3810,84 @@ class RAGOrchestrator:
                     f"Expected files in {storage_dir}: {required_files}"
                 )
             
+            # CRITICAL: Validate JSON files before attempting to load index
+            # This prevents timeouts and provides better error messages for corrupted files
+            corrupted_files = []
+            for req_file in required_files:
+                file_path = os.path.join(storage_dir, req_file)
+                if os.path.exists(file_path):
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        if file_size == 0:
+                            corrupted_files.append(f"{req_file} (empty file, 0 bytes)")
+                            continue
+                        
+                        # Try to parse JSON to detect corruption early
+                        # Use a reasonable chunk size to avoid loading huge files entirely into memory
+                        # For very large files, we'll validate the structure by attempting to parse
+                        logger.debug("orchestrator_validating_json_file",
+                                   file=req_file,
+                                   size_bytes=file_size,
+                                   message=f"Validating JSON structure of {req_file}")
+                        
+                        # Try to parse JSON - for large files this may take time but will catch corruption early
+                        # This is better than letting load_index_from_storage hang for 60+ seconds
+                        logger.info("orchestrator_validating_json_parse",
+                                   file=req_file,
+                                   size_mb=round(file_size / (1024 * 1024), 2),
+                                   message=f"Attempting to parse {req_file} ({round(file_size / (1024 * 1024), 2)} MB) to validate JSON structure")
+                        
+                        # Attempt to parse the JSON file
+                        # For very large files, this may take some time, but it's better than
+                        # letting load_index_from_storage hang indefinitely
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            try:
+                                # Try to parse - this will raise JSONDecodeError if corrupted
+                                json.load(f)
+                                logger.debug("orchestrator_json_validation_success",
+                                           file=req_file,
+                                           message=f"Successfully validated JSON structure of {req_file}")
+                            except json.JSONDecodeError as parse_err:
+                                # Re-raise with more context
+                                raise json.JSONDecodeError(
+                                    f"Invalid JSON in {req_file}",
+                                    parse_err.doc,
+                                    parse_err.pos
+                                )
+                                
+                    except json.JSONDecodeError as json_err:
+                        corrupted_files.append(
+                            f"{req_file} (JSONDecodeError at position {json_err.pos}: {str(json_err)}, file size: {file_size:,} bytes)"
+                        )
+                        logger.error("orchestrator_json_validation_failed",
+                                   file=req_file,
+                                   error=str(json_err),
+                                   error_pos=json_err.pos,
+                                   file_size=file_size,
+                                   message=f"JSON validation failed for {req_file}")
+                    except Exception as validation_err:
+                        corrupted_files.append(
+                            f"{req_file} ({type(validation_err).__name__}: {str(validation_err)}, file size: {file_size:,} bytes)"
+                        )
+                        logger.error("orchestrator_json_validation_error",
+                                   file=req_file,
+                                   error=str(validation_err),
+                                   error_type=type(validation_err).__name__,
+                                   file_size=file_size,
+                                   message=f"Error validating {req_file}")
+            
+            if corrupted_files:
+                error_msg = (
+                    f"Corrupted or invalid JSON files detected: {', '.join(corrupted_files)}. "
+                    f"This usually indicates incomplete downloads or file corruption. "
+                    f"Try re-downloading the index from GCS or rebuilding the index."
+                )
+                logger.error("orchestrator_index_files_corrupted",
+                           storage_dir=storage_dir,
+                           corrupted_files=corrupted_files,
+                           message=error_msg)
+                raise RuntimeError(error_msg)
+            
             # CRITICAL: Use the absolute path directly - do not add any extra segments
             # In Cloud Run, if mount is at /app/latest_model, files are at /app/latest_model/docstore.json
             # Do NOT use persist_dir="latest_model" or any relative path here
@@ -3823,7 +3902,39 @@ class RAGOrchestrator:
             # If ingestion used a custom index_id, we would need to pass it here:
             # self.index = load_index_from_storage(storage_context, index_id="custom_id")
             # But since ingestion uses default, we don't specify index_id
-            self.index = load_index_from_storage(storage_context)
+            # Wrap in timeout to prevent indefinite hangs (e.g., from corrupted files)
+            load_result = [None]
+            load_exception = [None]
+            
+            def _load_with_timeout():
+                try:
+                    load_result[0] = load_index_from_storage(storage_context)
+                except Exception as e:
+                    load_exception[0] = e
+            
+            load_thread = threading.Thread(target=_load_with_timeout, daemon=True)
+            load_thread.start()
+            load_thread.join(timeout=120)  # 2 minute timeout for index loading
+            
+            if load_thread.is_alive():
+                # Thread is still running - timeout occurred
+                error_msg = (
+                    f"Index loading timed out after 120 seconds. "
+                    f"This usually indicates corrupted index files or extremely large files. "
+                    f"Storage directory: {storage_dir}. "
+                    f"Try re-downloading the index from GCS or check file sizes."
+                )
+                logger.error("orchestrator_index_load_timeout",
+                           storage_dir=storage_dir,
+                           timeout_seconds=120,
+                           message=error_msg)
+                raise RuntimeError(error_msg)
+            
+            if load_exception[0]:
+                # Re-raise the exception from the thread
+                raise load_exception[0]
+            
+            self.index = load_result[0]
             
             # Verify index was actually loaded (not None)
             if self.index is None:
