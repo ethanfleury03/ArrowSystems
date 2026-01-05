@@ -43,6 +43,11 @@ function getAuthToken(): string | null {
   return null;
 }
 
+// Type guard function to check if userInfo is authenticated UserInfo
+function isAuthenticatedUserInfo(userInfo: UserInfo | null | false): userInfo is UserInfo {
+  return userInfo !== null && userInfo !== false
+}
+
 export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
@@ -215,7 +220,7 @@ export function ChatInterface() {
     
     // Type guard: ensure userInfo is UserInfo (not null or false)
     // This should never happen since component only renders when authenticated, but TypeScript needs this
-    if (!userInfo || userInfo === false) {
+    if (!isAuthenticatedUserInfo(userInfo)) {
       console.error('handleSubmit called but userInfo is not authenticated')
       return
     }
@@ -542,7 +547,7 @@ export function ChatInterface() {
   const handleSettingsChange = (settings: QuerySettings) => {
     // Only allow settings changes for admins (customers won't see the UI anyway)
     // Type guard: ensure userInfo is UserInfo (component only renders when authenticated)
-    if (userInfo && userInfo !== false && userInfo.role === 'ADMIN') {
+    if (isAuthenticatedUserInfo(userInfo) && userInfo.role === 'ADMIN') {
       querySettingsRef.current = settings
     }
   }
