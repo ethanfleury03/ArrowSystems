@@ -1367,7 +1367,7 @@ class SmartChunkSplitter:
 class NonTextExtractor:
     """Extract and process non-text content from documents."""
     
-    def __init__(self, output_dir: Optional[str] = None):
+    def __init__(self, output_dir: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
         override_dir = os.getenv("EXTRACTED_CONTENT_DIR")
         if override_dir:
             target_dir = Path(override_dir)
@@ -1376,10 +1376,28 @@ class NonTextExtractor:
         else:
             target_dir = Path(__file__).resolve().parent.parent / "extracted_content"
         self.output_dir = target_dir
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Store config and check extract_images flag
+        self.config = config or {}
+        self.extract_images_enabled = bool(self.config.get("non_text", {}).get("extract_images", False))
+        
+        # Only create output_dir lazily when needed (tables may still need it)
+        self._output_dir_created = False
+        
+        if not self.extract_images_enabled:
+            logger.info("🖼️ Image extraction is DISABLED (non_text.extract_images=false). Images will be skipped.")
+    
+    def _ensure_output_dir(self):
+        """Lazily create output_dir only when needed (for tables)."""
+        if not self._output_dir_created:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self._output_dir_created = True
         
     def extract_tables_from_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract tables from PDF using PyMuPDF."""
+        # Ensure output_dir exists (tables need it)
+        self._ensure_output_dir()
+        
         tables = []
         doc = fitz.open(pdf_path)
         
@@ -1434,6 +1452,11 @@ class NonTextExtractor:
     
     def extract_images_from_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract images and diagrams from PDF."""
+        # HARD REMOVE: Early return if images disabled
+        if not self.extract_images_enabled:
+            logger.debug(f"Skipping image extraction from {Path(pdf_path).name} (images disabled)")
+            return []
+        
         images = []
         doc = fitz.open(pdf_path)
         
@@ -2310,9 +2333,10 @@ class TechnicalRAGPipeline:
         self.embedding_model_name: str | None = None
         self.reranker = None
         self.index = None
-        self.non_text_extractor = NonTextExtractor()
-        self.text_preprocessor = TextPreprocessor()
         self.config = self._load_config(config_path)
+        # Pass config to NonTextExtractor so it can check extract_images flag
+        self.non_text_extractor = NonTextExtractor(config=self.config)
+        self.text_preprocessor = TextPreprocessor()
 
         # Optional: when ingesting from a staging manifest, we populate this mapping so that
         # all non-text nodes (tables/images/captions) can include REQUIRED metadata fields.
@@ -2528,6 +2552,9 @@ class TechnicalRAGPipeline:
         all_images = []
         all_captions = []
         
+        # Check config for image extraction (single source of truth)
+        extract_images_enabled = bool(self.config.get("non_text", {}).get("extract_images", False))
+        
         # Find all PDF files (recursive; GCS staging uses nested directories like documents/<metadata_id>/<file>.pdf)
         pdf_files = list(Path(data_dir).rglob("*.pdf"))
         logger.info(f"Found {len(pdf_files)} PDF files to process")
@@ -2541,10 +2568,14 @@ class TechnicalRAGPipeline:
                 all_tables.extend(tables)
                 logger.info(f"Extracted {len(tables)} tables from {pdf_path.name}")
                 
-                # Extract images
-                images = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
-                all_images.extend(images)
-                logger.info(f"Extracted {len(images)} images from {pdf_path.name}")
+                # Extract images (only if enabled - extract_images_from_pdf also checks internally)
+                if extract_images_enabled:
+                    images = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
+                    all_images.extend(images)
+                    logger.info(f"Extracted {len(images)} images from {pdf_path.name}")
+                else:
+                    # Explicitly skip to avoid any extraction overhead
+                    logger.debug(f"Skipping image extraction from {pdf_path.name} (images disabled)")
                 
                 # Extract captions
                 captions = self.non_text_extractor.extract_figure_captions(str(pdf_path))
@@ -2555,7 +2586,8 @@ class TechnicalRAGPipeline:
                 logger.error(f"Failed to process {pdf_path.name}: {e}")
                 continue
         
-        logger.info(f"✅ Non-text processing complete: {len(all_tables)} tables, {len(all_images)} images, {len(all_captions)} captions")
+        image_status = "enabled" if extract_images_enabled else "DISABLED"
+        logger.info(f"✅ Non-text processing complete: {len(all_tables)} tables, {len(all_images)} images ({image_status}), {len(all_captions)} captions")
         return all_tables, all_images, all_captions
     
     def create_non_text_nodes(self, tables: List[Dict], images: List[Dict], captions: List[Dict], report_mode: bool = False) -> Tuple[List[TextNode], Dict[str, Any]]:
@@ -2662,30 +2694,37 @@ class TechnicalRAGPipeline:
                 )
                 nodes.append(node)
         
-        # Process images (create text nodes for captions and metadata only - no base64)
-        images_kept = 0
-        for image in images:
-            image_text = f"Image from {Path(image['source_path']).name}, page {image['page_number']}: {image['caption']}"
+        # HARD REMOVE: Skip image node creation entirely when disabled
+        extract_images_enabled = bool(self.config.get("non_text", {}).get("extract_images", False))
+        if not extract_images_enabled:
+            # Images disabled - skip processing and set stats to 0
+            logger.debug(f"Skipping image node creation (images disabled). {len(images)} images would have been skipped.")
+            stats["images_after_filter"] = 0
+        else:
+            # Process images (create text nodes for captions and metadata only - no base64)
+            images_kept = 0
+            for image in images:
+                image_text = f"Image from {Path(image['source_path']).name}, page {image['page_number']}: {image['caption']}"
+                
+                node = TextNode(
+                    text=image_text,
+                    metadata={
+                        "content_type": "image",
+                        "source_path": image["source_path"],
+                        "page_number": image["page_number"],
+                        "image_index": image["image_index"],
+                        "width": image["width"],
+                        "height": image["height"],
+                        "saved_path": image.get("saved_path"),
+                        "bbox": str(image.get("bbox")) if image.get("bbox") else None,
+                        **_required_meta_for_source_path(image.get("source_path")),
+                    }
+                )
+                nodes.append(node)
+                images_kept += 1
             
-            node = TextNode(
-                text=image_text,
-                metadata={
-                    "content_type": "image",
-                    "source_path": image["source_path"],
-                    "page_number": image["page_number"],
-                    "image_index": image["image_index"],
-                    "width": image["width"],
-                    "height": image["height"],
-                    "saved_path": image.get("saved_path"),
-                    "bbox": str(image.get("bbox")) if image.get("bbox") else None,
-                    **_required_meta_for_source_path(image.get("source_path")),
-                }
-            )
-            nodes.append(node)
-            images_kept += 1
-        
-        # Update stats with actual counts
-        stats["images_after_filter"] = images_kept
+            # Update stats with actual counts
+            stats["images_after_filter"] = images_kept
         
         return nodes, stats
     
@@ -2946,8 +2985,9 @@ class TechnicalRAGPipeline:
         report_mode = os.getenv("REPORT_NONTEXT", "false").lower() in {"true", "1", "yes", "on"}
         non_text_nodes, image_stats = self.create_non_text_nodes(tables, images, captions, report_mode=report_mode)
         
-        # Log image filtering results
-        if image_stats["images_before_filter"] > 0:
+        # Log image filtering results (only if images were processed)
+        extract_images_enabled = bool(self.config.get("non_text", {}).get("extract_images", False))
+        if extract_images_enabled and image_stats["images_before_filter"] > 0:
             kept = image_stats["images_after_filter"]
             total = image_stats["images_before_filter"]
             skipped = total - kept
@@ -2959,6 +2999,8 @@ class TechnicalRAGPipeline:
                 for reason, count in image_stats["images_skipped"].items():
                     if count > 0:
                         print(f"        - {reason}: {count}")
+        else:
+            print(f"   ✅ Created {len(non_text_nodes)} non-text nodes")
         
         # Print report if requested
         if report_mode and image_stats["images_by_document"]:
@@ -2998,7 +3040,12 @@ class TechnicalRAGPipeline:
             
             print("="*70 + "\n")
         
-        logger.info(f"Created {len(non_text_nodes)} non-text nodes (images: {image_stats['images_after_filter']}/{image_stats['images_before_filter']} kept)")
+        # Only log image stats if images were enabled
+        extract_images_enabled = bool(self.config.get("non_text", {}).get("extract_images", False))
+        if extract_images_enabled and image_stats['images_before_filter'] > 0:
+            logger.info(f"Created {len(non_text_nodes)} non-text nodes (images: {image_stats['images_after_filter']}/{image_stats['images_before_filter']} kept)")
+        else:
+            logger.info(f"Created {len(non_text_nodes)} non-text nodes (images disabled)")
         
         # Step 5: Smart Chunking with Text Nodes
         print("\n[Step 5/7] 🧠 Smart chunking and filtering...")
@@ -3315,13 +3362,13 @@ class TechnicalRAGPipeline:
         return self.index
     
     def hybrid_search(self, query: str, top_k: int = 10, content_types: List[str] = None) -> List[NodeWithScore]:
-        """Perform hybrid search across text, tables, and images."""
+        """Perform hybrid search across text, tables, and figure captions."""
         if not self.index:
             raise RuntimeError("Index not built. Call build_index() first.")
         
-        # Default to search all content types
+        # Default to search all content types (images excluded - hard remove)
         if content_types is None:
-            content_types = ["text", "table", "image", "figure_caption"]
+            content_types = ["text", "table", "figure_caption"]
         
         # Perform vector search
         retriever = self.index.as_retriever(similarity_top_k=top_k * 2)  # Get more for re-ranking
@@ -3332,6 +3379,9 @@ class TechnicalRAGPipeline:
             filtered_nodes = []
             for node in nodes:
                 content_type = node.metadata.get("content_type", "text")
+                # HARD REMOVE: Always exclude image nodes, even if content_types includes it
+                if content_type == "image":
+                    continue
                 if content_type in content_types or content_type == "text":
                     filtered_nodes.append(node)
             nodes = filtered_nodes[:top_k]
