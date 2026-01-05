@@ -154,7 +154,7 @@ jobs:
     name: Docker Build
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -241,6 +241,7 @@ jobs:
         id: build-backend-cache
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         continue-on-error: true
+        timeout-minutes: 50
         uses: docker/build-push-action@v5
         with:
           builder: ${{ steps.buildx.outputs.name }}
@@ -249,7 +250,7 @@ jobs:
           push: true
           tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
           cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
+          cache-to: type=gha,mode=min,scope=backend
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
@@ -270,6 +271,7 @@ jobs:
 
       - name: Build & Push Backend Image (retry - with cache export)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.build-backend-cache.outcome == 'failure'
+        timeout-minutes: 50
         uses: docker/build-push-action@v5
         with:
           builder: ${{ steps.buildx.outputs.name }}
@@ -278,7 +280,7 @@ jobs:
           push: true
           tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arrow-rag-backend/backend:${{ github.sha }}
           cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
+          cache-to: type=gha,mode=min,scope=backend
           platforms: linux/amd64
           build-args: |
             BUILD_ENV=production
@@ -630,6 +632,7 @@ jobs:
             --execution-environment=gen2 \
             --cpu=2 \
             --memory=8Gi \
+            --cpu-boost \
             --min-instances=1 \
             --max-instances=10 \
             --cpu-throttling \
@@ -639,6 +642,20 @@ jobs:
             --quiet
           
           echo "✅ Deployment complete!"
+          
+          # Verify Startup CPU Boost is enabled
+          echo "🔍 Verifying Startup CPU Boost is enabled..."
+          CPU_BOOST=$(gcloud run services describe arrow-rag-backend \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --region=us-central1 \
+            --format="value(spec.template.metadata.annotations['run.googleapis.com/startup-cpu-boost'])" 2>/dev/null || echo "")
+          
+          if [ "$CPU_BOOST" != "true" ]; then
+            echo "❌ ERROR: Startup CPU Boost is not enabled on arrow-rag-backend"
+            echo "   Current value: '$CPU_BOOST' (expected: 'true')"
+            exit 1
+          fi
+          echo "✅ Startup CPU Boost verified: enabled"
           
           # Remove any lingering traffic tags (e.g., "gcs-test")
           # Try --clear-tags first (if supported), otherwise remove tags individually
@@ -1226,6 +1243,7 @@ jobs:
       - name: Build & Push Frontend Image (attempt 1)
         id: build-frontend
         continue-on-error: true
+        timeout-minutes: 30
         uses: docker/build-push-action@v5
         with:
           builder: ${{ steps.buildx-frontend.outputs.name }}
@@ -1241,10 +1259,11 @@ jobs:
             SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
 
           cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
+          cache-to: type=gha,mode=min,scope=frontend
 
       - name: Build & Push Frontend Image (retry)
         if: steps.build-frontend.outcome == 'failure'
+        timeout-minutes: 30
         uses: docker/build-push-action@v5
         with:
           builder: ${{ steps.buildx-frontend.outputs.name }}
@@ -1260,7 +1279,7 @@ jobs:
             SESSION_SECRET=BUILD_PLACEHOLDER_SESSION_SECRET_SET_AT_RUNTIME_IN_CLOUD_RUN
 
           cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
+          cache-to: type=gha,mode=min,scope=frontend
 
       - name: Fetch backend URL
         id: backend_url
@@ -1281,6 +1300,7 @@ jobs:
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --memory=1Gi \
             --cpu=1 \
+            --cpu-boost \
             --timeout=300 \
             --concurrency=80 \
             --port=3000 \
@@ -1290,6 +1310,20 @@ jobs:
             --set-env-vars="SESSION_SECRET=${{ secrets.FRONTEND_SESSION_SECRET }}" \
             --allow-unauthenticated \
             --quiet
+          
+          # Verify Startup CPU Boost is enabled
+          echo "🔍 Verifying Startup CPU Boost is enabled..."
+          CPU_BOOST=$(gcloud run services describe arrow-rag-frontend \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --region=us-central1 \
+            --format="value(spec.template.metadata.annotations['run.googleapis.com/startup-cpu-boost'])" 2>/dev/null || echo "")
+          
+          if [ "$CPU_BOOST" != "true" ]; then
+            echo "❌ ERROR: Startup CPU Boost is not enabled on arrow-rag-frontend"
+            echo "   Current value: '$CPU_BOOST' (expected: 'true')"
+            exit 1
+          fi
+          echo "✅ Startup CPU Boost verified: enabled"
 
       - name: Get service URL
         id: get-service-url
