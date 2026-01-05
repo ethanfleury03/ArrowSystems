@@ -58,25 +58,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract JWT token from backend's Set-Cookie header
-    // Backend sets the cookie on its domain, but we need it on the frontend domain
-    let jwtToken: string | null = null;
-    const setCookieHeader = backendResponse.headers.get('set-cookie');
-    if (setCookieHeader) {
-      const match = setCookieHeader.match(/access_token=([^;]+)/);
-      if (match) {
-        jwtToken = match[1];
-      }
-    }
-    
-    if (!jwtToken) {
-      console.error('No JWT token found in backend response');
-      return NextResponse.json(
-        { detail: 'Authentication token not received from backend' },
-        { status: 502 }
-      );
-    }
-    
+    // Backend sets the access_token cookie in its response.
+    // Since backend and frontend are on the same domain (or properly configured for cross-domain),
+    // we forward the Set-Cookie header from backend to browser.
+    // DO NOT set cookies here - backend is the single source of truth for cookie setting.
     const response = NextResponse.json(
       {
         message: message || 'Login successful',
@@ -87,15 +72,13 @@ export async function POST(request: NextRequest) {
       { status: 200 }
     );
     
-    // Set JWT cookie on the frontend domain (overwrites any existing cookie)
-    if (jwtToken) {
-      response.cookies.set('access_token', jwtToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-        path: '/',
-        // No maxAge = session cookie (expires when browser closes)
-      });
+    // Forward Set-Cookie header from backend response to browser
+    // This ensures the cookie set by backend reaches the browser
+    const setCookieHeader = backendResponse.headers.get('set-cookie');
+    if (setCookieHeader) {
+      response.headers.set('set-cookie', setCookieHeader);
+    } else {
+      console.warn('No Set-Cookie header in backend login response - cookie may not be set');
     }
     
     // Only log in development to reduce production log noise

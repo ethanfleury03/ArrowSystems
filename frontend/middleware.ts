@@ -62,14 +62,15 @@ export function middleware(request: NextRequest) {
   const cookieName = getAuthCookieName();
   const token = request.cookies.get(cookieName);
   
-  if (!token) {
+  // Check for token presence AND non-empty value
+  if (!token || !token.value || token.value.trim() === '') {
     // For API routes, NEVER redirect with HTML (breaks callers expecting JSON).
     // Return JSON 401 instead so the UI can handle it safely.
     if (pathname.startsWith('/api/')) {
       return NextResponse.json({ detail: 'Not authenticated' }, { status: 401 });
     }
 
-    // For pages, redirect to login.
+    // For pages, redirect to login (server-side redirect, no flash)
     const loginUrl = new URL('/login', request.url);
     const fullPath = request.nextUrl.pathname + request.nextUrl.search;
     loginUrl.searchParams.set('redirect', fullPath);

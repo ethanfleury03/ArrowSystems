@@ -13,33 +13,18 @@ import { useToast } from "@/hooks/use-toast"
 
 interface ChatMessageProps {
   message: Message
+  userRole?: string | null  // User role from authenticated user info
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+export function ChatMessage({ message, userRole }: ChatMessageProps) {
   const isUser = message.role === "user"
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null)
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false)
   const [isSaved, setIsSaved] = useState(message.metadata?.isSaved ?? false)
   const [isSaving, setIsSaving] = useState(false)
-  const [userRole, setUserRole] = useState<string | null>(null)
   const { toast } = useToast()
 
-  // Get user role from JWT token
-  useEffect(() => {
-    try {
-      const token = localStorage.getItem("auth_token")
-      if (token) {
-        const payloadBase64 = token.split(".")[1]
-        if (payloadBase64) {
-          const payloadJson = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"))
-          const payload = JSON.parse(payloadJson)
-          setUserRole(payload?.role || null)
-        }
-      }
-    } catch (error) {
-      console.warn("Failed to parse auth token for role:", error)
-    }
-  }, [])
+  // User role is now passed as prop from parent (ChatInterface) which has authenticated userInfo
 
   // Check if user is admin or technician (should show thumbs up/down)
   const showFeedbackButtons = useMemo(() => {

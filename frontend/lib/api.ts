@@ -10,24 +10,8 @@ const apiClient = axios.create({
   withCredentials: true,
 });
 
-// Add interceptor to include JWT token in all requests
-apiClient.interceptors.request.use(
-  (config) => {
-    // Get JWT token from localStorage if available (client-side only)
-    if (typeof window !== 'undefined') {
-      const authToken = localStorage.getItem('auth_token');
-      if (authToken && config.headers) {
-        // Send JWT token as X-Auth-Token header to Next.js API routes
-        // The API routes will forward it to the backend after IAM authentication
-        config.headers['X-Auth-Token'] = authToken;
-      }
-    }
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  }
-);
+// Request interceptor removed - we now use cookie-based auth exclusively
+// Cookies are automatically sent via withCredentials: true
 
 export interface SourceInfo {
   id: string;
@@ -147,6 +131,28 @@ export async function getCurrentUser(): Promise<UserInfo> {
     throw error;
   }
 }
+
+// Add response interceptor to handle 401 errors globally (loop-safe)
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      // Prevent redirect loops - if already on login/invite pages, don't redirect
+      if (typeof window !== 'undefined') {
+        const currentPath = window.location.pathname;
+        const isPublicRoute = currentPath === '/login' || 
+                            currentPath === '/register' || 
+                            currentPath.startsWith('/accept-invite');
+        
+        if (!isPublicRoute) {
+          // Hard redirect to login (clears any stale state)
+          window.location.href = '/login';
+        }
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 
 export async function getHealth(): Promise<boolean> {
   try {

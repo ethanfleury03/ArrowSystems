@@ -1,6 +1,7 @@
 import { ChatInterface } from "@/components/chat-interface"
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
+import { getAuthCookieName } from '@/lib/auth-config'
 
 /**
  * Root page - requires authentication
@@ -13,13 +14,13 @@ import { redirect } from 'next/navigation'
  * The middleware also protects this route, but this provides an additional check.
  */
 export default async function Home() {
-  // Check for auth token cookie
+  // Check for auth token cookie using configured name
   const cookieStore = await cookies()
-  const token = cookieStore.get('access_token')
+  const cookieName = getAuthCookieName()
+  const token = cookieStore.get(cookieName)
   
-  // If no token, redirect to login
-  // Note: Middleware should also catch this, but this provides server-side enforcement
-  if (!token) {
+  // If no token or empty value, redirect to login immediately (server-side, no UI flash)
+  if (!token || !token.value || token.value.trim() === '') {
     redirect('/login')
   }
   

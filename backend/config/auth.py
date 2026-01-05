@@ -42,7 +42,9 @@ class AuthConfig:
         # SameSite=None is required for cross-origin cookies (frontend/backend on different domains)
         # This requires Secure=true (HTTPS only)
         self.AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "none" if settings.is_prod else "lax")
-        self.AUTH_COOKIE_HTTPONLY = False  # Allow JavaScript to read token for Authorization header
+        # HttpOnly should be True for security (prevents XSS attacks)
+        # We no longer need JavaScript to read the token since we use cookie-based auth
+        self.AUTH_COOKIE_HTTPONLY = os.getenv("AUTH_COOKIE_HTTPONLY", "true").lower() in {"true", "1", "yes"}
         self.AUTH_COOKIE_PATH = "/"
         
     def _get_cookie_secure(self) -> bool:
