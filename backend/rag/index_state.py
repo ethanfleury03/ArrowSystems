@@ -32,6 +32,9 @@ _index_state: Dict[str, Any] = {
 def get_index_state() -> Dict[str, Any]:
     """Get a snapshot of the current index state (thread-safe)."""
     with _state_lock:
+        # Check for stuck states and auto-transition to error
+        _check_stuck_state_internal()
+        
         # Return a deep copy to avoid external mutations
         return {
             "ready": _index_state["ready"],
@@ -48,6 +51,45 @@ def get_index_state() -> Dict[str, Any]:
             "prefix": _index_state["prefix"],
             "local_dir": _index_state["local_dir"],
         }
+
+
+def _check_stuck_state_internal() -> None:
+    """
+    Check if state has been stuck in downloading/loading for too long.
+    Auto-transition to 'error' if stuck beyond timeout threshold.
+    """
+    phase = _index_state["phase"]
+    if phase not in ("downloading", "loading"):
+        return
+    
+    started_at = _index_state.get("started_at")
+    if started_at is None:
+        return
+    
+    # Get timeout from environment (default: 15 minutes)
+    import os
+    max_time = int(os.getenv("RAG_MAX_LOAD_TIME_SEC", "900"))  # 15 minutes default
+    
+    elapsed = time.time() - started_at
+    if elapsed > max_time:
+        error_msg = (
+            f"Index {phase} timed out after {elapsed:.0f} seconds (max: {max_time}s). "
+            f"This usually indicates a stuck download or load operation. "
+            f"Check GCS permissions, network connectivity, and file sizes."
+        )
+        from backend.logging_config import get_logger
+        logger = get_logger(__name__)
+        logger.error(
+            f"[RAG] State stuck timeout - auto-failing",
+            phase=phase,
+            elapsed_seconds=elapsed,
+            max_time_seconds=max_time,
+            message=error_msg,
+        )
+        _index_state["phase"] = "error"
+        _index_state["error"] = error_msg
+        _index_state["ready"] = False
+        _index_state["updated_at"] = time.time()
 
 
 def set_phase(phase: str, error: Optional[str] = None, bucket: Optional[str] = None, prefix: Optional[str] = None, local_dir: Optional[str] = None) -> None:
