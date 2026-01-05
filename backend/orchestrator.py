@@ -2735,7 +2735,7 @@ Query: "{query}"{metadata_desc}
 
 Extract metadata filters such as:
 - file_name patterns or specific document names mentioned
-- content_type preferences (table, image, text, figure_caption)
+- content_type preferences (table, text, figure_caption) - images excluded
 - page_number ranges if mentioned
 - Any other metadata filters that would narrow results
 
