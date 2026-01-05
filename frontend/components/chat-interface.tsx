@@ -213,6 +213,13 @@ export function ChatInterface() {
     e.preventDefault()
     if (!input.trim() || isLoading) return
     
+    // Type guard: ensure userInfo is UserInfo (not null or false)
+    // This should never happen since component only renders when authenticated, but TypeScript needs this
+    if (!userInfo || userInfo === false) {
+      console.error('handleSubmit called but userInfo is not authenticated')
+      return
+    }
+    
     // Block queries if RAG is not ready
     if (ragStatus !== 'ready') {
       let message = "Assistant is still loading the knowledge base. Please try again in a moment."
@@ -249,7 +256,8 @@ export function ChatInterface() {
     setIsLoading(true)
 
     // Handle machine confirmation for customers
-    if (userInfo?.role?.toUpperCase() === "CUSTOMER" && !machineConfirmation) {
+    // userInfo is now guaranteed to be UserInfo after type guard above
+    if (userInfo.role?.toUpperCase() === "CUSTOMER" && !machineConfirmation) {
       // Add user message first
       setMessages((prev) => [...prev, userMessage])
       
@@ -324,7 +332,8 @@ export function ChatInterface() {
 
     // Block queries until machine is selected (for customers with multiple machines)
     // Check if user has multiple machines and hasn't selected one yet
-    if (userInfo?.role?.toUpperCase() === "CUSTOMER" && machineConfirmation) {
+    // userInfo is guaranteed to be UserInfo after type guard in handleSubmit
+    if (userInfo.role?.toUpperCase() === "CUSTOMER" && machineConfirmation) {
       const filteredMachines = userInfo.machine_models && userInfo.machine_models.length > 0
         ? userInfo.machine_models.filter(m => m !== "GENERAL")
         : []
@@ -350,7 +359,8 @@ export function ChatInterface() {
     // Call RAG backend API
     try {
       // Get effective query settings: use defaults for customers, allow customization for admins
-      const effectiveSettings = getEffectiveQuerySettings(userInfo, querySettingsRef.current)
+      // userInfo is guaranteed to be UserInfo after type guard at start of handleSubmit
+      const effectiveSettings = getEffectiveQuerySettings(userInfo as UserInfo, querySettingsRef.current)
       const response = await sendQuery(userMessage.content, {
         top_k: effectiveSettings.topK,
         alpha: effectiveSettings.alpha,
@@ -531,7 +541,8 @@ export function ChatInterface() {
 
   const handleSettingsChange = (settings: QuerySettings) => {
     // Only allow settings changes for admins (customers won't see the UI anyway)
-    if (userInfo?.role === 'ADMIN') {
+    // Type guard: ensure userInfo is UserInfo (component only renders when authenticated)
+    if (userInfo && userInfo !== false && userInfo.role === 'ADMIN') {
       querySettingsRef.current = settings
     }
   }
