@@ -668,6 +668,213 @@ def compute_allowed_filenames(
     return allowed
 
 
+def check_filename_alignment_offline(
+    storage_dir: Path,
+    manifest_path: Path,
+    sample: int
+) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check filename alignment using manifest instead of DB (offline mode)."""
+    try:
+        from backend.utils.filenames import canonicalize_filename
+    except ImportError:
+        def canonicalize_filename(name: str) -> str:
+            return normalize_filename(name)
+    
+    docstore_path = storage_dir / "docstore.json"
+    if not docstore_path.exists():
+        return (
+            CheckResult("Filename alignment (offline)", "FAIL", "docstore.json missing", ""),
+            {},
+        )
+    
+    # Load manifest
+    manifest = load_json(manifest_path)
+    manifest_entries = manifest.get("documents", [])
+    
+    # Build canonical filename set from manifest
+    manifest_files_canonical = set()
+    manifest_files_by_doc_id: Dict[str, str] = {}
+    for entry in manifest_entries:
+        canonical_file_name = entry.get("canonical_file_name")
+        if canonical_file_name:
+            canonical = canonicalize_filename(canonical_file_name)
+            manifest_files_canonical.add(canonical)
+            doc_id = entry.get("document_id", "unknown")
+            manifest_files_by_doc_id[doc_id] = canonical
+    
+    # Load docstore
+    docstore = load_json(docstore_path)
+    nodes = get_docstore_nodes(docstore)
+    
+    chunk_files_canonical = set()
+    missing_file_name = 0
+    empty_file_name = 0
+    examples = []
+    
+    for i, (node_id, node_data) in enumerate(nodes.items()):
+        meta = get_node_metadata(node_data)
+        fn = meta.get("file_name")
+        
+        if not fn:
+            missing_file_name += 1
+        elif not str(fn).strip():
+            empty_file_name += 1
+        else:
+            chunk_files_canonical.add(canonicalize_filename(str(fn)))
+        
+        if i < sample:
+            examples.append((node_id, fn or "MISSING"))
+    
+    intersection = len(manifest_files_canonical & chunk_files_canonical)
+    manifest_only = sorted(manifest_files_canonical - chunk_files_canonical)
+    chunk_only = sorted(chunk_files_canonical - manifest_files_canonical)
+    
+    total_nodes = len(nodes)
+    match_rate = intersection / max(len(manifest_files_canonical), 1)
+    
+    status = "PASS"
+    if missing_file_name > total_nodes * 0.05:
+        status = "FAIL"
+    elif empty_file_name > total_nodes * 0.05:
+        status = "FAIL"
+    elif match_rate < 0.95:
+        status = "WARN"
+    
+    return (
+        CheckResult(
+            "Filename alignment (offline)",
+            status,
+            f"manifest={len(manifest_files_canonical)} chunks={len(chunk_files_canonical)} intersection={intersection}",
+            f"match_rate={match_rate:.1%} missing={missing_file_name} empty={empty_file_name}",
+        ),
+        {
+            "manifest_files": len(manifest_files_canonical),
+            "chunk_files": len(chunk_files_canonical),
+            "intersection": intersection,
+            "manifest_only": manifest_only[:20],
+            "chunk_only": chunk_only[:20],
+            "missing_file_name": missing_file_name,
+            "empty_file_name": empty_file_name,
+            "match_rate": match_rate,
+        },
+    )
+
+
+def check_machine_split_brain_offline(
+    storage_dir: Path,
+    manifest_path: Path,
+    role: str,
+    user_machines: List[str]
+) -> Tuple[CheckResult, Dict[str, Any]]:
+    """Check machine filtering using manifest instead of DB (offline mode)."""
+    try:
+        from backend.utils.filenames import canonicalize_filename
+    except ImportError:
+        def canonicalize_filename(name: str) -> str:
+            return normalize_filename(name)
+    
+    docstore_path = storage_dir / "docstore.json"
+    if not docstore_path.exists():
+        return (
+            CheckResult("Machine filtering (offline)", "FAIL", "docstore.json missing", ""),
+            {}
+        )
+    
+    # Load manifest
+    manifest = load_json(manifest_path)
+    manifest_entries = manifest.get("documents", [])
+    
+    # Compute allowed filenames from manifest (same logic as DB version)
+    allowed: Set[str] = set()
+    role = role.upper()
+    
+    for entry in manifest_entries:
+        canonical_file_name = entry.get("canonical_file_name")
+        if not canonical_file_name:
+            continue
+        
+        is_active = entry.get("is_active", True)
+        if not is_active:
+            continue
+        
+        machine_model_ids = entry.get("machine_model_ids", [])
+        machine_model_names = entry.get("machine_model_names", [])
+        
+        # For ADMIN/TECH, allow all active docs
+        if role in ("ADMIN", "TECHNICIAN"):
+            allowed.add(canonicalize_filename(canonical_file_name))
+            continue
+        
+        # For CUSTOMER: check machine model overlap
+        if not machine_model_ids and not machine_model_names:
+            continue  # No machine models = not visible to customers
+        
+        # Check for GENERAL/Any
+        if any(name.upper() in ("GENERAL", "ANY") for name in machine_model_names):
+            allowed.add(canonicalize_filename(canonical_file_name))
+            continue
+        
+        # Check overlap with user machines (by name, case-insensitive)
+        user_machines_lower = [m.lower().strip() for m in user_machines]
+        manifest_names_lower = [m.lower().strip() for m in machine_model_names]
+        
+        if any(m in manifest_names_lower for m in user_machines_lower):
+            allowed.add(canonicalize_filename(canonical_file_name))
+    
+    # Load docstore
+    docstore = load_json(docstore_path)
+    nodes = get_docstore_nodes(docstore)
+    
+    total = 0
+    in_allowed = 0
+    empty_filename_count = 0
+    
+    for _, node_data in nodes.items():
+        meta = get_node_metadata(node_data)
+        fn = str(meta.get("file_name", "") or "")
+        total += 1
+        
+        if not fn:
+            empty_filename_count += 1
+            if role in ("ADMIN", "TECHNICIAN"):
+                in_allowed += 1
+            continue
+        
+        canonical_fn = canonicalize_filename(fn)
+        if canonical_fn in allowed:
+            in_allowed += 1
+    
+    if role == "CUSTOMER" and len(allowed) == 0:
+        return (
+            CheckResult(
+                "Machine filtering (offline)",
+                "FAIL",
+                f"allowed_filenames=0 total_chunks={total}",
+                "CUSTOMER allowed_filenames is empty → everything will be filtered out"
+            ),
+            {"allowed_count": 0, "total_chunks": total},
+        )
+    
+    match_rate = in_allowed / max(total, 1)
+    status = "PASS"
+    notes = f"allowed_filenames={len(allowed)} chunks_in_allowed={in_allowed}/{total}"
+    
+    if len(allowed) > 0 and in_allowed == 0:
+        status = "FAIL"
+        notes += " (allowed filenames exist but match zero chunks → filename mismatch likely)"
+    elif role == "ADMIN" and match_rate < 0.95:
+        status = "FAIL"
+        notes += f" (ADMIN match_rate={match_rate:.1%} < 95% threshold)"
+    elif role == "CUSTOMER" and total > 0 and match_rate < 0.05:
+        status = "WARN"
+        notes += " (very low chunk match rate for CUSTOMER)"
+    
+    return (
+        CheckResult("Machine filtering (offline)", status, f"{in_allowed}/{total}", notes),
+        {"allowed_count": len(allowed), "chunks_in_allowed": in_allowed, "total_chunks": total, "match_rate": match_rate},
+    )
+
+
 def check_machine_split_brain(storage_dir: Path, role: str, user_machines: List[str]) -> Tuple[CheckResult, Dict[str, Any]]:
     """Check (3): Machine filtering split-brain (document-level vs chunk-level)."""
     docstore_path = storage_dir / "docstore.json"
@@ -1610,6 +1817,10 @@ Examples:
         default=5,
         help="Number of sample nodes to print from docstore."
     )
+    parser.add_argument(
+        "--offline-manifest",
+        help="Path to manifest.json for offline diagnostics (replaces DB checks). Use with --role to validate customer visibility."
+    )
     args = parser.parse_args()
     
     results: List[CheckResult] = []
@@ -1644,10 +1855,19 @@ Examples:
     results.append(r)
     details["index_files"] = d
     
-    # (2) filename alignment
-    r, d = check_filename_alignment(storage_dir, sample=args.sample)
-    results.append(r)
-    details["filename_alignment"] = d
+    # (2) filename alignment (offline or DB mode)
+    if args.offline_manifest:
+        manifest_path = Path(args.offline_manifest).resolve()
+        if not manifest_path.exists():
+            safe_print(f"\n❌ Manifest file not found: {manifest_path}")
+            return 1
+        r, d = check_filename_alignment_offline(storage_dir, manifest_path, sample=args.sample)
+        results.append(r)
+        details["filename_alignment"] = d
+    else:
+        r, d = check_filename_alignment(storage_dir, sample=args.sample)
+        results.append(r)
+        details["filename_alignment"] = d
     
     # Print filename mismatch details if any (enhanced diagnostics)
     if "missing_file_name_key" in d and d["missing_file_name_key"] > 0:
@@ -1694,10 +1914,16 @@ Examples:
     if "match_rate" in d:
         safe_print(f"\n Canonical match rate: {d['match_rate']:.1%}")
     
-    # (3) machine split-brain
-    r, d = check_machine_split_brain(storage_dir, role=args.role, user_machines=args.user_machine)
-    results.append(r)
-    details["machine_split_brain"] = d
+    # (3) machine split-brain (offline or DB mode)
+    if args.offline_manifest:
+        manifest_path = Path(args.offline_manifest).resolve()
+        r, d = check_machine_split_brain_offline(storage_dir, manifest_path, role=args.role, user_machines=args.user_machine)
+        results.append(r)
+        details["machine_split_brain"] = d
+    else:
+        r, d = check_machine_split_brain(storage_dir, role=args.role, user_machines=args.user_machine)
+        results.append(r)
+        details["machine_split_brain"] = d
     
     # Print sample docs if CUSTOMER has empty allowed_filenames
     if args.role == "CUSTOMER" and d.get("sample_docs"):

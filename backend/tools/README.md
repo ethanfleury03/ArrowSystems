@@ -2,15 +2,157 @@
 
 This directory contains diagnostic and utility scripts for validating and troubleshooting the RAG system.
 
+## Offline Ingestion Workflow
+
+For local development or containerized ingestion without Cloud SQL proxy, use the offline/manifest workflow:
+
+### 1. Sync Documents and Metadata from GCP
+
+```bash
+# Fetch metadata from admin endpoint and download docs
+python -m backend.tools.sync_docs_from_gcp \
+  --docs-bucket arrow-rag-support-prod-docs \
+  --docs-prefix ROOT \
+  --output-dir ./docs \
+  --metadata-source endpoint \
+  --endpoint-url https://support.arrsys.com \
+  --auth-token YOUR_JWT_TOKEN
+
+# Or use existing metadata file
+python -m backend.tools.sync_docs_from_gcp \
+  --docs-bucket arrow-rag-support-prod-docs \
+  --docs-prefix ROOT \
+  --output-dir ./docs \
+  --metadata-source file \
+  --metadata-file ./metadata.json
+```
+
+This will:
+- Download all documents from GCS to `./docs/`
+- Fetch metadata from admin endpoint (no DB access needed)
+- Create `./docs/manifest.json` with all required metadata
+- Prevent filename collisions using `{canonical_stem}__{document_id[:8]}{ext}` format
+
+### 2. Run Offline Ingestion
+
+```bash
+python backend/ingest.py \
+  --docs-dir ./docs \
+  --manifest ./docs/manifest.json \
+  --no-db \
+  --storage-dir ./latest_model
+```
+
+This will:
+- Load documents from local directory (no GCS access needed)
+- Use manifest metadata (no DB access needed)
+- Build index to `./latest_model/`
+- Ensure all nodes have `file_name` and `machine_model_ids`
+
+### 3. Run Offline Diagnostics
+
+```bash
+python -m backend.tools.diagnose_rag_contract \
+  --storage-dir ./latest_model \
+  --offline-manifest ./docs/manifest.json \
+  --role ADMIN
+
+# Or test customer visibility
+python -m backend.tools.diagnose_rag_contract \
+  --storage-dir ./latest_model \
+  --offline-manifest ./docs/manifest.json \
+  --role CUSTOMER \
+  --user-machine "EZCut 330"
+```
+
+### 4. Promote to GCS (Optional)
+
+```bash
+# Verify only (no upload)
+python -m backend.tools.promote_index_to_gcs \
+  --index-dir ./latest_model \
+  --verify-only
+
+# Promote to GCS (requires --promote flag)
+python -m backend.tools.promote_index_to_gcs \
+  --index-dir ./latest_model \
+  --promote \
+  --bucket arrow-rag-support-prod-rag \
+  --prefix latest_model/
+```
+
+This will:
+- Verify index integrity
+- Backup existing `latest_model/` to `old_model/<timestamp>/`
+- Upload new index to GCS
+- Verify upload succeeded
+
+## sync_docs_from_gcp.py
+
+Downloads documents from GCS and creates a manifest file for offline ingestion.
+
+### Usage
+
+```bash
+python -m backend.tools.sync_docs_from_gcp \
+  --docs-bucket BUCKET_NAME \
+  --docs-prefix PREFIX \
+  --output-dir ./docs \
+  --metadata-source endpoint \
+  --endpoint-url https://your-api.com \
+  --auth-token YOUR_TOKEN
+```
+
+### Options
+
+- `--docs-bucket`: GCS bucket name (required)
+- `--docs-prefix`: GCS prefix (default: ROOT)
+- `--output-dir`: Local directory to save documents (default: ./docs)
+- `--manifest`: Manifest output path (default: output_dir/manifest.json)
+- `--metadata-source`: `endpoint` or `file` (default: endpoint)
+- `--endpoint-url`: Base URL for admin endpoint (if metadata_source=endpoint)
+- `--auth-token`: Bearer token for endpoint (if metadata_source=endpoint)
+- `--metadata-file`: Path to metadata JSON (if metadata_source=file)
+- `--on-missing-metadata`: `fail`, `warn`, or `skip` (default: warn)
+- `--hash`: Compute SHA256 hashes (slower but more robust)
+
+## promote_index_to_gcs.py
+
+Safely promotes a local index to GCS with automatic backup.
+
+### Usage
+
+```bash
+python -m backend.tools.promote_index_to_gcs \
+  --index-dir ./latest_model \
+  --promote \
+  --bucket arrow-rag-support-prod-rag \
+  --prefix latest_model/
+```
+
+### Options
+
+- `--index-dir`: Local index directory (required)
+- `--bucket`: GCS bucket (default: RAG_INDEX_GCS_BUCKET env var)
+- `--prefix`: GCS prefix (default: RAG_INDEX_GCS_PREFIX env var)
+- `--old-prefix`: Backup prefix (default: GCS_RAG_OLD_PREFIX or old_model/)
+- `--verify-only`: Only verify, don't upload
+- `--promote`: REQUIRED flag to enable upload (safety check)
+
 ## diagnose_rag_contract.py
 
-Validates ingestion/query contract alignment across five critical checks:
+Validates ingestion/query contract alignment across multiple critical checks:
 
 1. **Index file naming and presence** - Verifies required index files exist
-2. **Filename normalization alignment** - Compares DB filenames vs chunk metadata filenames
+2. **Filename normalization alignment** - Compares DB/manifest filenames vs chunk metadata filenames
 3. **Machine filtering split-brain** - Checks document-level vs chunk-level machine filtering
 4. **Chunk machine_model_ids health** - Validates chunk metadata completeness
 5. **Storage directory resolution** - Ensures consistent path resolution
+6. **Docstore ↔ Vector join consistency** - Validates node_id alignment
+7. **Embedding dimensions** - Checks vector dimension consistency
+8. **Text presence** - Validates non-empty content
+9. **Metadata types** - Validates required metadata types
+10. **Customer visibility** - Simulates customer filtering
 
 ### Usage
 
@@ -40,6 +182,25 @@ The script will:
 1. Download the index from your GCS bucket (`settings.RAG_INDEX_GCS_BUCKET` / `settings.RAG_INDEX_GCS_PREFIX`)
 2. Save it to the configured local directory (or a temporary directory)
 3. Run all diagnostic checks on the downloaded production index
+
+#### Offline Mode (Manifest-Based)
+
+**Use with offline ingestion workflow (no DB access needed):**
+
+```bash
+# Offline diagnostics with manifest
+python -m backend.tools.diagnose_rag_contract \
+  --storage-dir ./latest_model \
+  --offline-manifest ./docs/manifest.json \
+  --role ADMIN
+
+# Offline customer visibility check
+python -m backend.tools.diagnose_rag_contract \
+  --storage-dir ./latest_model \
+  --offline-manifest ./docs/manifest.json \
+  --role CUSTOMER \
+  --user-machine "EZCut 330"
+```
 
 #### Local Index Check (Legacy - Use GCS Instead)
 
