@@ -1,32 +1,18 @@
 import { ChatInterface } from "@/components/chat-interface"
-import { cookies } from 'next/headers'
-import { redirect } from 'next/navigation'
-import { getAuthCookieName } from '@/lib/auth-config'
 
 /**
  * Root page - requires authentication
  * 
  * Auth behavior:
- * - If not authenticated: redirect to /login
- * - If authenticated: show ChatInterface
+ * - Middleware protects this route (checks cookie presence)
+ * - ChatInterface component handles client-side auth gating (tri-state: loading/guest/authed)
+ * - No server-side cookie check needed - middleware already handles it
  * 
- * This ensures users are not silently auto-logged in from previous sessions.
- * The middleware also protects this route, but this provides an additional check.
+ * This keeps page transitions fast by avoiding blocking server-side cookie reads.
  */
-export default async function Home() {
-  // Check for auth token cookie using configured name
-  const cookieStore = await cookies()
-  const cookieName = getAuthCookieName()
-  const token = cookieStore.get(cookieName)
-  
-  // If no token or empty value, redirect to login immediately (server-side, no UI flash)
-  if (!token || !token.value || token.value.trim() === '') {
-    redirect('/login')
-  }
-  
-  // Token exists - middleware will validate it
-  // If invalid, middleware will redirect to login
-  // If valid, show chat interface
+export default function Home() {
+  // Middleware already protects this route and checks for cookie
+  // ChatInterface component handles client-side auth state and redirects if needed
   return (
     <main className="flex min-h-screen flex-col">
       <ChatInterface />
