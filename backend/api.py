@@ -152,7 +152,7 @@ def get_rag_disabled_response(path: str = "/query") -> JSONResponse:
 
 async def run_blocking_rag_operation(func, *args, **kwargs):
     """
-    Wrapper to run blocking RAG operations in a thread pool.
+    Wrapper to run blocking RAG operations in a thread pool with timeout.
     
     This allows blocking synchronous RAG operations (like embedding inference,
     vector search, LLM API calls) to run without blocking the async event loop,
@@ -165,11 +165,29 @@ async def run_blocking_rag_operation(func, *args, **kwargs):
     
     Returns:
         The result of the blocking function call
+    
+    Raises:
+        asyncio.TimeoutError: If the operation exceeds the timeout
     """
+    # Get timeout from environment variable (default: 300 seconds = 5 minutes)
+    timeout_seconds = float(os.getenv("RAG_QUERY_TIMEOUT_SEC", "300"))
+    
     try:
         # Use asyncio.to_thread() (Python 3.9+) to run blocking code in thread pool
-        result = await asyncio.to_thread(func, *args, **kwargs)
+        # Wrap with timeout to prevent indefinite hangs
+        result = await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs),
+            timeout=timeout_seconds
+        )
         return result
+    except asyncio.TimeoutError:
+        error_msg = f"RAG query operation timed out after {timeout_seconds} seconds"
+        logger.error(
+            "blocking_rag_operation_timeout",
+            timeout_seconds=timeout_seconds,
+            message=error_msg
+        )
+        raise RuntimeError(error_msg)
     except Exception as e:
         logger.error("blocking_rag_operation_error", error=str(e), exc_info=True)
         raise
