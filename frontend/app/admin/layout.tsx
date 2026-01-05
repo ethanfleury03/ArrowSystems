@@ -33,12 +33,26 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
   const pathname = usePathname();
   const { toast } = useToast();
 
-  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+  // Cache admin check in sessionStorage to avoid re-checking on every navigation
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(() => {
+    // Try to get cached admin status from sessionStorage
+    if (typeof window !== 'undefined') {
+      const cached = sessionStorage.getItem('admin_check');
+      if (cached === 'true') return true;
+      if (cached === 'false') return false;
+    }
+    return null;
+  });
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [userProfile, setUserProfile] = useState<{ email?: string | null; name?: string | null; role?: string | null } | null>(null);
 
-  // Validate token and ensure admin access
+  // Validate token and ensure admin access (only once per session)
   useEffect(() => {
+    // If already checked and cached, skip the check
+    if (isAdmin !== null && typeof window !== 'undefined' && sessionStorage.getItem('admin_check')) {
+      return;
+    }
+
     let isMounted = true;
 
     const checkAdminAccess = async () => {
@@ -50,6 +64,9 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
 
         // Verify user has ADMIN role
         if (user.role !== "ADMIN") {
+          if (typeof window !== 'undefined') {
+            sessionStorage.setItem('admin_check', 'false');
+          }
           toast({
             title: "Access denied",
             description: "Administrator permissions are required.",
@@ -60,7 +77,10 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
           return;
         }
 
-        // User is admin, set state
+        // User is admin, set state and cache
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('admin_check', 'true');
+        }
         setIsAdmin(true);
         setUserProfile({
           email: user.email,
@@ -70,6 +90,9 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
       } catch (error) {
         if (!isMounted) return;
 
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('admin_check', 'false');
+        }
         console.error("Admin access check failed:", error);
         toast({
           title: "Access denied",
@@ -86,7 +109,7 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
     return () => {
       isMounted = false;
     };
-  }, [router, toast]);
+  }, [router, toast, isAdmin]);
 
   const displayName = useMemo(() => {
     if (userProfile?.name && userProfile.name.trim().length > 0) {

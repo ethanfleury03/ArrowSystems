@@ -201,7 +201,7 @@ export function ChatInterface() {
     return () => {
       stopRagPolling()
     }
-  }, [messages.length, startRagPolling]) // Re-check when messages change (e.g., when loading a conversation)
+  }, [startRagPolling]) // Only run once on mount - user info doesn't change during session
 
   const handleLogout = async () => {
     try {
