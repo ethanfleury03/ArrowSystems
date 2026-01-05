@@ -48,7 +48,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field, ValidationError
 import uvicorn
-import jwt
+import jwt  # PyJWT package (installed as PyJWT but imported as jwt)
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
