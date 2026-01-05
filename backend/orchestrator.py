@@ -3664,11 +3664,19 @@ class RAGOrchestrator:
         # Re-ranker model
         try:
             logger.info("Loading re-ranker model...")
-            self.reranker = CrossEncoder(
-                "BAAI/bge-reranker-large",
-                cache_folder=self.cache_dir,
-                device=device
-            )
+            try:
+                # Try with cache_folder first (older sentence-transformers)
+                self.reranker = CrossEncoder(
+                    "BAAI/bge-reranker-large",
+                    cache_folder=self.cache_dir,
+                    device=device
+                )
+            except TypeError:
+                # Fallback for newer sentence-transformers that don't support cache_folder
+                self.reranker = CrossEncoder(
+                    "BAAI/bge-reranker-large",
+                    device=device
+                )
             logger.info("reranker_loaded", device=device)
         except Exception as e:
             logger.warning(f"Re-ranker not available: {e}")
@@ -3882,37 +3890,50 @@ class RAGOrchestrator:
                             continue
                         
                         # Try to parse JSON to detect corruption early
-                        # Use a reasonable chunk size to avoid loading huge files entirely into memory
-                        # For very large files, we'll validate the structure by attempting to parse
+                        # For very large files (>100MB), skip full parsing to avoid memory issues and hangs
+                        # LlamaIndex's loader will handle validation during actual load
                         logger.debug("orchestrator_validating_json_file",
                                    file=req_file,
                                    size_bytes=file_size,
                                    message=f"Validating JSON structure of {req_file}")
                         
-                        # Try to parse JSON - for large files this may take time but will catch corruption early
-                        # This is better than letting load_index_from_storage hang for 60+ seconds
-                        logger.info("orchestrator_validating_json_parse",
-                                   file=req_file,
-                                   size_mb=round(file_size / (1024 * 1024), 2),
-                                   message=f"Attempting to parse {req_file} ({round(file_size / (1024 * 1024), 2)} MB) to validate JSON structure")
-                        
-                        # Attempt to parse the JSON file
-                        # For very large files, this may take some time, but it's better than
-                        # letting load_index_from_storage hang indefinitely
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            try:
-                                # Try to parse - this will raise JSONDecodeError if corrupted
-                                json.load(f)
-                                logger.debug("orchestrator_json_validation_success",
-                                           file=req_file,
-                                           message=f"Successfully validated JSON structure of {req_file}")
-                            except json.JSONDecodeError as parse_err:
-                                # Re-raise with more context
-                                raise json.JSONDecodeError(
-                                    f"Invalid JSON in {req_file}",
-                                    parse_err.doc,
-                                    parse_err.pos
-                                )
+                        # Skip full JSON parsing for very large files to prevent memory issues and hangs
+                        LARGE_FILE_THRESHOLD = 100 * 1024 * 1024  # 100 MB
+                        if file_size > LARGE_FILE_THRESHOLD:
+                            logger.info("orchestrator_skipping_large_file_validation",
+                                       file=req_file,
+                                       size_mb=round(file_size / (1024 * 1024), 2),
+                                       message=f"Skipping full JSON parse for large file {req_file} ({round(file_size / (1024 * 1024), 2)} MB) - will validate during index load")
+                            # Just verify file is readable and not empty (already checked above)
+                            # LlamaIndex's load_index_from_storage will handle actual validation
+                            with open(file_path, 'rb') as f:
+                                f.read(1)  # Try to read first byte to verify file is accessible
+                            logger.debug("orchestrator_large_file_readable",
+                                       file=req_file,
+                                       message=f"Large file {req_file} is readable, skipping full parse")
+                        else:
+                            # For smaller files, do full validation to catch corruption early
+                            logger.info("orchestrator_validating_json_parse",
+                                       file=req_file,
+                                       size_mb=round(file_size / (1024 * 1024), 2),
+                                       message=f"Attempting to parse {req_file} ({round(file_size / (1024 * 1024), 2)} MB) to validate JSON structure")
+                            
+                            # Attempt to parse the JSON file
+                            # For smaller files, this catches corruption early
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                try:
+                                    # Try to parse - this will raise JSONDecodeError if corrupted
+                                    json.load(f)
+                                    logger.debug("orchestrator_json_validation_success",
+                                               file=req_file,
+                                               message=f"Successfully validated JSON structure of {req_file}")
+                                except json.JSONDecodeError as parse_err:
+                                    # Re-raise with more context
+                                    raise json.JSONDecodeError(
+                                        f"Invalid JSON in {req_file}",
+                                        parse_err.doc,
+                                        parse_err.pos
+                                    )
                                 
                     except json.JSONDecodeError as json_err:
                         corrupted_files.append(

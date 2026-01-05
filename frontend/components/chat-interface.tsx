@@ -50,7 +50,9 @@ export function ChatInterface() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [machineConfirmation, setMachineConfirmation] = useState(false)
   const [selectedMachine, setSelectedMachine] = useState<string | null>(null)
-  const [userInfo, setUserInfo] = useState<UserInfo | null>(null)
+  // Tri-state auth: null = loading, false = guest (not authenticated), UserInfo = authenticated
+  const [userInfo, setUserInfo] = useState<UserInfo | null | false>(null) // null = loading
+  const [authLoading, setAuthLoading] = useState(true) // Track auth check completion
   const [ragEnabled, setRagEnabled] = useState<boolean | null>(null) // null = checking, true/false = known
   const [ragStatus, setRagStatus] = useState<'initializing' | 'ready' | 'error'>('initializing')
   const [ragLastError, setRagLastError] = useState<string | null>(null)
@@ -138,11 +140,14 @@ export function ChatInterface() {
   }
 
   // Fetch user info and RAG status, show onboarding message on mount
+  // CRITICAL: This implements tri-state auth gating to prevent shell from rendering for guests
   useEffect(() => {
     const fetchUserAndShowOnboarding = async () => {
+      setAuthLoading(true)
       try {
         const user = await getCurrentUser()
-        setUserInfo(user)
+        setUserInfo(user) // UserInfo = authenticated
+        setAuthLoading(false)
         
         // Start RAG status polling (non-blocking, happens in background)
         startRagPolling()
@@ -176,8 +181,12 @@ export function ChatInterface() {
         }
       } catch (error) {
         console.error("Failed to fetch user info:", error)
-        // User is not authenticated, redirect to login
-        window.location.href = "/login"
+        setUserInfo(false) // false = guest (not authenticated)
+        setAuthLoading(false)
+        // Redirect to login immediately (hard redirect clears any stale state)
+        if (typeof window !== 'undefined') {
+          window.location.href = "/login"
+        }
       }
     }
     
@@ -555,6 +564,32 @@ export function ChatInterface() {
     textareaRef.current?.focus()
   }
 
+  // TRI-STATE AUTH GATING: Prevent shell from rendering for guests
+  // - loading (null): Show only loader, no sidebar, no shell
+  // - guest (false): Redirect to login, render nothing
+  // - authed (UserInfo): Render normal shell
+  
+  // Don't render app shell until auth is confirmed
+  if (authLoading || userInfo === null) {
+    // Loading state - show only loader, no shell
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="text-center">
+          <div className="mb-4 text-muted-foreground">Loading...</div>
+        </div>
+      </div>
+    )
+  }
+  
+  // Guest state - should not reach here (redirect happens in useEffect), but safety check
+  if (userInfo === false) {
+    return null // Redirect is handled in useEffect
+  }
+  
+  // Authenticated state - userInfo is guaranteed to be UserInfo (not null/false)
+  // TypeScript doesn't narrow this automatically, so we assert
+  const authenticatedUserInfo = userInfo as UserInfo
+
   return (
     <div className="flex h-screen">
       <ErrorBoundary>
@@ -566,7 +601,7 @@ export function ChatInterface() {
         onLoadConversation={handleLoadConversation}
         selectedMachine={selectedMachine}
         onMachineChange={setSelectedMachine}
-        userInfo={userInfo}
+        userInfo={authenticatedUserInfo}
       />
       </ErrorBoundary>
 
@@ -602,9 +637,9 @@ export function ChatInterface() {
                   Assistant unavailable
                 </span>
               )}
-              {userInfo && (
+              {authenticatedUserInfo && (
                 <span className="text-sm text-muted-foreground hidden sm:inline">
-                  {userInfo.email}
+                  {authenticatedUserInfo.email}
                 </span>
               )}
               <Button variant="ghost" size="icon" onClick={handleLogout} title="Logout">
@@ -676,7 +711,7 @@ export function ChatInterface() {
                 <div className="mx-auto max-w-4xl px-4 py-8">
                   <div className="space-y-6">
                     {messages.map((message) => (
-                      <ChatMessage key={message.id} message={message} />
+                      <ChatMessage key={message.id} message={message} userRole={authenticatedUserInfo?.role} />
                     ))}
                     {isLoading && (
                       <div className="flex items-start gap-4">

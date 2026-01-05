@@ -407,19 +407,13 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
 
   const handleDocumentClick = async (document: Document) => {
     try {
-      // Get backend URL and auth token
+      // Get backend URL
       const { resolveApiBaseUrl } = await import('@/config/api')
       const backendUrl = resolveApiBaseUrl()
-      const authToken = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null
       
-      // Fetch document with authentication
-      const headers: Record<string, string> = {}
-      if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`
-      }
-      
+      // Fetch document with cookie-based authentication (cookies sent via credentials)
       const response = await fetch(`${backendUrl}/documents/${encodeURIComponent(document.filename)}`, {
-        headers,
+        credentials: 'include', // Sends cookies automatically
       })
       
       if (!response.ok) {
@@ -543,13 +537,17 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
   }
 
   const displayName = useMemo(() => {
-    if (userProfile?.name && userProfile.name.trim().length > 0) {
+    // CRITICAL: Never show "User" fallback - if we don't have real user data, don't render
+    if (!userProfile) {
+      return null // Return null instead of "User"
+    }
+    if (userProfile.name && userProfile.name.trim().length > 0) {
       return userProfile.name
     }
-    if (userProfile?.email && userProfile.email.includes("@")) {
+    if (userProfile.email && userProfile.email.includes("@")) {
       return userProfile.email.split("@")[0]
     }
-    return "User"
+    return null // No fallback to "User"
   }, [userProfile])
 
   const displayEmail = useMemo(() => {
@@ -581,20 +579,24 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
             </Button>
           </div>
 
-          <div className="border-b border-border p-4">
-            <div className="flex items-center gap-3 rounded-lg bg-muted/50 p-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10">
-                <User className="h-5 w-5 text-primary" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{displayName}</p>
-                {displayEmail && (
-                  <p className="text-xs text-muted-foreground truncate">
-                    {displayEmail}
-                  </p>
-                )}
+          {/* User Profile Section - Only render if we have valid user data */}
+          {displayName && (
+            <div className="border-b border-border p-4">
+              <div className="flex items-center gap-3 rounded-lg bg-muted/50 p-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10">
+                  <User className="h-5 w-5 text-primary" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{displayName}</p>
+                  {displayEmail && (
+                    <p className="text-xs text-muted-foreground truncate">
+                      {displayEmail}
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
+          )}
             <Button
               variant={isRouteActive("/") ? "secondary" : "ghost"}
               size="sm"
