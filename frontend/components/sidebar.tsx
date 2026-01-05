@@ -597,6 +597,9 @@ export function Sidebar({ isOpen, onToggle, onNewConversationReady, onSettingsCh
               </div>
             </div>
           )}
+
+          {/* Navigation Buttons */}
+          <div className="border-b border-border p-4">
             <Button
               variant={isRouteActive("/") ? "secondary" : "ghost"}
               size="sm"
