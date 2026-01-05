@@ -1438,10 +1438,13 @@ jobs:
       - name: Verify Backend traffic is 100% to single revision
         run: |
           echo "🔍 Verifying backend traffic allocation..."
-          TRAFFIC=$(gcloud run services describe arrow-rag-backend \
+          SERVICE_JSON=$(gcloud run services describe arrow-rag-backend \
             --region=us-central1 \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --format='json(status.traffic)' 2>/dev/null || echo "[]")
+            --format='json' 2>/dev/null || echo "{}")
+          
+          # Extract traffic array from the full service JSON
+          TRAFFIC=$(echo "$SERVICE_JSON" | jq '.status.traffic // []')
           
           # Get the most recent revision name for comparison
           LATEST_REVISION=$(gcloud run revisions list \
@@ -1474,7 +1477,7 @@ jobs:
           
           # Verify the single entry is either latestRevision=true OR matches the most recent revision
           TRAFFIC_ENTRY=$(echo "$TRAFFIC" | jq '.[0]')
-          IS_LATEST=$(echo "$TRAFFIC_ENTRY" | jq -r '.latest // false')
+          IS_LATEST=$(echo "$TRAFFIC_ENTRY" | jq -r '.latestRevision // false')
           REVISION_NAME=$(echo "$TRAFFIC_ENTRY" | jq -r '.revisionName // ""')
           
           if [ "$IS_LATEST" = "true" ]; then
