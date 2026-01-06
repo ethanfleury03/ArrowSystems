@@ -56,13 +56,16 @@ echo ""
 echo "=========================================="
 echo "Step 3: Set resource limits, scaling, and concurrency"
 echo "=========================================="
-# Backend resource configuration: 2 vCPU + 8 GiB RAM for BGE-large embedding model + 350MB dense vector index
-# Using 1 Gunicorn worker to fit within 8 GiB memory (each worker loads full index ~2GB + model ~500MB)
+# Backend resource configuration: 2 vCPU + 4 GiB RAM for BGE-large embedding model + 191MB vector index
+# Index reduced from ~1650MB to 191MB after image removal (~88% reduction)
+# Base footprint: ~700MB (191MB index + ~500MB models). 4Gi provides ~5.7x headroom for queries.
+# Using 1 Gunicorn worker to fit within 4 GiB memory
+# Memory sizing based on measured peak RSS from instrumentation.
 # Increased timeout to 600s to allow time for index loading during startup
 gcloud run services update $SERVICE \
   --execution-environment=gen2 \
   --cpu=2 \
-  --memory=8Gi \
+  --memory=4Gi \
   --min-instances=1 \
   --max-instances=10 \
   --cpu-throttling \
