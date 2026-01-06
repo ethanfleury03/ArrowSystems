@@ -25,20 +25,20 @@ def test_extract_images_method():
         result = extractor.extract_images_from_pdf("dummy.pdf")
         
         if result == []:
-            print("✅ PASS: Method returns empty list")
+            print("[PASS] Method returns empty list")
         else:
-            print(f"❌ FAIL: Method returned {result} (expected empty list)")
+            print(f"[FAIL] Method returned {result} (expected empty list)")
             return False
             
         if len(result) == 0:
-            print("✅ PASS: Length is 0")
+            print("[PASS] Length is 0")
         else:
-            print(f"❌ FAIL: Length is {len(result)} (expected 0)")
+            print(f"[FAIL] Length is {len(result)} (expected 0)")
             return False
             
         return True
     except Exception as e:
-        print(f"❌ FAIL: Error testing method: {e}")
+        print(f"[FAIL] Error testing method: {e}")
         import traceback
         traceback.print_exc()
         return False
