@@ -21,6 +21,7 @@ from backend.rag.index_state import (
     set_phase, reset_state, init_file_tracking,
     update_file_start, update_file_success, update_file_error
 )
+from backend.utils.resource_monitor import log_resource_checkpoint
 
 logger = get_logger(__name__)
 
@@ -149,6 +150,9 @@ def download_index_from_gcs() -> bool:
     
     # Resolve local dir (avoid double-prefix)
     local_path = _resolve_local_dir(requested_local_dir, index_prefix)
+    # Use atomic temp directory for download, then rename to final location
+    tmp_parent = local_path.parent
+    tmp_dir = tmp_parent / f"{local_path.name}.tmp.{os.getpid()}"
     
     # Log resolved paths for debugging
     logger.info(
@@ -188,7 +192,79 @@ def download_index_from_gcs() -> bool:
         set_phase("error", error=error_msg)
         return False
 
-    # Track download results
+    # File lock to ensure only one worker downloads at a time (multi-worker gunicorn)
+    lock_path = Path("/tmp/rag_index_download.lock")
+    lock_file = None
+    try:
+        try:
+            # Best-effort file lock using fcntl (Linux/Cloud Run)
+            import fcntl  # type: ignore
+            lock_file = open(lock_path, "w+")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            logger.info("[RAG] Acquired download file lock", lock=str(lock_path))
+        except Exception:
+            # Fallback: create lock file exclusively; if cannot acquire, wait/poll
+            acquired = False
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(fd)
+                acquired = True
+                logger.info("[RAG] Created lock file (no fcntl)", lock=str(lock_path))
+            except Exception:
+                logger.warning("[RAG] Could not acquire lock file; entering wait loop", lock=str(lock_path))
+            if not acquired:
+                # Wait until either lock disappears or final dir becomes valid
+                WAIT_TOTAL = int(os.getenv("RAG_DOWNLOAD_LOCK_WAIT_SEC", "600"))
+                WAIT_STEP = int(os.getenv("RAG_DOWNLOAD_LOCK_WAIT_STEP_SEC", "2"))
+                waited = 0
+                while waited < WAIT_TOTAL:
+                    # Check if final dir is valid
+                    try:
+                        final_valid = True
+                        for f in REQUIRED_FILES:
+                            p = local_path / f
+                            if not p.exists() or p.stat().st_size <= 1024:
+                                final_valid = False
+                                break
+                        if final_valid:
+                            logger.info("[RAG] Detected valid index during lock wait; skipping download", final_dir=str(local_path))
+                            set_phase("downloaded", local_dir=str(local_path))
+                            return True
+                    except Exception:
+                        pass
+                    # If lock file disappeared, break and attempt normal path
+                    if not lock_path.exists():
+                        break
+                    time.sleep(WAIT_STEP)
+                    waited += WAIT_STEP
+                # Try to create the lock again after waiting
+                try:
+                    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                    os.close(fd)
+                    logger.info("[RAG] Lock file acquired after waiting", lock=str(lock_path))
+                except Exception:
+                    # As a last resort, if final dir is still invalid and cannot acquire lock, fail fast
+                    logger.error("[RAG] Failed to acquire download lock and final dir invalid; aborting download to avoid races", lock=str(lock_path))
+                    _last_download_error = "Unable to acquire download lock; another worker may be initializing"
+                    set_phase("error", error=_last_download_error)
+                    return False
+        # Ensure tmp dir is clean
+        try:
+            if tmp_dir.exists():
+                for p in tmp_dir.glob("*"):
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.error("[RAG] Failed to prepare temp dir for atomic download", tmp_dir=str(tmp_dir), error=str(e))
+            _last_download_error = f"Temp dir prepare failed: {type(e).__name__}: {e}"
+            set_phase("error", error=_last_download_error)
+            return False
+
+        log_resource_checkpoint("rag_gcs_download_start")
+        # Track download results
     required_success: list[str] = []
     required_failures: list[str] = []
     optional_results: dict[str, str] = {}
@@ -224,7 +300,8 @@ def download_index_from_gcs() -> bool:
 
     def _download_one(prefix: str, filename: str) -> bool:
         gcs_obj = f"{prefix}{filename}" if prefix else filename
-        local_file_path = local_path / filename
+        # Always download into temp dir first (atomic)
+        local_file_path = tmp_dir / filename
         t0 = time.time()
         
         try:
@@ -410,21 +487,21 @@ def download_index_from_gcs() -> bool:
         set_phase("error", error=error_msg)
         return False
 
-    # Verify all required files are present locally
-    missing_locally = [f for f in REQUIRED_FILES if not (local_path / f).exists()]
+    # Verify all required files are present in temp dir
+    missing_locally = [f for f in REQUIRED_FILES if not (tmp_dir / f).exists()]
     if missing_locally:
         try:
-            local_listing = sorted([p.name for p in local_path.iterdir() if p.is_file()])
+            local_listing = sorted([p.name for p in tmp_dir.iterdir() if p.is_file()])
         except Exception:
             local_listing = []
         error_msg = (
             f"Validation failed: required files missing locally after download: {missing_locally}. "
-            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} local_dir={str(local_path)}"
+            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} local_dir={str(tmp_dir)}"
         )
         logger.error(
             "[RAG] Validation failed — files missing after download",
             missing_files=missing_locally,
-            local_dir=str(local_path),
+            local_dir=str(tmp_dir),
             local_files=local_listing,
             bucket=bucket_name,
             prefix=index_prefix,
@@ -435,8 +512,66 @@ def download_index_from_gcs() -> bool:
         set_phase("error", error=error_msg)
         return False
 
-    # Download complete - mark as ready
-    set_phase("ready")
+    # If final dir already exists and is valid, prefer it and discard temp
+    try:
+        final_valid = True
+        for f in REQUIRED_FILES:
+            p = local_path / f
+            if not p.exists() or p.stat().st_size <= 1024:
+                final_valid = False
+                break
+        if final_valid:
+            logger.info("[RAG] Final dir already valid; skipping atomic move", final_dir=str(local_path))
+            # Cleanup tmp
+            try:
+                if tmp_dir.exists():
+                    for p in tmp_dir.glob("*"):
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+                    tmp_dir.rmdir()
+            except Exception:
+                pass
+            set_phase("downloaded", local_dir=str(local_path))
+            return True
+    except Exception:
+        pass
+
+    # Atomically move temp files into final location, file-by-file (avoid clobbering valid dir)
+    try:
+        # Ensure parent and final dir exist
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.mkdir(parents=True, exist_ok=True)
+        # Move files from tmp to final
+        moved = 0
+        for p in tmp_dir.glob("*"):
+            target = local_path / p.name
+            try:
+                p.replace(target)
+                moved += 1
+            except Exception as e:
+                logger.error("[RAG] Failed moving file to final dir", src=str(p), dst=str(target), error=str(e))
+                _last_download_error = f"Atomic move failed: {type(e).__name__}: {e}"
+                set_phase("error", error=_last_download_error)
+                return False
+        logger.info("[RAG] Atomic move complete", files_moved=moved, final_dir=str(local_path))
+    finally:
+        # Best-effort cleanup of temp dir
+        try:
+            if tmp_dir.exists():
+                for p in tmp_dir.glob("*"):
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+                tmp_dir.rmdir()
+        except Exception:
+            pass
+
+    # Download complete - mark as downloaded (files exist and validated)
+    set_phase("downloaded", local_dir=str(local_path))
+    log_resource_checkpoint("rag_gcs_download_complete")
     
     logger.info(
         "[RAG] Index download and validation complete",
@@ -449,4 +584,25 @@ def download_index_from_gcs() -> bool:
     )
     print(f"[RAG] ✅ Index download and validation complete - downloaded {len(required_success)} required files", flush=True)
     return True
+    finally:
+        # Release lock
+        try:
+            if lock_file:
+                try:
+                    import fcntl  # type: ignore
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                try:
+                    lock_file.close()
+                except Exception:
+                    pass
+            # Remove lock file if we created it
+            try:
+                if lock_path.exists():
+                    lock_path.unlink()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
