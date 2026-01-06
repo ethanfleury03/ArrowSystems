@@ -72,6 +72,34 @@ def elapsed_s() -> float:
     return time.time() - _START_TIME
 
 
+def get_memory_mb() -> Optional[float]:
+    """
+    Backward-compatible alias for get_rss_mb().
+    
+    Returns:
+        RSS memory in MB, or None if unavailable
+    """
+    try:
+        return get_rss_mb()
+    except Exception:
+        # Never raise - gracefully degrade
+        return None
+
+
+def get_elapsed_seconds() -> float:
+    """
+    Backward-compatible alias for elapsed_s().
+    
+    Returns:
+        Elapsed time in seconds since module was imported
+    """
+    try:
+        return elapsed_s()
+    except Exception:
+        # Never raise - return 0 as safe default
+        return 0.0
+
+
 def log_resource_checkpoint(name: str, logger: Optional[logging.Logger] = None) -> None:
     """
     Log memory and timing at a checkpoint.
