@@ -1463,6 +1463,9 @@ class NonTextExtractor:
         # HARD REMOVE: Images are permanently disabled - always return empty immediately
         # No image extraction code exists - this saves significant processing time
         # All image extraction logic has been completely removed
+        # CRITICAL: If you see "Extracted X images" logs, the server file is outdated!
+        # This method MUST return empty list - any other behavior is a bug
+        logger.warning(f"⚠️ extract_images_from_pdf() called for {Path(pdf_path).name} - returning empty (images permanently disabled)")
         return []
     
     def extract_figure_captions(self, pdf_path: str) -> List[Dict[str, Any]]:
@@ -2571,6 +2574,13 @@ class TechnicalRAGPipeline:
                 
                 # HARD REMOVE: Images are permanently disabled - no extraction occurs
                 # This saves significant processing time
+                # CRITICAL: If you see "Extracted X images" logs, the server file is outdated!
+                # The extract_images_from_pdf() method MUST return empty list - verify server file is synced
+                images_result = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
+                if len(images_result) > 0:
+                    raise RuntimeError(f"CRITICAL BUG: extract_images_from_pdf() returned {len(images_result)} images but should return 0! Server file is outdated - sync the latest code!")
+                # Verify it's empty (defense-in-depth)
+                assert len(images_result) == 0, "extract_images_from_pdf() must return empty list"
                 
             except Exception as e:
                 logger.error(f"Failed to process {pdf_path.name}: {e}")
