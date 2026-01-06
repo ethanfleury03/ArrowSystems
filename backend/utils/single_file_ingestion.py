@@ -375,12 +375,20 @@ def ingest_single_file(
         doc_id = file_path.name
         
         # Update metadata with ingestion date and ensure machine_model is set
-        from ..utils.document_metadata import ensure_metadata_entry
-        meta_entry = ensure_metadata_entry(file_path.name)
-        
-        # Log if review is needed
-        if meta_entry.get("requires_admin_review"):
-            logger.warning("ingestion_requires_review", filename=file_path.name, reason="missing machine_model")
+        # Skip if INGEST_NO_DB is set (for smoke tests)
+        if not os.getenv("INGEST_NO_DB"):
+            try:
+                from ..utils.document_metadata import ensure_metadata_entry
+                meta_entry = ensure_metadata_entry(file_path.name)
+                
+                # Log if review is needed
+                if meta_entry.get("requires_admin_review"):
+                    logger.warning("ingestion_requires_review", filename=file_path.name, reason="missing machine_model")
+            except ImportError:
+                # Database module not available - skip metadata update
+                logger.debug("Skipping metadata update (database module not available)")
+        else:
+            logger.debug("Skipping metadata update (INGEST_NO_DB=true)")
         
         # Log ingestion complete
         total_time_ms = (time.time() - start_time) * 1000
