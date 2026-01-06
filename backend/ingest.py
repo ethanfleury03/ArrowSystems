@@ -2400,11 +2400,26 @@ class TechnicalRAGPipeline:
                 merged = {**default_config, **config}
                 if "non_text" in config and "non_text" in default_config:
                     merged["non_text"] = {**default_config["non_text"], **config.get("non_text", {})}
+                
+                # Log what was actually loaded for debugging
+                non_text_loaded = merged.get("non_text", {})
+                logger.info(f"📋 Config loaded from {config_path}: extract_images={non_text_loaded.get('extract_images')}, extract_tables={non_text_loaded.get('extract_tables')}, extract_captions={non_text_loaded.get('extract_captions')}")
+                
                 return merged
             except Exception as e:
                 logger.warning(f"Failed to load config: {e}, using defaults")
         else:
             logger.warning(f"Config file not found at {config_path}, using defaults")
+            # Try to find it in common locations
+            possible_paths = [
+                str(REPO_ROOT / "config.yaml"),
+                "config.yaml",
+                "../config.yaml"
+            ]
+            for alt_path in possible_paths:
+                if os.path.exists(alt_path):
+                    logger.info(f"Found config at alternative path: {alt_path}")
+                    return self._load_config(alt_path)
         
         return default_config
         
@@ -2581,15 +2596,21 @@ class TechnicalRAGPipeline:
         all_captions = []
         
         # Check config for image extraction (single source of truth)
+        # Handle both boolean and string values from YAML
         non_text_config = self.config.get("non_text", {})
-        extract_images_enabled = bool(non_text_config.get("extract_images", False))
+        extract_images_raw = non_text_config.get("extract_images", False)
+        
+        # Convert string "false"/"true" to boolean (YAML sometimes loads as string)
+        if isinstance(extract_images_raw, str):
+            extract_images_enabled = extract_images_raw.lower() in ("true", "1", "yes", "on")
+        else:
+            extract_images_enabled = bool(extract_images_raw)
         
         # Log image extraction status for debugging (show actual config value)
-        config_value = non_text_config.get("extract_images", "not set")
         if extract_images_enabled:
-            logger.warning(f"⚠️ Image extraction is ENABLED (config value: {config_value}) - this will slow down ingestion. Set non_text.extract_images: false in config.yaml to disable.")
+            logger.warning(f"⚠️ Image extraction is ENABLED (config value: {extract_images_raw}, type: {type(extract_images_raw).__name__}) - this will slow down ingestion. Set non_text.extract_images: false in config.yaml to disable.")
         else:
-            logger.info(f"✅ Image extraction is DISABLED (config value: {config_value}) - skipping image extraction for faster ingestion")
+            logger.info(f"✅ Image extraction is DISABLED (config value: {extract_images_raw}, type: {type(extract_images_raw).__name__}) - skipping image extraction for faster ingestion")
         
         # Find all PDF files (recursive; GCS staging uses nested directories like documents/<metadata_id>/<file>.pdf)
         pdf_files = list(Path(data_dir).rglob("*.pdf"))
