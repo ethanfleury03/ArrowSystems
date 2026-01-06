@@ -32,8 +32,72 @@ from .logging_config import get_logger
 from .logging_context import get_user_id, get_user_role
 from .config.env import settings
 from .utils.filenames import canonicalize_filename, normalize_filename_for_comparison
+from .utils.resource_monitor import log_resource_checkpoint
 
 logger = get_logger(__name__)
+
+
+def _is_image_node(node_or_nodewithscore: Any) -> bool:
+    """
+    Safely check if a node has content_type == "image".
+    
+    Defense-in-depth: Prevents returning image nodes even from legacy indexes.
+    Handles both NodeWithScore and plain nodes safely.
+    
+    Args:
+        node_or_nodewithscore: Node or NodeWithScore to check
+        
+    Returns:
+        True if node has content_type == "image", False otherwise
+    """
+    try:
+        # Unwrap NodeWithScore if needed
+        if isinstance(node_or_nodewithscore, NodeWithScore):
+            node = node_or_nodewithscore.node if hasattr(node_or_nodewithscore, 'node') else node_or_nodewithscore
+        else:
+            node = node_or_nodewithscore
+        
+        # Check metadata safely
+        if hasattr(node, 'metadata') and node.metadata:
+            if isinstance(node.metadata, dict):
+                content_type = node.metadata.get('content_type', '')
+                return content_type == "image"
+    except Exception:
+        # Safe: if we can't check, assume it's not an image (defensive)
+        pass
+    return False
+
+
+def _filter_image_nodes(nodes: List[Any]) -> List[Any]:
+    """
+    Filter out any nodes with content_type == "image".
+    
+    Defense-in-depth: Prevents returning image nodes even from legacy indexes.
+    Safe to call on NodeWithScore or plain nodes.
+    
+    Args:
+        nodes: List of nodes (may contain NodeWithScore or plain nodes)
+        
+    Returns:
+        Filtered list with image nodes removed (preserves order)
+    """
+    if not nodes:
+        return nodes
+    
+    filtered = []
+    removed_count = 0
+    
+    for node in nodes:
+        if not _is_image_node(node):
+            filtered.append(node)
+        else:
+            removed_count += 1
+    
+    # Log only if we actually removed something (avoid log spam)
+    if removed_count > 0:
+        logger.debug(f"Filtered out {removed_count} image node(s) (defense-in-depth)")
+    
+    return filtered
 
 
 def _get_node_text(node: Any) -> str:
@@ -957,6 +1021,14 @@ class HybridRetriever:
                     # Wrap plain node in NodeWithScore
                     results.append((NodeWithScore(node=node_wrapper, score=float(scores[idx])), float(scores[idx])))
         
+        # Defense-in-depth: Filter out image nodes (even from legacy indexes)
+        # Filter the node part of each (node, score) tuple
+        filtered_results = []
+        for node, score in results:
+            if not _is_image_node(node):
+                filtered_results.append((node, score))
+        results = filtered_results[:top_k]  # Trim to top_k after filtering
+        
         return results
     
     def dense_search(self, query: str, top_k: int = 20) -> List[NodeWithScore]:
@@ -1005,6 +1077,9 @@ class HybridRetriever:
                     filtered_results.append(node)
             
             results = filtered_results[:top_k]  # Trim to top_k after filtering
+            
+            # Defense-in-depth: Filter out image nodes (even from legacy indexes)
+            results = _filter_image_nodes(results)
             
             if not results:
                 logger.warning(f"Dense search returned 0 results for query: {query[:50]}")
@@ -1598,6 +1673,9 @@ class HybridRetriever:
         
         # Sort by hybrid score
         hybrid_results.sort(key=lambda x: x.score, reverse=True)
+        
+        # Defense-in-depth: Filter out image nodes (even from legacy indexes)
+        hybrid_results = _filter_image_nodes(hybrid_results)
         
         # Apply re-ranking if available (skip on CPU for performance)
         # Re-ranker adds ~90 seconds on CPU, only use on GPU
@@ -3696,6 +3774,7 @@ class RAGOrchestrator:
         # Set global settings
         Settings.embed_model = self.embed_model
         logger.info("models_initialized")
+        log_resource_checkpoint("orchestrator_models_ready", logger)
     
     def load_index(self, storage_dir="latest_model"):
         """
@@ -4077,6 +4156,9 @@ class RAGOrchestrator:
                 document_evaluator=self.document_evaluator
             )
             
+            # BM25 is initialized inside HybridRetriever.__init__()
+            log_resource_checkpoint("orchestrator_bm25_ready", logger)
+            
             logger.info("index_and_retriever_initialized", 
                        storage_dir=storage_dir,
                        message="✅ Index and retriever initialized successfully")
@@ -4158,6 +4240,10 @@ class RAGOrchestrator:
             self.index = None
             self.retriever = None
             raise  # Re-raise so caller knows initialization failed
+        
+        # Index and retriever are fully loaded and ready
+        log_resource_checkpoint("orchestrator_index_ready", logger)
+        
         # Initialize glossary if configured
         self._load_glossary_index()
     

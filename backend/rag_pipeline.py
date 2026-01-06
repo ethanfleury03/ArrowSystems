@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from .orchestrator import RAGOrchestrator, StructuredResponse
 from .logging_config import get_logger
+from .utils.resource_monitor import log_resource_checkpoint
 
 logger = get_logger(__name__)
 
@@ -105,11 +106,14 @@ class RAGPipeline:
         
         # Initialize models first (model loading is always allowed, even on Cloud Run)
         logger.info("rag_pipeline_initializing_models", storage_dir=storage_dir)
+        log_resource_checkpoint("rag_models_init_start", logger)
         self.orchestrator.initialize_models()
         logger.info("rag_pipeline_models_initialized", storage_dir=storage_dir)
+        log_resource_checkpoint("rag_models_loaded", logger)
         
         # Load index (will handle missing index gracefully if ingestion is disabled)
         logger.info("rag_pipeline_loading_index", storage_dir=storage_dir)
+        log_resource_checkpoint("rag_index_load_start", logger)
         try:
             self.orchestrator.load_index(storage_dir=storage_dir)
         except Exception as e:

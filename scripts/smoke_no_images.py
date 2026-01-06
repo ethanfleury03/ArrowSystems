@@ -18,8 +18,18 @@ Example:
 import sys
 import os
 
+# Fix Windows console encoding for Unicode characters
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        # Fallback: use ASCII-safe characters
+        pass
+
 # Set environment variables before any backend imports to avoid database requirements
 os.environ["INGEST_NO_DB"] = "true"
+os.environ["DISABLE_METADATA_UPDATE"] = "1"
 # Set dummy DATABASE_URL to satisfy settings initialization (won't be used with INGEST_NO_DB)
 if "DATABASE_URL" not in os.environ:
     os.environ["DATABASE_URL"] = "sqlite:///:memory:"
@@ -346,6 +356,210 @@ def main():
         
         print("✅ No image nodes in query results")
         
+        # Step 4: Test orchestrator retrieval path (defense-in-depth)
+        print("\n" + "=" * 60)
+        print("STEP 4: Testing orchestrator retrieval path (defense-in-depth)")
+        print("=" * 60)
+        
+        # This test MUST pass - fail hard if it can't run
+        try:
+            from backend.orchestrator import HybridRetriever
+            from backend.config.env import settings
+            from llama_index.core import Settings
+            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+            
+            print("   Initializing HybridRetriever directly (no database required)...")
+            
+            # Load the index we just built
+            storage_context = StorageContext.from_defaults(persist_dir=str(persist_dir))
+            index = load_index_from_storage(storage_context)
+            
+            if index is None:
+                print("   ❌ FAIL: Could not load index from persist_dir")
+                print(f"   Persist dir: {persist_dir}")
+                sys.exit(1)
+            
+            # Initialize embedding model (required for HybridRetriever)
+            # Use cache_dir from pipeline if available, otherwise from settings or default
+            cache_dir = getattr(pipeline, 'cache_dir', None)
+            if not cache_dir:
+                cache_dir = settings.HF_HOME if hasattr(settings, 'HF_HOME') else "/root/.cache/huggingface/hub"
+            embed_model_name = pipeline.config.get("models", {}).get("embedding", "BAAI/bge-large-en-v1.5")
+            embed_model = HuggingFaceEmbedding(
+                model_name=embed_model_name,
+                cache_folder=cache_dir
+            )
+            Settings.embed_model = embed_model
+            
+            # Initialize reranker if available
+            reranker = None
+            if hasattr(pipeline, 'reranker') and pipeline.reranker:
+                reranker = pipeline.reranker
+            
+            # Create HybridRetriever directly (no database needed)
+            retriever = HybridRetriever(
+                index=index,
+                embed_model=embed_model,
+                reranker=reranker,
+                document_evaluator=None
+            )
+            
+            print("   ✅ HybridRetriever initialized")
+            
+            # Test hybrid_search via orchestrator
+            print(f"   Running query via HybridRetriever: '{args.query}'")
+            orchestrator_results = retriever.hybrid_search(
+                query=args.query,
+                top_k=10,
+                alpha=0.5
+            )
+            
+            print(f"   📊 HybridRetriever returned {len(orchestrator_results)} results")
+            
+            if len(orchestrator_results) == 0:
+                print("   ⚠️  WARNING: HybridRetriever returned 0 results (may indicate index issue)")
+            
+            # Check for image nodes
+            orchestrator_image_results = []
+            for i, result in enumerate(orchestrator_results):
+                content_type = get_content_type(result)
+                if content_type == "image":
+                    orchestrator_image_results.append((i, result))
+            
+            if orchestrator_image_results:
+                print(f"\n❌ FAIL: HybridRetriever returned {len(orchestrator_image_results)} image node(s):")
+                for idx, result in orchestrator_image_results:
+                    node = unwrap_node(result)
+                    node_id = getattr(node, 'node_id', 'unknown')
+                    print(f"   Result {idx}: node_id={node_id}, content_type=image")
+                sys.exit(1)
+            
+            print("   ✅ No image nodes in HybridRetriever results (defense-in-depth working)")
+            
+            # Test filtering helper directly with a fake image node
+            print("   Testing image filtering helper with synthetic image node...")
+            from backend.orchestrator import _is_image_node, _filter_image_nodes
+            from llama_index.core.schema import TextNode
+            
+            # Create a fake image node
+            fake_image_node = TextNode(
+                text="Image from test.pdf",
+                metadata={"content_type": "image", "file_name": "test.pdf"}
+            )
+            fake_image_node_wrapped = NodeWithScore(node=fake_image_node, score=0.5)
+            
+            # Test _is_image_node
+            if not _is_image_node(fake_image_node_wrapped):
+                print("   ❌ FAIL: _is_image_node() did not detect synthetic image node")
+                sys.exit(1)
+            
+            # Test _filter_image_nodes
+            test_nodes = [
+                NodeWithScore(node=TextNode(text="Text node", metadata={"content_type": "text"}), score=0.8),
+                fake_image_node_wrapped,
+                NodeWithScore(node=TextNode(text="Table node", metadata={"content_type": "table"}), score=0.7)
+            ]
+            filtered = _filter_image_nodes(test_nodes)
+            
+            if len(filtered) != 2:
+                print(f"   ❌ FAIL: _filter_image_nodes() should return 2 nodes, got {len(filtered)}")
+                sys.exit(1)
+            
+            if any(_is_image_node(node) for node in filtered):
+                print("   ❌ FAIL: _filter_image_nodes() did not remove image node")
+                sys.exit(1)
+            
+            print("   ✅ Image filtering helpers work correctly")
+            
+        except ImportError as e:
+            print(f"\n❌ FAIL: Could not import orchestrator modules: {e}")
+            print("   This test is REQUIRED and cannot be skipped.")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        except Exception as e:
+            print(f"\n❌ FAIL: Orchestrator test failed: {e}")
+            print("   This test is REQUIRED and cannot be skipped.")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # Step 5: Test single-file ingestion doesn't crash
+        print("\n" + "=" * 60)
+        print("STEP 5: Testing single-file ingestion path")
+        print("=" * 60)
+        
+        # This test MUST pass - fail hard if it can't run
+        try:
+            from backend.utils.single_file_ingestion import ingest_single_file
+            
+            # Find a test PDF file
+            test_pdf = None
+            for pdf_file in Path(args.test_docs_dir).glob("*.pdf"):
+                test_pdf = pdf_file
+                break
+            
+            if not test_pdf:
+                print(f"\n❌ FAIL: No PDF found in test_docs_dir: {args.test_docs_dir}")
+                print("   This test requires at least one PDF file to test single-file ingestion.")
+                sys.exit(1)
+            
+            print(f"   Testing single-file ingestion with: {test_pdf.name}")
+            
+            # Use the persist_dir we built (index must exist for single-file ingestion)
+            # Single-file ingestion adds to an existing index, so we use the one we just built
+            print(f"   Using existing index at: {persist_dir}")
+            
+            # Get cache_dir from pipeline or use default
+            cache_dir = getattr(pipeline, 'cache_dir', "/root/.cache/huggingface/hub")
+            
+            # This should not crash and should not extract images
+            result = ingest_single_file(
+                file_path=str(test_pdf),
+                storage_dir=str(persist_dir),  # Use the index we built
+                config_path=str(config_path),
+                cache_dir=cache_dir
+            )
+            
+            if not result.get("success"):
+                print(f"\n❌ FAIL: Single-file ingestion returned success=False")
+                print(f"   Error: {result.get('error')}")
+                print("   This test is REQUIRED and cannot be skipped.")
+                sys.exit(1)
+            
+            print(f"   ✅ Single-file ingestion completed: {result.get('chunk_count', 0)} chunks")
+            
+            # Check that no image artifacts were created in extracted_content directory
+            extracted_content_dir = Path("extracted_content")
+            image_artifacts = []
+            if extracted_content_dir.exists():
+                for img_file in extracted_content_dir.rglob("*_img*.png"):
+                    image_artifacts.append(img_file)
+            
+            if image_artifacts:
+                print(f"\n❌ FAIL: Single-file ingestion created {len(image_artifacts)} image artifact(s):")
+                for img_path in image_artifacts[:10]:  # Show first 10
+                    print(f"   {img_path}")
+                if len(image_artifacts) > 10:
+                    print(f"   ... and {len(image_artifacts) - 10} more")
+                print("   Expected: 0 image files when extract_images is disabled")
+                sys.exit(1)
+            
+            print("   ✅ No image artifacts created by single-file ingestion")
+            
+        except ImportError as e:
+            print(f"\n❌ FAIL: Could not import single_file_ingestion: {e}")
+            print("   This test is REQUIRED and cannot be skipped.")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        except Exception as e:
+            print(f"\n❌ FAIL: Single-file ingestion test failed: {e}")
+            print("   This test is REQUIRED and cannot be skipped.")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        
         # Success!
         print("\n" + "=" * 60)
         print("✅ PASS: All checks passed")
@@ -353,6 +567,8 @@ def main():
         print(f"   - Config: extract_images disabled")
         print(f"   - Docstore: {total} total nodes, 0 image nodes")
         print(f"   - Query: {len(results)} results, 0 image nodes")
+        print(f"   - Orchestrator: Defense-in-depth filtering verified")
+        print(f"   - Single-file ingestion: No crashes, no image artifacts")
         print("=" * 60)
         
         sys.exit(0)
