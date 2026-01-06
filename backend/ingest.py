@@ -2613,6 +2613,9 @@ class TechnicalRAGPipeline:
             logger.warning(f"   Original config value: {extract_images_raw} (type: {type(extract_images_raw).__name__})")
         extract_images_enabled = False  # HARD OVERRIDE: Always disable images
         
+        # Also force disable in NonTextExtractor to prevent any extraction
+        self.non_text_extractor.extract_images_enabled = False
+        
         logger.info(f"✅ Image extraction is DISABLED (HARD REMOVE active) - skipping image extraction for faster ingestion")
         
         # Find all PDF files (recursive; GCS staging uses nested directories like documents/<metadata_id>/<file>.pdf)
@@ -2628,19 +2631,9 @@ class TechnicalRAGPipeline:
                 all_tables.extend(tables)
                 logger.info(f"Extracted {len(tables)} tables from {pdf_path.name}")
                 
-                # Extract images (only if enabled - extract_images_from_pdf also checks internally)
-                # HARD REMOVE: Double-check to prevent accidental image extraction
-                if extract_images_enabled:
-                    # Additional safety check - verify NonTextExtractor also has it disabled
-                    if self.non_text_extractor.extract_images_enabled:
-                        images = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
-                        all_images.extend(images)
-                        logger.info(f"Extracted {len(images)} images from {pdf_path.name}")
-                    else:
-                        logger.warning(f"⚠️ Config mismatch: process_non_text_content says enabled but NonTextExtractor says disabled - skipping images")
-                else:
-                    # Explicitly skip to avoid any extraction overhead
-                    logger.debug(f"Skipping image extraction from {pdf_path.name} (images disabled)")
+                # HARD REMOVE: Images are always disabled - skip extraction entirely
+                # No image extraction will occur (saves significant processing time)
+                # Tables and captions are still extracted above
                 
                 # Extract captions
                 captions = self.non_text_extractor.extract_figure_captions(str(pdf_path))
