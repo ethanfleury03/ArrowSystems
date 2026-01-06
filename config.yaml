@@ -25,7 +25,7 @@ chunking:
 non_text:
   output_dir: "extracted_content"
   extract_tables: true
-  extract_images: true
+  extract_images: false  # HARD REMOVE: Images disabled to reduce index bloat and noise
   extract_captions: true
   image_formats: ["PNG", "JPEG"]
   table_min_rows: 2

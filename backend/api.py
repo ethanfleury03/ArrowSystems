@@ -71,6 +71,7 @@ from .logging_config import configure_logging, get_logger
 from .middleware.logging_middleware import LoggingMiddleware
 from .logging_context import set_user_id, set_user_role, get_user_id, get_user_role
 from .utils.audit_log import audit_log
+from .utils.resource_monitor import log_resource_checkpoint, get_memory_mb, get_elapsed_seconds
 from .config.env import settings
 
 # Configure structured logging early (using centralized settings)
@@ -780,6 +781,7 @@ async def startup_event():
         log_smtp_config_status()
         
         log_checkpoint("startup_event: settings loaded")
+        log_resource_checkpoint("settings_loaded", logger)
         
         # Log effective ENV value to confirm Cloud Run env vars are being used
         logger.info("env_runtime_value", 
@@ -843,6 +845,7 @@ async def startup_event():
             else:
                 logger.info("database_initialized", database="postgres")
                 log_checkpoint("startup_event: db manager init done")
+                log_resource_checkpoint("db_init_complete", logger)
 
                 # Seed default users (non-critical - continue even if this fails)
                 try:
@@ -972,6 +975,7 @@ async def startup_event():
         # - RAG_BACKGROUND_LOAD_ON_STARTUP="1": Non-blocking background load (default, fast startup)
         # - Both "0": No startup load, lazy init on first /query
         log_checkpoint("startup_event: rag index load start")
+        log_resource_checkpoint("rag_init_start", logger)
         startup_begin_time = time.time()
         try:
             from backend.rag.index_manager import get_index_load_state
@@ -1001,6 +1005,7 @@ async def startup_event():
                         final_state = load_state.get_state()
                         if final_state["status"] == "ready":
                             logger.info("rag_startup_load_success", message="RAG index loaded successfully during startup")
+                            log_resource_checkpoint("rag_eager_load_complete", logger)
                             app.state.rag_enabled = True
                             rag_state["status"] = "ready"
                             rag_state["last_error"] = None
@@ -1068,6 +1073,7 @@ async def startup_event():
                     message="Starting RAG index load in background (non-blocking). "
                            "Startup will complete immediately. /query will wait for index if needed."
                 )
+                log_resource_checkpoint("rag_background_load_started", logger)
                 print(f"[RAG] Starting background index load (non-blocking)", flush=True)
                 
                 # Spawn background task - do NOT await
@@ -1139,6 +1145,7 @@ async def startup_event():
             app.state.rag_storage_path = storage_path
             
             log_checkpoint("startup_event: rag index load done")
+            log_resource_checkpoint("startup_complete", logger)
                 
         except Exception as e:
             # Log the error but DO NOT raise - allow app to start
@@ -1179,6 +1186,7 @@ async def startup_event():
         startup_duration = time.time() - startup_begin_time
         
         log_checkpoint("startup_event: complete")
+        # Note: startup_complete checkpoint already logged above in RAG section
         logger.info(
             "server_started",
             environment=settings.ENV,
@@ -3009,6 +3017,11 @@ async def query_knowledge_base(request: Request):
         )
         
         response_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Log first query completion for resource monitoring
+        if not hasattr(app.state, '_first_query_complete'):
+            log_resource_checkpoint("first_query_complete", logger)
+            app.state._first_query_complete = True
         
         # Log query completion with structured logging
         logger.info(

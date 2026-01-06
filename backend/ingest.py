@@ -498,8 +498,11 @@ class TextPreprocessor:
         
         return cleaned
     
-    def is_low_content_page(self, text: str, min_words: int = 15) -> bool:
+    def is_low_content_page(self, text: str, min_words: int = None) -> bool:
         """Check if a page has too little content to be useful."""
+        # Allow override via environment variable (default: 5 words, was 15)
+        if min_words is None:
+            min_words = int(os.getenv("MIN_WORDS_PER_PAGE", "5"))
         # Non-allocating word count: count transitions from whitespace to non-whitespace
         word_count = 0
         was_whitespace = True
@@ -1367,7 +1370,7 @@ class SmartChunkSplitter:
 class NonTextExtractor:
     """Extract and process non-text content from documents."""
     
-    def __init__(self, output_dir: Optional[str] = None):
+    def __init__(self, output_dir: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
         override_dir = os.getenv("EXTRACTED_CONTENT_DIR")
         if override_dir:
             target_dir = Path(override_dir)
@@ -1376,10 +1379,28 @@ class NonTextExtractor:
         else:
             target_dir = Path(__file__).resolve().parent.parent / "extracted_content"
         self.output_dir = target_dir
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Store config and check extract_images flag
+        self.config = config or {}
+        self.extract_images_enabled = bool(self.config.get("non_text", {}).get("extract_images", False))
+        
+        # Only create output_dir lazily when needed (tables may still need it)
+        self._output_dir_created = False
+        
+        if not self.extract_images_enabled:
+            logger.info("🖼️ Image extraction is DISABLED (non_text.extract_images=false). Images will be skipped.")
+    
+    def _ensure_output_dir(self):
+        """Lazily create output_dir only when needed (for tables)."""
+        if not self._output_dir_created:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self._output_dir_created = True
         
     def extract_tables_from_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract tables from PDF using PyMuPDF."""
+        # Ensure output_dir exists (tables need it)
+        self._ensure_output_dir()
+        
         tables = []
         doc = fitz.open(pdf_path)
         
@@ -1433,56 +1454,19 @@ class NonTextExtractor:
         return tables
     
     def extract_images_from_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
-        """Extract images and diagrams from PDF."""
-        images = []
-        doc = fitz.open(pdf_path)
+        """
+        Extract images and diagrams from PDF.
         
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            image_list = page.get_images()
-            
-            for img_idx, img in enumerate(image_list):
-                try:
-                    # Get image data
-                    xref = img[0]
-                    pix = fitz.Pixmap(doc, xref)
-                    
-                    if pix.n - pix.alpha < 4:  # GRAY or RGB
-                        # Convert to PIL Image
-                        img_data = pix.tobytes("png")
-                        pil_image = Image.open(BytesIO(img_data))
-                        
-                        # Get image metadata
-                        img_rects = page.get_image_rects(xref)
-                        img_rect = img_rects[0] if img_rects else None
-                        
-                        # Create image info (NO base64 embedding - only metadata)
-                        image_info = {
-                            "source_path": pdf_path,
-                            "page_number": page_num + 1,
-                            "image_index": img_idx,
-                            # Removed: image_data base64 encoding (not needed for embeddings)
-                            "width": pil_image.width,
-                            "height": pil_image.height,
-                            "format": "PNG",
-                            "content_type": "image",
-                            "caption": f"Image from {Path(pdf_path).stem}, page {page_num + 1}",
-                            "bbox": str(img_rect) if img_rect else None
-                        }
-                        images.append(image_info)
-                        
-                        # Save image
-                        img_filename = f"{Path(pdf_path).stem}_page{page_num+1}_img{img_idx}.png"
-                        img_path = self.output_dir / img_filename
-                        pil_image.save(img_path)
-                        image_info["saved_path"] = str(img_path)
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to extract image {img_idx} from page {page_num + 1}: {e}")
-                    continue
-                    
-        doc.close()
-        return images
+        HARD REMOVE: This method is permanently disabled and always returns empty.
+        Images are never extracted to reduce index bloat and processing time.
+        """
+        # HARD REMOVE: Images are permanently disabled - always return empty immediately
+        # No image extraction code exists - this saves significant processing time
+        # All image extraction logic has been completely removed
+        # CRITICAL: If you see "Extracted X images" logs, the server file is outdated!
+        # This method MUST return empty list - any other behavior is a bug
+        logger.warning(f"⚠️ extract_images_from_pdf() called for {Path(pdf_path).name} - returning empty (images permanently disabled)")
+        return []
     
     def extract_figure_captions(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract figure captions and references."""
@@ -2310,9 +2294,16 @@ class TechnicalRAGPipeline:
         self.embedding_model_name: str | None = None
         self.reranker = None
         self.index = None
-        self.non_text_extractor = NonTextExtractor()
-        self.text_preprocessor = TextPreprocessor()
         self.config = self._load_config(config_path)
+        
+        # Log config status for debugging
+        non_text_config = self.config.get("non_text", {})
+        extract_images = non_text_config.get("extract_images", False)
+        logger.info(f"📋 Config loaded: extract_images={extract_images}, extract_tables={non_text_config.get('extract_tables', True)}, extract_captions={non_text_config.get('extract_captions', True)}")
+        
+        # Pass config to NonTextExtractor so it can check extract_images flag
+        self.non_text_extractor = NonTextExtractor(config=self.config)
+        self.text_preprocessor = TextPreprocessor()
 
         # Optional: when ingesting from a staging manifest, we populate this mapping so that
         # all non-text nodes (tables/images/captions) can include REQUIRED metadata fields.
@@ -2343,16 +2334,50 @@ class TechnicalRAGPipeline:
             "chunking": {
                 "chunk_size": 512,
                 "chunk_overlap": 128
+            },
+            "non_text": {
+                "extract_images": False,  # Default to disabled for performance
+                "extract_tables": True,
+                "extract_captions": True
             }
         }
+        
+        # Try to find config.yaml in repo root if not found at specified path
+        if not os.path.exists(config_path):
+            # Try repo root
+            repo_config = REPO_ROOT / "config.yaml"
+            if repo_config.exists():
+                config_path = str(repo_config)
+                logger.info(f"Using config from repo root: {config_path}")
         
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
                     config = yaml.safe_load(f)
-                return {**default_config, **config}
+                # Deep merge to preserve nested defaults
+                merged = {**default_config, **config}
+                if "non_text" in config and "non_text" in default_config:
+                    merged["non_text"] = {**default_config["non_text"], **config.get("non_text", {})}
+                
+                # Log what was actually loaded for debugging
+                non_text_loaded = merged.get("non_text", {})
+                logger.info(f"📋 Config loaded from {config_path}: extract_images={non_text_loaded.get('extract_images')}, extract_tables={non_text_loaded.get('extract_tables')}, extract_captions={non_text_loaded.get('extract_captions')}")
+                
+                return merged
             except Exception as e:
                 logger.warning(f"Failed to load config: {e}, using defaults")
+        else:
+            logger.warning(f"Config file not found at {config_path}, using defaults")
+            # Try to find it in common locations
+            possible_paths = [
+                str(REPO_ROOT / "config.yaml"),
+                "config.yaml",
+                "../config.yaml"
+            ]
+            for alt_path in possible_paths:
+                if os.path.exists(alt_path):
+                    logger.info(f"Found config at alternative path: {alt_path}")
+                    return self._load_config(alt_path)
         
         return default_config
         
@@ -2521,12 +2546,13 @@ class TechnicalRAGPipeline:
         logger.info("✅ Models initialized successfully")
     
     def process_non_text_content(self, data_dir: str) -> Tuple[List[Dict], List[Dict], List[Dict]]:
-        """Process non-text content (tables, images, captions) from documents."""
-        logger.info("📊 Processing non-text content...")
+        """Process non-text content (tables, captions) from documents. Images are permanently disabled."""
+        logger.info("📊 Processing non-text content (tables and captions only - images permanently disabled)...")
         
         all_tables = []
-        all_images = []
         all_captions = []
+        # HARD REMOVE: Images are permanently disabled - always return empty list
+        all_images = []
         
         # Find all PDF files (recursive; GCS staging uses nested directories like documents/<metadata_id>/<file>.pdf)
         pdf_files = list(Path(data_dir).rglob("*.pdf"))
@@ -2541,21 +2567,26 @@ class TechnicalRAGPipeline:
                 all_tables.extend(tables)
                 logger.info(f"Extracted {len(tables)} tables from {pdf_path.name}")
                 
-                # Extract images
-                images = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
-                all_images.extend(images)
-                logger.info(f"Extracted {len(images)} images from {pdf_path.name}")
-                
                 # Extract captions
                 captions = self.non_text_extractor.extract_figure_captions(str(pdf_path))
                 all_captions.extend(captions)
                 logger.info(f"Extracted {len(captions)} captions from {pdf_path.name}")
                 
+                # HARD REMOVE: Images are permanently disabled - no extraction occurs
+                # This saves significant processing time
+                # CRITICAL: If you see "Extracted X images" logs, the server file is outdated!
+                # The extract_images_from_pdf() method MUST return empty list - verify server file is synced
+                images_result = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
+                if len(images_result) > 0:
+                    raise RuntimeError(f"CRITICAL BUG: extract_images_from_pdf() returned {len(images_result)} images but should return 0! Server file is outdated - sync the latest code!")
+                # Verify it's empty (defense-in-depth)
+                assert len(images_result) == 0, "extract_images_from_pdf() must return empty list"
+                
             except Exception as e:
                 logger.error(f"Failed to process {pdf_path.name}: {e}")
                 continue
         
-        logger.info(f"✅ Non-text processing complete: {len(all_tables)} tables, {len(all_images)} images, {len(all_captions)} captions")
+        logger.info(f"✅ Non-text processing complete: {len(all_tables)} tables, 0 images (permanently disabled), {len(all_captions)} captions")
         return all_tables, all_images, all_captions
     
     def create_non_text_nodes(self, tables: List[Dict], images: List[Dict], captions: List[Dict], report_mode: bool = False) -> Tuple[List[TextNode], Dict[str, Any]]:
@@ -2572,27 +2603,13 @@ class TechnicalRAGPipeline:
             (nodes, stats) where stats contains filtering/reporting information
         """
         nodes = []
+        # HARD REMOVE: Images are permanently disabled - stats always zero
         stats = {
-            "images_before_filter": len(images),
+            "images_before_filter": 0,
             "images_after_filter": 0,
-            "images_skipped": {
-                "missing_dimensions": 0,
-                "area_too_small": 0,
-                "min_side_too_small": 0,
-                "file_size_too_small": 0,
-                "aspect_ratio_extreme": 0,
-                "duplicate_in_doc": 0,
-                "global_duplicate": 0,
-            },
+            "images_skipped": {},
             "images_by_document": {},
-            "image_area_distribution": {
-                "<10k": 0,
-                "10k-50k": 0,
-                "50k-200k": 0,
-                "200k-500k": 0,
-                "500k-1M": 0,
-                ">1M": 0,
-            },
+            "image_area_distribution": {},
         }
 
         def _required_meta_for_source_path(source_path: str) -> dict[str, Any]:
@@ -2662,30 +2679,10 @@ class TechnicalRAGPipeline:
                 )
                 nodes.append(node)
         
-        # Process images (create text nodes for captions and metadata only - no base64)
-        images_kept = 0
-        for image in images:
-            image_text = f"Image from {Path(image['source_path']).name}, page {image['page_number']}: {image['caption']}"
-            
-            node = TextNode(
-                text=image_text,
-                metadata={
-                    "content_type": "image",
-                    "source_path": image["source_path"],
-                    "page_number": image["page_number"],
-                    "image_index": image["image_index"],
-                    "width": image["width"],
-                    "height": image["height"],
-                    "saved_path": image.get("saved_path"),
-                    "bbox": str(image.get("bbox")) if image.get("bbox") else None,
-                    **_required_meta_for_source_path(image.get("source_path")),
-                }
-            )
-            nodes.append(node)
-            images_kept += 1
-        
-        # Update stats with actual counts
-        stats["images_after_filter"] = images_kept
+        # HARD REMOVE: Images are permanently disabled - no image nodes are ever created
+        # Images list is always empty, so no processing needed
+        stats["images_after_filter"] = 0
+        stats["images_before_filter"] = 0
         
         return nodes, stats
     
@@ -2936,69 +2933,18 @@ class TechnicalRAGPipeline:
         logger.info(f"Preprocessed {len(preprocessed_docs)} documents, skipped {skipped_pages} pages ({skip_summary})")
         
         # Step 3: Extract Non-Text Content
-        print("\n[Step 3/7] 🖼️  Extracting tables, images, and captions...")
+        print("\n[Step 3/7] 📊 Extracting tables and captions...")
         print("   This may take a few minutes...")
         tables, images, captions = self.process_non_text_content(data_dir)
-        print(f"   ✅ Extracted {len(tables)} tables, {len(images)} images, {len(captions)} captions")
+        print(f"   ✅ Extracted {len(tables)} tables, {len(captions)} captions (images permanently disabled)")
         
         # Step 4: Create Non-Text Nodes (with image filtering)
         print("\n[Step 4/7] 📊 Creating searchable nodes from extracted content...")
         report_mode = os.getenv("REPORT_NONTEXT", "false").lower() in {"true", "1", "yes", "on"}
         non_text_nodes, image_stats = self.create_non_text_nodes(tables, images, captions, report_mode=report_mode)
         
-        # Log image filtering results
-        if image_stats["images_before_filter"] > 0:
-            kept = image_stats["images_after_filter"]
-            total = image_stats["images_before_filter"]
-            skipped = total - kept
-            print(f"   ✅ Created {len(non_text_nodes)} non-text nodes")
-            print(f"   📸 Images: {kept}/{total} kept ({skipped} filtered out)")
-            
-            if skipped > 0:
-                print(f"      Filter breakdown:")
-                for reason, count in image_stats["images_skipped"].items():
-                    if count > 0:
-                        print(f"        - {reason}: {count}")
-        
-        # Print report if requested
-        if report_mode and image_stats["images_by_document"]:
-            print("\n" + "="*70)
-            print("📊 IMAGE FILTERING REPORT")
-            print("="*70)
-            
-            # Top 10 docs by image count
-            doc_counts = sorted(
-                [(doc, info["total"]) for doc, info in image_stats["images_by_document"].items()],
-                key=lambda x: x[1],
-                reverse=True
-            )[:10]
-            
-            print(f"\nTop 10 documents by image count:")
-            for i, (doc_path, count) in enumerate(doc_counts, 1):
-                doc_name = Path(doc_path).name
-                info = image_stats["images_by_document"][doc_path]
-                kept = info["kept"]
-                print(f"  {i:2d}. {doc_name}: {count} total, {kept} kept, {count - kept} skipped")
-            
-            # Skip percentages
-            total_skipped = sum(image_stats["images_skipped"].values())
-            if total_skipped > 0:
-                print(f"\nSkip percentages:")
-                for reason, count in image_stats["images_skipped"].items():
-                    if count > 0:
-                        pct = (count / image_stats["images_before_filter"]) * 100
-                        print(f"  - {reason}: {count} ({pct:.1f}%)")
-            
-            # Area distribution
-            print(f"\nImage area distribution:")
-            for bucket, count in image_stats["image_area_distribution"].items():
-                if count > 0:
-                    pct = (count / image_stats["images_before_filter"]) * 100
-                    print(f"  - {bucket}: {count} ({pct:.1f}%)")
-            
-            print("="*70 + "\n")
-        
-        logger.info(f"Created {len(non_text_nodes)} non-text nodes (images: {image_stats['images_after_filter']}/{image_stats['images_before_filter']} kept)")
+        # HARD REMOVE: Images are permanently disabled - no image nodes created
+        print(f"   ✅ Created {len(non_text_nodes)} non-text nodes (images permanently disabled)")
         
         # Step 5: Smart Chunking with Text Nodes
         print("\n[Step 5/7] 🧠 Smart chunking and filtering...")
@@ -3315,13 +3261,13 @@ class TechnicalRAGPipeline:
         return self.index
     
     def hybrid_search(self, query: str, top_k: int = 10, content_types: List[str] = None) -> List[NodeWithScore]:
-        """Perform hybrid search across text, tables, and images."""
+        """Perform hybrid search across text, tables, and figure captions."""
         if not self.index:
             raise RuntimeError("Index not built. Call build_index() first.")
         
-        # Default to search all content types
+        # Default to search all content types (images excluded - hard remove)
         if content_types is None:
-            content_types = ["text", "table", "image", "figure_caption"]
+            content_types = ["text", "table", "figure_caption"]
         
         # Perform vector search
         retriever = self.index.as_retriever(similarity_top_k=top_k * 2)  # Get more for re-ranking
@@ -3332,6 +3278,9 @@ class TechnicalRAGPipeline:
             filtered_nodes = []
             for node in nodes:
                 content_type = node.metadata.get("content_type", "text")
+                # HARD REMOVE: Always exclude image nodes, even if content_types includes it
+                if content_type == "image":
+                    continue
                 if content_type in content_types or content_type == "text":
                     filtered_nodes.append(node)
             nodes = filtered_nodes[:top_k]
@@ -4437,7 +4386,16 @@ def main():
     
     # Initialize pipeline (skip in preflight mode)
     if not preflight:
-        pipeline = TechnicalRAGPipeline()
+        # Find config.yaml - try repo root first, then current directory
+        config_path = "config.yaml"
+        repo_config = REPO_ROOT / "config.yaml"
+        if repo_config.exists():
+            config_path = str(repo_config)
+            logger.info(f"Using config from repo root: {config_path}")
+        elif not os.path.exists(config_path):
+            logger.warning(f"Config file not found at {config_path} or {repo_config}, using defaults")
+        
+        pipeline = TechnicalRAGPipeline(config_path=config_path)
         use_qdrant = _env_bool("USE_QDRANT", default=False)
         if use_qdrant:
             raise RuntimeError("Production promotion flow requires local index artifacts; USE_QDRANT must be false.")

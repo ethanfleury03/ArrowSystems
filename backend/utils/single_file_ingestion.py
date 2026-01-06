@@ -202,17 +202,34 @@ def ingest_single_file(
         preprocess_time_ms = (time.time() - preprocess_start_time) * 1000
         logger.info("ingestion_preprocessing_complete", filename=file_path.name, preprocessed=len(preprocessed_docs), skipped=skipped_pages, latency_ms=round(preprocess_time_ms, 2))
         
-        # Step 3: Extract non-text content (tables, images) - only for PDF
+        # Step 3: Extract non-text content (tables, captions) - only for PDF
+        # Images are permanently disabled - never extracted
         non_text_nodes = []
         if file_ext == '.pdf':
             logger.info("ingestion_extracting_non_text", filename=file_path.name)
             extract_start_time = time.time()
-            extractor = NonTextExtractor()
-            tables = extractor.extract_tables_from_pdf(str(file_path))
-            images = extractor.extract_images_from_pdf(str(file_path))
-            captions = extractor.extract_captions_from_pdf(str(file_path))
             
-            # Create non-text nodes
+            # Pass config to NonTextExtractor so it respects extract_images flag
+            extractor = NonTextExtractor(config=config)
+            
+            tables = extractor.extract_tables_from_pdf(str(file_path))
+            
+            # Check if images are enabled (though they're permanently disabled in extract_images_from_pdf)
+            extract_images_enabled = bool(config.get("non_text", {}).get("extract_images", False))
+            if extract_images_enabled:
+                # Even if config says enabled, extract_images_from_pdf() always returns empty (hard remove)
+                images = extractor.extract_images_from_pdf(str(file_path))
+                if len(images) > 0:
+                    logger.warning(f"⚠️ extract_images_from_pdf() returned {len(images)} images but should return 0 (images permanently disabled)")
+            else:
+                # Skip image extraction entirely when disabled (avoid overhead)
+                images = []
+                logger.debug("Skipping image extraction (disabled in config)")
+            
+            # Fix: Use correct method name
+            captions = extractor.extract_figure_captions(str(file_path))
+            
+            # Create non-text nodes (tables and captions only - images never processed)
             for table in tables:
                 table_text = table.get('table_markdown', '')
                 if table_text:
@@ -227,8 +244,24 @@ def ingest_single_file(
                     )
                     non_text_nodes.append(node)
             
+            # Create caption nodes
+            for caption in captions:
+                caption_text = caption.get('caption_text', '').strip()
+                if caption_text:
+                    node = TextNode(
+                        text=caption_text,
+                        metadata={
+                            'file_name': file_path.name,
+                            'page_label': str(caption.get('page_number', '')),
+                            'content_type': 'figure_caption',
+                            'file_type': 'pdf'
+                        }
+                    )
+                    non_text_nodes.append(node)
+            
             extract_time_ms = (time.time() - extract_start_time) * 1000
-            logger.info("ingestion_non_text_extracted", filename=file_path.name, tables=len(tables), images=len(images), captions=len(captions), nodes=len(non_text_nodes), latency_ms=round(extract_time_ms, 2))
+            # Log accurately: images are always 0 (permanently disabled)
+            logger.info("ingestion_non_text_extracted", filename=file_path.name, tables=len(tables), images=0, captions=len(captions), nodes=len(non_text_nodes), latency_ms=round(extract_time_ms, 2))
         
         # Step 4: Smart chunking
         logger.info("ingestion_chunking_start", filename=file_path.name)
@@ -342,12 +375,20 @@ def ingest_single_file(
         doc_id = file_path.name
         
         # Update metadata with ingestion date and ensure machine_model is set
-        from utils.document_metadata import ensure_metadata_entry
-        meta_entry = ensure_metadata_entry(file_path.name)
-        
-        # Log if review is needed
-        if meta_entry.get("requires_admin_review"):
-            logger.warning("ingestion_requires_review", filename=file_path.name, reason="missing machine_model")
+        # Skip if INGEST_NO_DB is set (for smoke tests)
+        if not os.getenv("INGEST_NO_DB"):
+            try:
+                from ..utils.document_metadata import ensure_metadata_entry
+                meta_entry = ensure_metadata_entry(file_path.name)
+                
+                # Log if review is needed
+                if meta_entry.get("requires_admin_review"):
+                    logger.warning("ingestion_requires_review", filename=file_path.name, reason="missing machine_model")
+            except ImportError:
+                # Database module not available - skip metadata update
+                logger.debug("Skipping metadata update (database module not available)")
+        else:
+            logger.debug("Skipping metadata update (INGEST_NO_DB=true)")
         
         # Log ingestion complete
         total_time_ms = (time.time() - start_time) * 1000
