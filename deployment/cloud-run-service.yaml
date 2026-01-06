@@ -22,8 +22,10 @@ spec:
           resources:
             limits:
               cpu: "2"
-              # Increased from 4Gi → 8Gi to prevent OOM kills when loading BGE-large embedding model + 350MB dense vector index
-              memory: "8Gi"
+              # Reduced from 8Gi → 4Gi after image removal (index: 1650MB → 191MB, ~88% reduction)
+              # Base footprint: ~700MB (191MB index + ~500MB models). 4Gi provides ~5.7x headroom.
+              # Memory sizing based on measured peak RSS from instrumentation, not estimates.
+              memory: "4Gi"
           startupProbe:
             httpGet:
               path: /health
