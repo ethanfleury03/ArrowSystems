@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 
 from backend.logging_config import get_logger
+from backend.utils.resource_monitor import log_resource_checkpoint
 from backend.config.env import settings
 
 logger = get_logger(__name__)
@@ -185,6 +186,8 @@ class IndexLoadState:
             self._started_at = load_start_time
             self._error = None
             self._ready_event.clear()
+            # Resource checkpoint: loading started
+            log_resource_checkpoint("rag_index_load_start")
             
             # Determine trigger source for logging
             import traceback
@@ -211,6 +214,7 @@ class IndexLoadState:
                     trigger=trigger_source,
                     message=f"Starting RAG index download and load (triggered by: {trigger_source})"
                 )
+                log_resource_checkpoint("rag_gcs_download_start")
                 
                 # Resolve storage path
                 from backend.utils.storage_path import resolve_storage_path
@@ -264,6 +268,7 @@ class IndexLoadState:
                             duration_seconds=download_duration,
                             message=f"Index download completed successfully in {download_duration:.2f}s"
                         )
+                        log_resource_checkpoint("rag_gcs_download_complete")
                         
                         # Validate downloaded files have non-trivial size
                         for f in required:
@@ -298,6 +303,7 @@ class IndexLoadState:
                 # Step 2: Load index into pipeline
                 load_start_time = time.time()
                 logger.info("rag_index_load_pipeline_start", message="Loading index into RAG pipeline")
+                log_resource_checkpoint("rag_index_load_pipeline_start")
                 from backend.rag_pipeline import get_rag_pipeline
                 from backend.api import get_db_manager_instance
                 
@@ -324,6 +330,7 @@ class IndexLoadState:
                     duration_seconds=load_duration,
                     message=f"Pipeline index load completed in {load_duration:.2f}s"
                 )
+                log_resource_checkpoint("rag_index_loaded")
                 
                 # Log sample metadata keys for compatibility checking
                 try:
@@ -384,6 +391,7 @@ class IndexLoadState:
                     trigger=trigger_source,
                     message=f"RAG index load completed successfully in {total_elapsed:.2f}s{timing_msg} (triggered by: {trigger_source})"
                 )
+                log_resource_checkpoint("rag_bg_task_success")
                 
             except asyncio.CancelledError:
                 # If cancelled (shouldn't happen with shield, but handle defensively)
@@ -421,6 +429,7 @@ class IndexLoadState:
                     exc_info=True,
                     message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {error_str} (triggered by: {trigger_source})"
                 )
+                log_resource_checkpoint("rag_bg_task_failed")
                 raise RuntimeError(self._error) from e
             
             finally:

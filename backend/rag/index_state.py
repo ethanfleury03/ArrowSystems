@@ -14,7 +14,7 @@ _state_lock = Lock()
 
 _index_state: Dict[str, Any] = {
     "ready": False,
-    "phase": "idle",  # "idle" | "downloading" | "loading" | "ready" | "error"
+    "phase": "idle",  # "idle" | "downloading" | "downloaded" | "loading" | "ready" | "error"
     "error": None,
     "started_at": None,
     "updated_at": None,

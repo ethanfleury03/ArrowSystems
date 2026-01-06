@@ -1081,10 +1081,15 @@ async def startup_event():
                     """Background task that loads index and logs completion."""
                     load_start_time = time.time()
                     try:
+                        # Resource checkpoint at task start
+                        log_resource_checkpoint("rag_bg_task_start", logger)
+                        
                         await load_state.ensure_loaded()
                         load_duration = time.time() - load_start_time
                         final_state = load_state.get_state()
                         if final_state["status"] == "ready":
+                            # Resource checkpoint on success
+                            log_resource_checkpoint("rag_bg_task_success", logger)
                             logger.info(
                                 "rag_background_load_complete",
                                 duration_seconds=load_duration,
@@ -1111,6 +1116,8 @@ async def startup_event():
                     except Exception as e:
                         load_duration = time.time() - load_start_time
                         error_msg = f"{type(e).__name__}: {str(e)}"
+                        # Resource checkpoint on failure
+                        log_resource_checkpoint("rag_bg_task_failed", logger)
                         logger.error(
                             "rag_background_load_exception",
                             duration_seconds=load_duration,
@@ -1144,7 +1151,8 @@ async def startup_event():
                 storage_path = str(storage_path_obj.resolve()) if storage_path_obj else getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
             app.state.rag_storage_path = storage_path
             
-            log_checkpoint("startup_event: rag index load done")
+            # Accurate startup checkpoint: background task scheduled (not done)
+            log_checkpoint("startup_event: rag background load scheduled")
             log_resource_checkpoint("startup_complete", logger)
                 
         except Exception as e:
@@ -2707,7 +2715,7 @@ async def query_knowledge_base(request: Request):
                 except Exception:
                     pass  # If wait fails, continue to return 503
             
-            # Still not ready - return 503 with structured error
+            # Still not ready - return 503 with structured error and Retry-After header
             # Standardize error format: detail is an object with code, status, message (all strings)
             if state["status"] == "loading":
                 error_detail = {
@@ -2731,11 +2739,12 @@ async def query_knowledge_base(request: Request):
                     "status": "not_started",
                     "message": "Index loading has not started. This should happen during startup. If this persists, check server logs.",
                 }
-            
-            raise HTTPException(
-                status_code=503,
-                detail=error_detail,
-            )
+            # Configure Retry-After header (in seconds)
+            retry_after = int(os.getenv("RAG_RETRY_AFTER_SEC", "5"))
+            headers = {"Retry-After": str(retry_after)}
+            # Return fast to prevent Cloud Run 504s
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content={"detail": error_detail}, headers=headers)
         
         # Index is ready - ensure pipeline is available
         storage_path = getattr(app.state, 'rag_storage_path', None) or _get_rag_storage_path_fallback()
