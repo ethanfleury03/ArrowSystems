@@ -1044,23 +1044,28 @@ jobs:
         run: |
           BACKEND_URL="${{ steps.get-service-url.outputs.service_url }}"
           echo "🏥 Verifying backend health at $BACKEND_URL..."
-          echo "⏳ Will keep trying every second for up to 5 minutes..."
+          echo "⏳ Will keep trying every 2 seconds for up to 10 minutes..."
           
-          # Generate identity token once
+          # Generate identity token once (for potential auth, though /healthz should be public)
           if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
             echo "🔐 Generating identity token for health check..."
             ID_TOKEN=$(gcloud auth print-identity-token --audiences="$BACKEND_URL" 2>/dev/null || echo "")
             if [ -z "$ID_TOKEN" ]; then
-              echo "❌ Failed to generate identity token"
-              exit 1
+              echo "⚠️  Warning: Failed to generate identity token (will try without auth)"
             fi
           fi
           
-          # Keep trying every second for up to 5 minutes (300 seconds)
-          MAX_WAIT_SECONDS=300
+          # Increased timeouts: 10 minutes total, 30s per attempt, 2s between attempts
+          MAX_WAIT_SECONDS=600  # 10 minutes
+          PER_ATTEMPT_TIMEOUT=30  # 30 seconds per curl attempt
+          SLEEP_BETWEEN_ATTEMPTS=2  # 2 seconds between attempts
+          
           START_TIME=$(date +%s)
           ATTEMPT=0
           SUCCESS=false
+          LAST_EXIT_CODE=0
+          LAST_HTTP_CODE="000"
+          LAST_ERROR=""
           
           while true; do
             ATTEMPT=$((ATTEMPT + 1))
@@ -1070,35 +1075,108 @@ jobs:
             # Check if we've exceeded the timeout
             if [ $ELAPSED -ge $MAX_WAIT_SECONDS ]; then
               echo ""
-              echo "❌ Backend health check failed after 5 minutes"
-              echo "Last response:"
+              echo "❌ Backend health check failed after $((MAX_WAIT_SECONDS / 60)) minutes"
+              echo ""
+              echo "Diagnostics:"
+              echo "  - Last curl exit code: $LAST_EXIT_CODE"
+              echo "  - Last HTTP code: $LAST_HTTP_CODE"
+              echo "  - Total attempts: $ATTEMPT"
+              echo "  - Last error: $LAST_ERROR"
+              echo "  - Service URL: $BACKEND_URL"
+              echo ""
+              
+              # Try DNS resolution test
+              echo "Testing DNS resolution..."
+              BACKEND_HOST=$(echo "$BACKEND_URL" | sed -e 's|https\?://||' -e 's|/.*||')
+              if command -v host >/dev/null 2>&1; then
+                if host "$BACKEND_HOST" > /dev/null 2>&1; then
+                  echo "  ✅ DNS resolution: OK"
+                else
+                  echo "  ❌ DNS resolution: FAILED"
+                fi
+              elif command -v nslookup >/dev/null 2>&1; then
+                if nslookup "$BACKEND_HOST" > /dev/null 2>&1; then
+                  echo "  ✅ DNS resolution: OK"
+                else
+                  echo "  ❌ DNS resolution: FAILED"
+                fi
+              else
+                echo "  ⚠️  DNS tools not available"
+              fi
+              
+              # Try TCP connection test
+              echo "Testing TCP connection..."
+              BACKEND_PORT=$(echo "$BACKEND_URL" | grep -oP ':\d+' | sed 's/://' || echo "443")
+              if timeout 5 bash -c "echo > /dev/tcp/$BACKEND_HOST/$BACKEND_PORT" 2>/dev/null; then
+                echo "  ✅ TCP connection: OK (host: $BACKEND_HOST, port: $BACKEND_PORT)"
+              else
+                echo "  ❌ TCP connection: FAILED (host: $BACKEND_HOST, port: $BACKEND_PORT)"
+              fi
+              
+              echo ""
+              echo "Last response (if any):"
               cat /tmp/health_response.json 2>/dev/null || echo "(no response captured)"
               echo ""
               echo "This may indicate:"
               echo "  - Service is unhealthy (check Cloud Run logs)"
-              echo "  - Authentication issue (check IAM permissions)"
-              echo "  - Service failed to start"
+              echo "  - Service is OOM'ing during startup (check memory usage, may need to revert to 8Gi)"
+              echo "  - Service failed to start (check startup logs)"
+              echo "  - Network connectivity issue (check DNS/TCP diagnostics above)"
               exit 1
             fi
             
-            # Try health check (use /api/healthz for zero-dependency fast check)
-            if curl -f -sS --max-time 5 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/api/healthz" > /tmp/health_response.json 2>&1; then
+            # Try health check with increased timeout
+            # First try without auth (healthz should be public)
+            HTTP_OUTPUT=$(curl -sS -w "\n%{http_code}\n%{exitcode}" \
+              --connect-timeout 5 \
+              --max-time $PER_ATTEMPT_TIMEOUT \
+              "$BACKEND_URL/api/healthz" 2>&1) || LAST_EXIT_CODE=$?
+            
+            # Parse output (last 2 lines are http_code and exitcode)
+            HTTP_BODY=$(echo "$HTTP_OUTPUT" | head -n -2)
+            LAST_HTTP_CODE=$(echo "$HTTP_OUTPUT" | tail -n 2 | head -n 1)
+            CURL_EXIT=$(echo "$HTTP_OUTPUT" | tail -n 1)
+            
+            # If no auth worked, try with auth as fallback
+            if [ "$LAST_HTTP_CODE" = "401" ] || [ "$LAST_HTTP_CODE" = "403" ]; then
+              if [ -n "$ID_TOKEN" ]; then
+                HTTP_OUTPUT=$(curl -sS -w "\n%{http_code}\n%{exitcode}" \
+                  --connect-timeout 5 \
+                  --max-time $PER_ATTEMPT_TIMEOUT \
+                  -H "Authorization: Bearer $ID_TOKEN" \
+                  "$BACKEND_URL/api/healthz" 2>&1) || LAST_EXIT_CODE=$?
+                HTTP_BODY=$(echo "$HTTP_OUTPUT" | head -n -2)
+                LAST_HTTP_CODE=$(echo "$HTTP_OUTPUT" | tail -n 2 | head -n 1)
+                CURL_EXIT=$(echo "$HTTP_OUTPUT" | tail -n 1)
+              fi
+            fi
+            
+            # Save response for diagnostics
+            echo "$HTTP_BODY" > /tmp/health_response.json
+            
+            # Check if successful (HTTP 200-299)
+            if [ "$LAST_HTTP_CODE" -ge 200 ] && [ "$LAST_HTTP_CODE" -lt 300 ]; then
               echo ""
               echo "✅ Backend health check passed after ${ELAPSED} seconds!"
-              cat /tmp/health_response.json | jq '.' || cat /tmp/health_response.json
+              if command -v jq >/dev/null 2>&1; then
+                echo "$HTTP_BODY" | jq '.' 2>/dev/null || echo "$HTTP_BODY"
+              else
+                echo "$HTTP_BODY"
+              fi
               SUCCESS=true
               break
             else
-              HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 -H "Authorization: Bearer $ID_TOKEN" "$BACKEND_URL/api/healthz" 2>/dev/null || echo "000")
+              # Extract error message from stderr if available
+              LAST_ERROR=$(echo "$HTTP_OUTPUT" | grep -i "error\|timeout\|failed\|connection" | head -n 1 || echo "HTTP $LAST_HTTP_CODE")
               
               # Only print status every 10 attempts to reduce noise
               if [ $((ATTEMPT % 10)) -eq 0 ]; then
-                echo "⏳ Still waiting... (${ELAPSED}s elapsed, ${REMAINING}s remaining, HTTP $HTTP_CODE)"
+                echo "⏳ Still waiting... (${ELAPSED}s elapsed, ${REMAINING}s remaining, HTTP $LAST_HTTP_CODE, exit: $CURL_EXIT)"
               fi
-              
-              # Wait 1 second before next attempt
-              sleep 1
             fi
+            
+            # Wait before next attempt
+            sleep $SLEEP_BETWEEN_ATTEMPTS
           done
 
       - name: Pre-warm Backend Service
