@@ -1454,63 +1454,16 @@ class NonTextExtractor:
         return tables
     
     def extract_images_from_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
-        """Extract images and diagrams from PDF."""
-        # HARD REMOVE: Images are permanently disabled - always return empty
-        # This method is kept for API compatibility but never extracts images
-        logger.debug(f"Skipping image extraction from {Path(pdf_path).name} (HARD REMOVE: images permanently disabled)")
+        """
+        Extract images and diagrams from PDF.
+        
+        HARD REMOVE: This method is permanently disabled and always returns empty.
+        Images are never extracted to reduce index bloat and processing time.
+        """
+        # HARD REMOVE: Images are permanently disabled - always return empty immediately
+        # No image extraction code exists - this saves significant processing time
+        # All image extraction logic has been completely removed
         return []
-        
-        # Code below is unreachable but kept for reference
-        if False:  # Never executed
-            images = []
-        doc = fitz.open(pdf_path)
-        
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            image_list = page.get_images()
-            
-            for img_idx, img in enumerate(image_list):
-                try:
-                    # Get image data
-                    xref = img[0]
-                    pix = fitz.Pixmap(doc, xref)
-                    
-                    if pix.n - pix.alpha < 4:  # GRAY or RGB
-                        # Convert to PIL Image
-                        img_data = pix.tobytes("png")
-                        pil_image = Image.open(BytesIO(img_data))
-                        
-                        # Get image metadata
-                        img_rects = page.get_image_rects(xref)
-                        img_rect = img_rects[0] if img_rects else None
-                        
-                        # Create image info (NO base64 embedding - only metadata)
-                        image_info = {
-                            "source_path": pdf_path,
-                            "page_number": page_num + 1,
-                            "image_index": img_idx,
-                            # Removed: image_data base64 encoding (not needed for embeddings)
-                            "width": pil_image.width,
-                            "height": pil_image.height,
-                            "format": "PNG",
-                            "content_type": "image",
-                            "caption": f"Image from {Path(pdf_path).stem}, page {page_num + 1}",
-                            "bbox": str(img_rect) if img_rect else None
-                        }
-                        images.append(image_info)
-                        
-                        # Save image
-                        img_filename = f"{Path(pdf_path).stem}_page{page_num+1}_img{img_idx}.png"
-                        img_path = self.output_dir / img_filename
-                        pil_image.save(img_path)
-                        image_info["saved_path"] = str(img_path)
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to extract image {img_idx} from page {page_num + 1}: {e}")
-                    continue
-                    
-        doc.close()
-        return images
     
     def extract_figure_captions(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract figure captions and references."""
