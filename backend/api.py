@@ -1558,37 +1558,36 @@ async def health_check():
 @app.get("/healthz")
 @app.get("/api/healthz")
 # Note: /healthz and /api/healthz endpoints are NOT rate limited and have ZERO dependencies
+# These endpoints are intentionally unauthenticated for Cloud Run health checks
 async def healthz_check():
     """
-    Zero-dependency health check endpoint for Cloud Run and CI.
+    Zero-dependency liveness check endpoint for Cloud Run and CI.
     
     This endpoint returns 200 immediately without touching:
     - Database
     - GCS
     - Embeddings/Reranker models
     - RAG index
-    - Any other heavy dependencies
+    - Any other heavy dependencies or imports
+    
+    CRITICAL: This endpoint must respond even during cold starts when the app
+    is still initializing. It uses only standard library imports.
     
     Available at both /healthz and /api/healthz for compatibility.
     Use this for Cloud Run health checks and CI/CD pipelines.
     """
-    # Include index status (read-only, no dependencies)
-    index_status_str = "unknown"
-    index_ready = False
-    try:
-        from backend.rag.index_manager import get_index_load_state
-        load_state = get_index_load_state()
-        state = load_state.get_state()
-        index_status_str = state.get("status", "unknown")
-        index_ready = state.get("status") == "ready"
-    except Exception:
-        # If state tracker fails, assume not ready (safe default)
-        pass
+    import os
+    import time
     
+    # Return immediately with minimal info - no imports, no dependencies
+    # Use only standard library to ensure fast response
     return {
         "status": "ok",
-        "index_status": index_status_str,
-        "index_ready": index_ready,
+        "service": "arrow-rag-backend",
+        "timestamp": time.time(),
+        "pid": os.getpid(),
+        # Include revision if available from Cloud Run env (K_REVISION is set by Cloud Run)
+        "revision": os.getenv("K_REVISION", "unknown")
     }
 
 
@@ -1636,42 +1635,63 @@ async def readyz_check():
     Readiness check endpoint for Cloud Run.
     
     Returns:
-    - 200 if index is ready
+    - 200 if RAG index is ready to serve queries
     - 503 if index is loading, failed, or not started
     
     This endpoint checks if the RAG index is loaded and ready to serve queries.
+    It reads state only (non-blocking) and returns quickly.
     """
     try:
         from backend.rag.index_manager import get_index_load_state
         load_state = get_index_load_state()
         state = load_state.get_state()
+        rag_status = state.get("status", "unknown")
         
-        if state["status"] == "ready":
-            return {"status": "ready"}
-        elif state["status"] == "loading":
-            return JSONResponse(
-                status_code=503,
-                content={"status": "loading", "message": "Index is currently loading"}
-            )
-        elif state["status"] == "failed":
+        if rag_status == "ready":
+            return {
+                "ready": True,
+                "rag_state": rag_status,
+                "detail": "RAG index is ready to serve queries"
+            }
+        elif rag_status == "loading":
             return JSONResponse(
                 status_code=503,
                 content={
-                    "status": "failed",
-                    "error": state.get("error"),
-                    "message": f"Index loading failed: {state.get('error')}"
+                    "ready": False,
+                    "rag_state": rag_status,
+                    "detail": "Index is currently loading"
                 }
             )
-        else:  # not_started
+        elif rag_status == "failed":
+            error_msg = state.get("error", "Unknown error")
             return JSONResponse(
                 status_code=503,
-                content={"status": "not_started", "message": "Index loading has not started"}
+                content={
+                    "ready": False,
+                    "rag_state": rag_status,
+                    "error": error_msg,
+                    "detail": f"Index loading failed: {error_msg}"
+                }
+            )
+        else:  # not_started or unknown
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ready": False,
+                    "rag_state": rag_status,
+                    "detail": "Index loading has not started"
+                }
             )
     except Exception as e:
+        # If state tracker fails, assume not ready (safe default)
         logger.error("readyz_check_error", error=str(e), exc_info=True)
         return JSONResponse(
             status_code=503,
-            content={"status": "error", "error": f"Readiness check failed: {type(e).__name__}: {str(e)}"}
+            content={
+                "ready": False,
+                "rag_state": "error",
+                "error": f"Readiness check failed: {type(e).__name__}: {str(e)}"
+            }
         )
 
 
