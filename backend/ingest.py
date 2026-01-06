@@ -2606,11 +2606,14 @@ class TechnicalRAGPipeline:
         else:
             extract_images_enabled = bool(extract_images_raw)
         
-        # Log image extraction status for debugging (show actual config value)
+        # HARD REMOVE: Force disable images regardless of config (safety override)
+        # This ensures images are NEVER extracted even if config is misconfigured
         if extract_images_enabled:
-            logger.warning(f"⚠️ Image extraction is ENABLED (config value: {extract_images_raw}, type: {type(extract_images_raw).__name__}) - this will slow down ingestion. Set non_text.extract_images: false in config.yaml to disable.")
-        else:
-            logger.info(f"✅ Image extraction is DISABLED (config value: {extract_images_raw}, type: {type(extract_images_raw).__name__}) - skipping image extraction for faster ingestion")
+            logger.warning(f"⚠️ Config has extract_images=True, but HARD REMOVE override is active - images will be DISABLED")
+            logger.warning(f"   Original config value: {extract_images_raw} (type: {type(extract_images_raw).__name__})")
+        extract_images_enabled = False  # HARD OVERRIDE: Always disable images
+        
+        logger.info(f"✅ Image extraction is DISABLED (HARD REMOVE active) - skipping image extraction for faster ingestion")
         
         # Find all PDF files (recursive; GCS staging uses nested directories like documents/<metadata_id>/<file>.pdf)
         pdf_files = list(Path(data_dir).rglob("*.pdf"))
@@ -2626,10 +2629,15 @@ class TechnicalRAGPipeline:
                 logger.info(f"Extracted {len(tables)} tables from {pdf_path.name}")
                 
                 # Extract images (only if enabled - extract_images_from_pdf also checks internally)
+                # HARD REMOVE: Double-check to prevent accidental image extraction
                 if extract_images_enabled:
-                    images = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
-                    all_images.extend(images)
-                    logger.info(f"Extracted {len(images)} images from {pdf_path.name}")
+                    # Additional safety check - verify NonTextExtractor also has it disabled
+                    if self.non_text_extractor.extract_images_enabled:
+                        images = self.non_text_extractor.extract_images_from_pdf(str(pdf_path))
+                        all_images.extend(images)
+                        logger.info(f"Extracted {len(images)} images from {pdf_path.name}")
+                    else:
+                        logger.warning(f"⚠️ Config mismatch: process_non_text_content says enabled but NonTextExtractor says disabled - skipping images")
                 else:
                     # Explicitly skip to avoid any extraction overhead
                     logger.debug(f"Skipping image extraction from {pdf_path.name} (images disabled)")
@@ -4544,7 +4552,16 @@ def main():
     
     # Initialize pipeline (skip in preflight mode)
     if not preflight:
-        pipeline = TechnicalRAGPipeline()
+        # Find config.yaml - try repo root first, then current directory
+        config_path = "config.yaml"
+        repo_config = REPO_ROOT / "config.yaml"
+        if repo_config.exists():
+            config_path = str(repo_config)
+            logger.info(f"Using config from repo root: {config_path}")
+        elif not os.path.exists(config_path):
+            logger.warning(f"Config file not found at {config_path} or {repo_config}, using defaults")
+        
+        pipeline = TechnicalRAGPipeline(config_path=config_path)
         use_qdrant = _env_bool("USE_QDRANT", default=False)
         if use_qdrant:
             raise RuntimeError("Production promotion flow requires local index artifacts; USE_QDRANT must be false.")
