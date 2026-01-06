@@ -498,8 +498,11 @@ class TextPreprocessor:
         
         return cleaned
     
-    def is_low_content_page(self, text: str, min_words: int = 15) -> bool:
+    def is_low_content_page(self, text: str, min_words: int = None) -> bool:
         """Check if a page has too little content to be useful."""
+        # Allow override via environment variable (default: 5 words, was 15)
+        if min_words is None:
+            min_words = int(os.getenv("MIN_WORDS_PER_PAGE", "5"))
         # Non-allocating word count: count transitions from whitespace to non-whitespace
         word_count = 0
         was_whitespace = True
