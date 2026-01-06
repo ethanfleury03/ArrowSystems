@@ -2337,6 +2337,12 @@ class TechnicalRAGPipeline:
         self.reranker = None
         self.index = None
         self.config = self._load_config(config_path)
+        
+        # Log config status for debugging
+        non_text_config = self.config.get("non_text", {})
+        extract_images = non_text_config.get("extract_images", False)
+        logger.info(f"📋 Config loaded: extract_images={extract_images}, extract_tables={non_text_config.get('extract_tables', True)}, extract_captions={non_text_config.get('extract_captions', True)}")
+        
         # Pass config to NonTextExtractor so it can check extract_images flag
         self.non_text_extractor = NonTextExtractor(config=self.config)
         self.text_preprocessor = TextPreprocessor()
@@ -2370,16 +2376,35 @@ class TechnicalRAGPipeline:
             "chunking": {
                 "chunk_size": 512,
                 "chunk_overlap": 128
+            },
+            "non_text": {
+                "extract_images": False,  # Default to disabled for performance
+                "extract_tables": True,
+                "extract_captions": True
             }
         }
+        
+        # Try to find config.yaml in repo root if not found at specified path
+        if not os.path.exists(config_path):
+            # Try repo root
+            repo_config = REPO_ROOT / "config.yaml"
+            if repo_config.exists():
+                config_path = str(repo_config)
+                logger.info(f"Using config from repo root: {config_path}")
         
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
                     config = yaml.safe_load(f)
-                return {**default_config, **config}
+                # Deep merge to preserve nested defaults
+                merged = {**default_config, **config}
+                if "non_text" in config and "non_text" in default_config:
+                    merged["non_text"] = {**default_config["non_text"], **config.get("non_text", {})}
+                return merged
             except Exception as e:
                 logger.warning(f"Failed to load config: {e}, using defaults")
+        else:
+            logger.warning(f"Config file not found at {config_path}, using defaults")
         
         return default_config
         
@@ -2556,7 +2581,15 @@ class TechnicalRAGPipeline:
         all_captions = []
         
         # Check config for image extraction (single source of truth)
-        extract_images_enabled = bool(self.config.get("non_text", {}).get("extract_images", False))
+        non_text_config = self.config.get("non_text", {})
+        extract_images_enabled = bool(non_text_config.get("extract_images", False))
+        
+        # Log image extraction status for debugging (show actual config value)
+        config_value = non_text_config.get("extract_images", "not set")
+        if extract_images_enabled:
+            logger.warning(f"⚠️ Image extraction is ENABLED (config value: {config_value}) - this will slow down ingestion. Set non_text.extract_images: false in config.yaml to disable.")
+        else:
+            logger.info(f"✅ Image extraction is DISABLED (config value: {config_value}) - skipping image extraction for faster ingestion")
         
         # Find all PDF files (recursive; GCS staging uses nested directories like documents/<metadata_id>/<file>.pdf)
         pdf_files = list(Path(data_dir).rglob("*.pdf"))
