@@ -3764,7 +3764,8 @@ class RAGOrchestrator:
             
             # LAZY IMPORT: Import build_offline_embedding here (not at module level)
             # This keeps startup fast and avoids circular imports
-            from backend.utils.embedding_utils import build_offline_embedding
+            # Use relative import for consistency with other imports in this file
+            from .utils.embedding_utils import build_offline_embedding
             
             # Use offline embedding helper (enforces local_files_only=True)
             self.embed_model = build_offline_embedding(
@@ -3783,7 +3784,7 @@ class RAGOrchestrator:
             print(f"[RAG] embedding_model_load_failed: {error_msg}\n{traceback.format_exc()}", flush=True)
             raise RuntimeError(
                 f"Could not load embedding model {model_name}: function 'build_offline_embedding' is not in scope. "
-                f"This is an import error, not a cache issue. Check that 'from backend.utils.embedding_utils import build_offline_embedding' "
+                f"This is an import error, not a cache issue. Check that 'from .utils.embedding_utils import build_offline_embedding' "
                 f"is present in initialize_models(). Original error: {e}"
             ) from e
         except Exception as e:
