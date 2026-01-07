@@ -4509,7 +4509,7 @@ class RAGOrchestrator:
                 logger.debug(f"Validated Q&A lookup skipped: {e}")
         
         # Step 1: Classify intent
-        intent = self.intent_classifier.classify(query)
+        intent = self._ensure_intent_classifier().classify(query)
         logger.info(f"📋 Intent: {intent.intent_type} (confidence: {intent.confidence:.2%})")
         
         # 🚀 NEW: Step 1.5 - Query Decomposition (for complex queries)
