@@ -3809,7 +3809,7 @@ class RAGOrchestrator:
         
         # Re-ranker model
         try:
-            import os
+            # Note: os is already imported at module level (line 13)
             import time
             pid = os.getpid()
             hostname = os.getenv("HOSTNAME", "unknown")
@@ -3819,19 +3819,41 @@ class RAGOrchestrator:
             logger.info("[RAG] reranker_model_load_begin", message="Loading re-ranker model...")
             print(f"[RAG] reranker_load_START pid={pid} hostname={hostname} revision={revision} cache_dir={self.cache_dir} device={device}", flush=True)
             
+            # CRITICAL: Ensure offline mode is enforced before loading CrossEncoder
+            # CrossEncoder from sentence-transformers may not respect HF_HUB_OFFLINE by default
+            # Set environment variables explicitly to prevent network downloads
+            original_hf_hub_offline = os.environ.get("HF_HUB_OFFLINE", "")
+            original_transformers_offline = os.environ.get("TRANSFORMERS_OFFLINE", "")
             try:
-                # Try with cache_folder first (older sentence-transformers)
-                self.reranker = CrossEncoder(
-                    "BAAI/bge-reranker-large",
-                    cache_folder=self.cache_dir,
-                    device=device
-                )
-            except TypeError:
-                # Fallback for newer sentence-transformers that don't support cache_folder
-                self.reranker = CrossEncoder(
-                    "BAAI/bge-reranker-large",
-                    device=device
-                )
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
+                os.environ["HF_HOME"] = self.cache_dir
+                os.environ["TRANSFORMERS_CACHE"] = self.cache_dir
+                os.environ["SENTENCE_TRANSFORMERS_HOME"] = self.cache_dir
+                
+                try:
+                    # Try with cache_folder first (older sentence-transformers)
+                    self.reranker = CrossEncoder(
+                        "BAAI/bge-reranker-large",
+                        cache_folder=self.cache_dir,
+                        device=device
+                    )
+                except TypeError:
+                    # Fallback for newer sentence-transformers that don't support cache_folder
+                    self.reranker = CrossEncoder(
+                        "BAAI/bge-reranker-large",
+                        device=device
+                    )
+            finally:
+                # Restore original env vars (though they should already be set correctly)
+                if original_hf_hub_offline:
+                    os.environ["HF_HUB_OFFLINE"] = original_hf_hub_offline
+                else:
+                    os.environ["HF_HUB_OFFLINE"] = "1"  # Keep offline mode
+                if original_transformers_offline:
+                    os.environ["TRANSFORMERS_OFFLINE"] = original_transformers_offline
+                else:
+                    os.environ["TRANSFORMERS_OFFLINE"] = "1"  # Keep offline mode
             
             reranker_duration = time.time() - reranker_start
             logger.info("reranker_loaded", device=device)
@@ -4149,7 +4171,7 @@ class RAGOrchestrator:
             # But since ingestion uses default, we don't specify index_id
             
             # CRITICAL CHECKPOINT: About to parse vector store (this is the slowest operation)
-            import os
+            # Note: os is already imported at module level (line 13), don't import again to avoid UnboundLocalError
             import time
             pid = os.getpid()
             hostname = os.getenv("HOSTNAME", "unknown")
