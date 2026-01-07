@@ -799,6 +799,28 @@ async def startup_event():
     from .config.env import settings
     
     startup_begin_time = time.time()
+    # Log Gunicorn timeout configuration (critical for worker boot)
+    gunicorn_timeout = os.getenv("GUNICORN_TIMEOUT", "600")
+    gunicorn_workers = os.getenv("GUNICORN_WORKERS", "1")
+    logger.info(f"[GUNICORN] timeout={gunicorn_timeout}s workers={gunicorn_workers}")
+    print(f"[GUNICORN] timeout={gunicorn_timeout}s workers={gunicorn_workers}", flush=True)
+    
+    # Check if heavy imports happened at module import time (should be False after lazy import fix)
+    try:
+        import sys
+        heavy_modules_imported = (
+            'torch' in sys.modules or
+            'sentence_transformers' in sys.modules or
+            'llama_index.embeddings.huggingface' in sys.modules
+        )
+        logger.info(f"[GUNICORN] heavy_imports_at_module_level={heavy_modules_imported}")
+        print(f"[GUNICORN] heavy_imports_at_module_level={heavy_modules_imported}", flush=True)
+        if heavy_modules_imported:
+            logger.warning("[GUNICORN] WARNING: Heavy ML imports detected at module level - this may cause worker boot timeouts!")
+            print("[GUNICORN] WARNING: Heavy ML imports detected at module level - this may cause worker boot timeouts!", flush=True)
+    except Exception:
+        pass  # Non-fatal check
+    
     log_checkpoint("startup_event: begin")
     
     try:

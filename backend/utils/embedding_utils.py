@@ -3,11 +3,17 @@ Offline embedding model utilities for RAG pipeline.
 
 This module provides helpers to load embedding models in offline mode,
 ensuring no network calls are made at runtime in production.
+
+CRITICAL: Heavy imports (llama_index, sentence_transformers, torch) are lazy-loaded
+to prevent Gunicorn worker boot timeouts during module import.
 """
 
 import os
 from typing import Optional
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+# LAZY IMPORT: Do NOT import llama_index at module level
+# This prevents torch/sentence_transformers from being imported during worker boot
+# Import will happen inside build_offline_embedding() when actually needed
 
 
 def build_offline_embedding(
@@ -38,6 +44,10 @@ def build_offline_embedding(
     Raises:
         RuntimeError: If model cannot be loaded from cache (offline mode)
     """
+    # LAZY IMPORT: Import only when function is called (not at module import time)
+    # This prevents torch/sentence_transformers from blocking Gunicorn worker boot
+    from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+    
     # Determine cache directory
     cache_dir = cache_dir or os.getenv("HF_HOME", "/app/.cache/huggingface")
     
