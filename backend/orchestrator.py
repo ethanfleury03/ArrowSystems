@@ -3762,6 +3762,10 @@ class RAGOrchestrator:
         try:
             logger.info(f"Loading embedding model: {display_name} ({model_name})")
             
+            # LAZY IMPORT: Import build_offline_embedding here (not at module level)
+            # This keeps startup fast and avoids circular imports
+            from backend.utils.embedding_utils import build_offline_embedding
+            
             # Use offline embedding helper (enforces local_files_only=True)
             self.embed_model = build_offline_embedding(
                 model_name=model_name,
@@ -3771,15 +3775,36 @@ class RAGOrchestrator:
             logger.info("embedding_model_loaded", model=display_name, device=device, offline=True)
             logger.info("[RAG] embedding_model_load_done")
             print("[RAG] embedding_model_load_done", flush=True)
+        except NameError as e:
+            # CRITICAL: Catch NameError separately to expose import issues
+            import traceback
+            error_msg = f"NameError: build_offline_embedding is not defined. Check imports in initialize_models(). Original: {type(e).__name__}: {str(e)}"
+            logger.error(f"[RAG] embedding_model_load_failed: {error_msg}", exc_info=True)
+            print(f"[RAG] embedding_model_load_failed: {error_msg}\n{traceback.format_exc()}", flush=True)
+            raise RuntimeError(
+                f"Could not load embedding model {model_name}: function 'build_offline_embedding' is not in scope. "
+                f"This is an import error, not a cache issue. Check that 'from backend.utils.embedding_utils import build_offline_embedding' "
+                f"is present in initialize_models(). Original error: {e}"
+            ) from e
         except Exception as e:
             import traceback
+            # Check if it's an import error disguised as something else
+            if "build_offline_embedding" in str(e) and ("not defined" in str(e) or "cannot be resolved" in str(e)):
+                error_msg = f"Import error: build_offline_embedding is not accessible. Original: {type(e).__name__}: {str(e)}"
+                logger.error(f"[RAG] embedding_model_load_failed: {error_msg}", exc_info=True)
+                print(f"[RAG] embedding_model_load_failed: {error_msg}\n{traceback.format_exc()}", flush=True)
+                raise RuntimeError(
+                    f"Could not load embedding model {model_name}: function 'build_offline_embedding' is not in scope. "
+                    f"This is an import error. Check imports in initialize_models(). Original error: {e}"
+                ) from e
+            
             logger.error(f"[RAG] embedding_model_load_failed: {type(e).__name__}: {str(e)}", exc_info=True)
             print(f"[RAG] embedding_model_load_failed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}", flush=True)
             raise RuntimeError(
                 f"Could not load embedding model {model_name} from cache. "
                 f"Index was built with this model (1024 dim). "
-                f"Ensure model is pre-downloaded in Dockerfile. Error: {e}"
-            )
+                f"Ensure model is pre-downloaded in Dockerfile. Error: {type(e).__name__}: {str(e)}"
+            ) from e
         
         # Re-ranker model
         try:
