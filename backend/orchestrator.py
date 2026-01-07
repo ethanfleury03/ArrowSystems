@@ -4061,6 +4061,12 @@ class RAGOrchestrator:
             # If ingestion used a custom index_id, we would need to pass it here:
             # self.index = load_index_from_storage(storage_context, index_id="custom_id")
             # But since ingestion uses default, we don't specify index_id
+            
+            # CRITICAL CHECKPOINT: About to parse vector store (this is the slowest operation)
+            logger.info(f"[RESOURCE] rag_vector_store_parse_start storage_dir={storage_dir}")
+            print(f"[RESOURCE] rag_vector_store_parse_start storage_dir={storage_dir}", flush=True)
+            log_resource_checkpoint("rag_vector_store_parse_start", logger)
+            
             # Wrap in timeout to prevent indefinite hangs (e.g., from corrupted files)
             load_result = [None]
             load_exception = [None]
@@ -4092,6 +4098,11 @@ class RAGOrchestrator:
             if load_exception[0]:
                 # Re-raise the exception from the thread
                 raise load_exception[0]
+            
+            # CRITICAL CHECKPOINT: Vector store parse complete
+            logger.info(f"[RESOURCE] rag_vector_store_parse_done storage_dir={storage_dir}")
+            print(f"[RESOURCE] rag_vector_store_parse_done storage_dir={storage_dir}", flush=True)
+            log_resource_checkpoint("rag_vector_store_parse_done", logger)
             
             self.index = load_result[0]
             
