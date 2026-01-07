@@ -265,264 +265,299 @@ def download_index_from_gcs() -> bool:
 
         log_resource_checkpoint("rag_gcs_download_start")
         # Track download results
-    required_success: list[str] = []
-    required_failures: list[str] = []
-    optional_results: dict[str, str] = {}
-    download_errors: dict[str, str] = {}
+        required_success: list[str] = []
+        required_failures: list[str] = []
+        optional_results: dict[str, str] = {}
+        download_errors: dict[str, str] = {}
 
-    # List objects under prefix (helps debug prefix mismatch)
-    objects_under_prefix: list[str] = []
-    if index_prefix:
-        objects_under_prefix = _list_objects(bucket, index_prefix)
-        logger.info(
-            "[RAG] Objects under configured prefix",
-            bucket=bucket_name,
-            prefix=index_prefix,
-            count=len(objects_under_prefix),
-        )
-    else:
-        logger.info("[RAG] Prefix is empty (bucket root). Skipping prefix listing to avoid huge scans.")
+        # List objects under prefix (helps debug prefix mismatch)
+        objects_under_prefix: list[str] = []
+        if index_prefix:
+            objects_under_prefix = _list_objects(bucket, index_prefix)
+            logger.info(
+                "[RAG] Objects under configured prefix",
+                bucket=bucket_name,
+                prefix=index_prefix,
+                count=len(objects_under_prefix),
+            )
+        else:
+            logger.info("[RAG] Prefix is empty (bucket root). Skipping prefix listing to avoid huge scans.")
 
-    prefixes_to_try: list[str] = [index_prefix]
-    if index_prefix and len(objects_under_prefix) == 0:
-        prefixes_to_try = [index_prefix, ""]
-        logger.warning(
-            "[RAG] No objects found under configured prefix; attempting fallback root lookup for known filenames",
-            bucket=bucket_name,
-            prefix=index_prefix,
-        )
-    elif not index_prefix:
-        prefixes_to_try = [""]
+        prefixes_to_try: list[str] = [index_prefix]
+        if index_prefix and len(objects_under_prefix) == 0:
+            prefixes_to_try = [index_prefix, ""]
+            logger.warning(
+                "[RAG] No objects found under configured prefix; attempting fallback root lookup for known filenames",
+                bucket=bucket_name,
+                prefix=index_prefix,
+            )
+        elif not index_prefix:
+            prefixes_to_try = [""]
 
-    # Initialize file tracking
-    all_files = REQUIRED_FILES + OPTIONAL_FILES
-    init_file_tracking(all_files)
+        # Initialize file tracking
+        all_files = REQUIRED_FILES + OPTIONAL_FILES
+        init_file_tracking(all_files)
 
-    def _download_one(prefix: str, filename: str) -> bool:
-        gcs_obj = f"{prefix}{filename}" if prefix else filename
-        # Always download into temp dir first (atomic)
-        local_file_path = tmp_dir / filename
-        t0 = time.time()
-        
-        try:
-            blob = bucket.blob(gcs_obj)
+        def _download_one(prefix: str, filename: str) -> bool:
+            gcs_obj = f"{prefix}{filename}" if prefix else filename
+            # Always download into temp dir first (atomic)
+            local_file_path = tmp_dir / filename
+            t0 = time.time()
             
-            # Get blob size if available (for progress tracking)
             try:
-                blob.reload()
-                size_bytes = blob.size or 0
-            except Exception:
-                size_bytes = 0
-            
-            update_file_start(filename, size_bytes)
-            
-            gcs_path = f"gs://{bucket_name}/{gcs_obj}"
-            print(f"[RAG] Downloading {filename} from {gcs_path}...", flush=True)
-            logger.info(
-                "[RAG] Downloading file...",
-                filename=filename,
-                gcs_path=gcs_path,
-                size_bytes=size_bytes,
-                attempt=1,
-            )
-            
-            # Wrap download in timeout to prevent indefinite hangs
-            # Default timeout: 10 minutes per file (configurable via env var)
-            download_timeout = int(os.getenv("RAG_DOWNLOAD_TIMEOUT_SEC", "600"))  # 10 minutes default
-            
-            # Configure retry with timeout to prevent indefinite retries
-            from google.api_core import retry as api_retry
-            
-            # Custom retry that respects timeout
-            custom_retry = api_retry.Retry(
-                predicate=api_retry.if_exception_type(Exception),
-                initial=1.0,  # Initial delay 1 second
-                maximum=60.0,  # Max delay 60 seconds
-                multiplier=2.0,  # Exponential backoff
-                timeout=download_timeout,  # Total timeout for all retries
-            )
-            
-            # Use threading timeout as additional safety net
-            download_result = [None]
-            download_exception = [None]
-            
-            def _download_with_timeout():
+                blob = bucket.blob(gcs_obj)
+                
+                # Get blob size if available (for progress tracking)
                 try:
-                    # Pass custom retry to download method
-                    download_result[0] = blob.download_to_filename(
-                        str(local_file_path),
-                        retry=custom_retry
-                    )
-                except Exception as e:
-                    download_exception[0] = e
-            
-            download_thread = threading.Thread(target=_download_with_timeout, daemon=True)
-            download_thread.start()
-            download_thread.join(timeout=download_timeout + 10)  # Add 10s buffer for thread overhead
-            
-            if download_thread.is_alive():
-                # Thread is still running - timeout occurred
-                elapsed = time.time() - t0
-                error_msg = (
-                    f"Download timed out after {download_timeout} seconds. "
-                    f"This usually indicates network issues, very large files, or GCS connectivity problems. "
-                    f"File: {filename}, Size: {size_bytes:,} bytes. "
-                    f"Check GCS bucket permissions and network connectivity."
-                )
-                logger.error(
-                    "[RAG] Download timeout",
+                    blob.reload()
+                    size_bytes = blob.size or 0
+                except Exception:
+                    size_bytes = 0
+                
+                update_file_start(filename, size_bytes)
+                
+                gcs_path = f"gs://{bucket_name}/{gcs_obj}"
+                print(f"[RAG] Downloading {filename} from {gcs_path}...", flush=True)
+                logger.info(
+                    "[RAG] Downloading file...",
                     filename=filename,
                     gcs_path=gcs_path,
-                    timeout_seconds=download_timeout,
-                    elapsed_s=elapsed,
                     size_bytes=size_bytes,
-                    message=error_msg,
+                    attempt=1,
                 )
-                update_file_error(filename, error_msg, elapsed)
-                return False
-            
-            if download_exception[0]:
-                # Re-raise the exception from the thread
-                raise download_exception[0]
-            
-            if not local_file_path.exists():
+                
+                # Wrap download in timeout to prevent indefinite hangs
+                # Default timeout: 10 minutes per file (configurable via env var)
+                download_timeout = int(os.getenv("RAG_DOWNLOAD_TIMEOUT_SEC", "600"))  # 10 minutes default
+                
+                # Configure retry with timeout to prevent indefinite retries
+                from google.api_core import retry as api_retry
+                
+                # Custom retry that respects timeout
+                custom_retry = api_retry.Retry(
+                    predicate=api_retry.if_exception_type(Exception),
+                    initial=1.0,  # Initial delay 1 second
+                    maximum=60.0,  # Max delay 60 seconds
+                    multiplier=2.0,  # Exponential backoff
+                    timeout=download_timeout,  # Total timeout for all retries
+                )
+                
+                # Use threading timeout as additional safety net
+                download_result = [None]
+                download_exception = [None]
+                
+                def _download_with_timeout():
+                    try:
+                        # Pass custom retry to download method
+                        download_result[0] = blob.download_to_filename(
+                            str(local_file_path),
+                            retry=custom_retry
+                        )
+                    except Exception as e:
+                        download_exception[0] = e
+                
+                download_thread = threading.Thread(target=_download_with_timeout, daemon=True)
+                download_thread.start()
+                download_thread.join(timeout=download_timeout + 10)  # Add 10s buffer for thread overhead
+                
+                if download_thread.is_alive():
+                    # Thread is still running - timeout occurred
+                    elapsed = time.time() - t0
+                    error_msg = (
+                        f"Download timed out after {download_timeout} seconds. "
+                        f"This usually indicates network issues, very large files, or GCS connectivity problems. "
+                        f"File: {filename}, Size: {size_bytes:,} bytes. "
+                        f"Check GCS bucket permissions and network connectivity."
+                    )
+                    logger.error(
+                        "[RAG] Download timeout",
+                        filename=filename,
+                        gcs_path=gcs_path,
+                        timeout_seconds=download_timeout,
+                        elapsed_s=elapsed,
+                        size_bytes=size_bytes,
+                        message=error_msg,
+                    )
+                    update_file_error(filename, error_msg, elapsed)
+                    return False
+                
+                if download_exception[0]:
+                    # Re-raise the exception from the thread
+                    raise download_exception[0]
+                
+                if not local_file_path.exists():
+                    elapsed = time.time() - t0
+                    error_msg = "Download completed but file not found locally"
+                    logger.error(
+                        "[RAG] Download completed but file not found locally",
+                        filename=filename,
+                        local_path=str(local_file_path),
+                        gcs_path=gcs_path,
+                        elapsed_s=elapsed,
+                    )
+                    update_file_error(filename, error_msg, elapsed)
+                    return False
+                
+                # Get actual file size
+                actual_size = local_file_path.stat().st_size
                 elapsed = time.time() - t0
-                error_msg = "Download completed but file not found locally"
-                logger.error(
-                    "[RAG] Download completed but file not found locally",
+                
+                update_file_success(filename, actual_size, elapsed)
+                
+                logger.info(
+                    "[RAG] Downloaded file",
                     filename=filename,
-                    local_path=str(local_file_path),
                     gcs_path=gcs_path,
+                    size_bytes=actual_size,
+                    local_path=str(local_file_path),
                     elapsed_s=elapsed,
                 )
-                update_file_error(filename, error_msg, elapsed)
+                print(f"[RAG] ✅ Downloaded {filename} ({actual_size:,} bytes in {elapsed:.2f}s)", flush=True)
+                return True
+            
+            except Exception as e:
+                elapsed = time.time() - t0
+                error_type = type(e).__name__
+                error_msg = str(e)
+                status_code = getattr(e, "status_code", None)
+                
+                full_error = f"{error_type}: {error_msg}"
+                if status_code:
+                    full_error = f"{error_type} (status={status_code}): {error_msg}"
+                
+                logger.error(
+                    "[RAG] Download failed",
+                    filename=filename,
+                    gcs_path=f"gs://{bucket_name}/{gcs_obj}",
+                    error=full_error,
+                    elapsed_s=elapsed,
+                    status_code=status_code,
+                    exc_info=True,
+                )
+                download_errors.setdefault(filename, full_error)
+                update_file_error(filename, full_error, elapsed)
                 return False
-            
-            # Get actual file size
-            actual_size = local_file_path.stat().st_size
-            elapsed = time.time() - t0
-            
-            update_file_success(filename, actual_size, elapsed)
-            
-            logger.info(
-                "[RAG] Downloaded file",
-                filename=filename,
-                gcs_path=gcs_path,
-                size_bytes=actual_size,
-                local_path=str(local_file_path),
-                elapsed_s=elapsed,
+
+        # Download required files
+        logger.info("[RAG] Downloading required index files...", files=REQUIRED_FILES, prefixes_to_try=prefixes_to_try)
+        for filename in REQUIRED_FILES:
+            downloaded = False
+            for pfx in prefixes_to_try:
+                if _download_one(pfx, filename):
+                    downloaded = True
+                    break
+            if downloaded:
+                required_success.append(filename)
+            else:
+                required_failures.append(filename)
+
+        # Download optional files (non-blocking)
+        logger.info("[RAG] Downloading optional index files...", files=OPTIONAL_FILES, prefixes_to_try=prefixes_to_try)
+        for filename in OPTIONAL_FILES:
+            downloaded = False
+            for pfx in prefixes_to_try:
+                if _download_one(pfx, filename):
+                    downloaded = True
+                    break
+            optional_results[filename] = "success" if downloaded else "not_found"
+
+        # Validate results
+        if required_failures:
+            failure_reasons = {f: download_errors.get(f) for f in required_failures if download_errors.get(f)}
+            error_msg = (
+                f"Index download failed for required files. "
+                f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} missing={required_failures} "
+                f"local_dir={str(local_path)} "
+                f"sample_errors={failure_reasons}"
             )
-            print(f"[RAG] ✅ Downloaded {filename} ({actual_size:,} bytes in {elapsed:.2f}s)", flush=True)
-            return True
-            
-        except Exception as e:
-            elapsed = time.time() - t0
-            error_type = type(e).__name__
-            error_msg = str(e)
-            status_code = getattr(e, "status_code", None)
-            
-            full_error = f"{error_type}: {error_msg}"
-            if status_code:
-                full_error = f"{error_type} (status={status_code}): {error_msg}"
-            
             logger.error(
-                "[RAG] Download failed",
-                filename=filename,
-                gcs_path=f"gs://{bucket_name}/{gcs_obj}",
-                error=full_error,
-                elapsed_s=elapsed,
-                status_code=status_code,
-                exc_info=True,
+                "[RAG] Index download failed — missing required files",
+                bucket=bucket_name,
+                prefix=index_prefix,
+                prefixes_tried=prefixes_to_try,
+                required_failures=required_failures,
+                required_success=required_success,
+                failure_reasons=failure_reasons,
+                objects_under_prefix_count=len(objects_under_prefix),
+                objects_under_prefix_sample=objects_under_prefix[:25],
+                local_dir=str(local_path),
+                message=f"Failed to download {len(required_failures)} required file(s): {', '.join(required_failures)}",
             )
-            download_errors.setdefault(filename, full_error)
-            update_file_error(filename, full_error, elapsed)
+            _last_download_error = error_msg
+            set_phase("error", error=error_msg)
             return False
 
-    # Download required files
-    logger.info("[RAG] Downloading required index files...", files=REQUIRED_FILES, prefixes_to_try=prefixes_to_try)
-    for filename in REQUIRED_FILES:
-        downloaded = False
-        for pfx in prefixes_to_try:
-            if _download_one(pfx, filename):
-                downloaded = True
-                break
-        if downloaded:
-            required_success.append(filename)
-        else:
-            required_failures.append(filename)
+        # Verify all required files are present in temp dir
+        missing_locally = [f for f in REQUIRED_FILES if not (tmp_dir / f).exists()]
+        if missing_locally:
+            try:
+                local_listing = sorted([p.name for p in tmp_dir.iterdir() if p.is_file()])
+            except Exception:
+                local_listing = []
+            error_msg = (
+                f"Validation failed: required files missing locally after download: {missing_locally}. "
+                f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} local_dir={str(tmp_dir)}"
+            )
+            logger.error(
+                "[RAG] Validation failed — files missing after download",
+                missing_files=missing_locally,
+                local_dir=str(tmp_dir),
+                local_files=local_listing,
+                bucket=bucket_name,
+                prefix=index_prefix,
+                prefixes_tried=prefixes_to_try,
+                message=f"Files not found locally after download: {', '.join(missing_locally)}",
+            )
+            _last_download_error = error_msg
+            set_phase("error", error=error_msg)
+            return False
 
-    # Download optional files (non-blocking)
-    logger.info("[RAG] Downloading optional index files...", files=OPTIONAL_FILES, prefixes_to_try=prefixes_to_try)
-    for filename in OPTIONAL_FILES:
-        downloaded = False
-        for pfx in prefixes_to_try:
-            if _download_one(pfx, filename):
-                downloaded = True
-                break
-        optional_results[filename] = "success" if downloaded else "not_found"
-
-    # Validate results
-    if required_failures:
-        failure_reasons = {f: download_errors.get(f) for f in required_failures if download_errors.get(f)}
-        error_msg = (
-            f"Index download failed for required files. "
-            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} missing={required_failures} "
-            f"local_dir={str(local_path)} "
-            f"sample_errors={failure_reasons}"
-        )
-        logger.error(
-            "[RAG] Index download failed — missing required files",
-            bucket=bucket_name,
-            prefix=index_prefix,
-            prefixes_tried=prefixes_to_try,
-            required_failures=required_failures,
-            required_success=required_success,
-            failure_reasons=failure_reasons,
-            objects_under_prefix_count=len(objects_under_prefix),
-            objects_under_prefix_sample=objects_under_prefix[:25],
-            local_dir=str(local_path),
-            message=f"Failed to download {len(required_failures)} required file(s): {', '.join(required_failures)}",
-        )
-        _last_download_error = error_msg
-        set_phase("error", error=error_msg)
-        return False
-
-    # Verify all required files are present in temp dir
-    missing_locally = [f for f in REQUIRED_FILES if not (tmp_dir / f).exists()]
-    if missing_locally:
+        # If final dir already exists and is valid, prefer it and discard temp
         try:
-            local_listing = sorted([p.name for p in tmp_dir.iterdir() if p.is_file()])
+            final_valid = True
+            for f in REQUIRED_FILES:
+                p = local_path / f
+                if not p.exists() or p.stat().st_size <= 1024:
+                    final_valid = False
+                    break
+            if final_valid:
+                logger.info("[RAG] Final dir already valid; skipping atomic move", final_dir=str(local_path))
+                # Cleanup tmp
+                try:
+                    if tmp_dir.exists():
+                        for p in tmp_dir.glob("*"):
+                            try:
+                                p.unlink()
+                            except Exception:
+                                pass
+                        tmp_dir.rmdir()
+                except Exception:
+                    pass
+                set_phase("downloaded", local_dir=str(local_path))
+                return True
         except Exception:
-            local_listing = []
-        error_msg = (
-            f"Validation failed: required files missing locally after download: {missing_locally}. "
-            f"bucket=gs://{bucket_name}/ prefix={index_prefix!r} local_dir={str(tmp_dir)}"
-        )
-        logger.error(
-            "[RAG] Validation failed — files missing after download",
-            missing_files=missing_locally,
-            local_dir=str(tmp_dir),
-            local_files=local_listing,
-            bucket=bucket_name,
-            prefix=index_prefix,
-            prefixes_tried=prefixes_to_try,
-            message=f"Files not found locally after download: {', '.join(missing_locally)}",
-        )
-        _last_download_error = error_msg
-        set_phase("error", error=error_msg)
-        return False
+            pass
 
-    # If final dir already exists and is valid, prefer it and discard temp
-    try:
-        final_valid = True
-        for f in REQUIRED_FILES:
-            p = local_path / f
-            if not p.exists() or p.stat().st_size <= 1024:
-                final_valid = False
-                break
-        if final_valid:
-            logger.info("[RAG] Final dir already valid; skipping atomic move", final_dir=str(local_path))
-            # Cleanup tmp
+        # Atomically move temp files into final location, file-by-file (avoid clobbering valid dir)
+        try:
+            # Ensure parent and final dir exist
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.mkdir(parents=True, exist_ok=True)
+            # Move files from tmp to final
+            moved = 0
+            for p in tmp_dir.glob("*"):
+                target = local_path / p.name
+                try:
+                    p.replace(target)
+                    moved += 1
+                except Exception as e:
+                    logger.error("[RAG] Failed moving file to final dir", src=str(p), dst=str(target), error=str(e))
+                    _last_download_error = f"Atomic move failed: {type(e).__name__}: {e}"
+                    set_phase("error", error=_last_download_error)
+                    return False
+            logger.info("[RAG] Atomic move complete", files_moved=moved, final_dir=str(local_path))
+        finally:
+            # Best-effort cleanup of temp dir
             try:
                 if tmp_dir.exists():
                     for p in tmp_dir.glob("*"):
@@ -533,57 +568,22 @@ def download_index_from_gcs() -> bool:
                     tmp_dir.rmdir()
             except Exception:
                 pass
-            set_phase("downloaded", local_dir=str(local_path))
-            return True
-    except Exception:
-        pass
 
-    # Atomically move temp files into final location, file-by-file (avoid clobbering valid dir)
-    try:
-        # Ensure parent and final dir exist
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.mkdir(parents=True, exist_ok=True)
-        # Move files from tmp to final
-        moved = 0
-        for p in tmp_dir.glob("*"):
-            target = local_path / p.name
-            try:
-                p.replace(target)
-                moved += 1
-            except Exception as e:
-                logger.error("[RAG] Failed moving file to final dir", src=str(p), dst=str(target), error=str(e))
-                _last_download_error = f"Atomic move failed: {type(e).__name__}: {e}"
-                set_phase("error", error=_last_download_error)
-                return False
-        logger.info("[RAG] Atomic move complete", files_moved=moved, final_dir=str(local_path))
-    finally:
-        # Best-effort cleanup of temp dir
-        try:
-            if tmp_dir.exists():
-                for p in tmp_dir.glob("*"):
-                    try:
-                        p.unlink()
-                    except Exception:
-                        pass
-                tmp_dir.rmdir()
-        except Exception:
-            pass
-
-    # Download complete - mark as downloaded (files exist and validated)
-    set_phase("downloaded", local_dir=str(local_path))
-    log_resource_checkpoint("rag_gcs_download_complete")
-    
-    logger.info(
-        "[RAG] Index download and validation complete",
-        local_dir=str(local_path),
-        required_files=REQUIRED_FILES,
-        optional_results=optional_results,
-        files_done=len(required_success),
-        files_total=len(REQUIRED_FILES),
-        message="Ready to load RAG index",
-    )
-    print(f"[RAG] ✅ Index download and validation complete - downloaded {len(required_success)} required files", flush=True)
-    return True
+        # Download complete - mark as downloaded (files exist and validated)
+        set_phase("downloaded", local_dir=str(local_path))
+        log_resource_checkpoint("rag_gcs_download_complete")
+        
+        logger.info(
+            "[RAG] Index download and validation complete",
+            local_dir=str(local_path),
+            required_files=REQUIRED_FILES,
+            optional_results=optional_results,
+            files_done=len(required_success),
+            files_total=len(REQUIRED_FILES),
+            message="Ready to load RAG index",
+        )
+        print(f"[RAG] ✅ Index download and validation complete - downloaded {len(required_success)} required files", flush=True)
+        return True
     finally:
         # Release lock
         try:
