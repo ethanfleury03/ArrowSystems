@@ -799,11 +799,31 @@ async def startup_event():
     from .config.env import settings
     
     startup_begin_time = time.time()
+    
+    # Get process and instance info for observability
+    pid = os.getpid()
+    instance_id = os.getenv("K_REVISION", "unknown")
+    service_name = os.getenv("K_SERVICE", "unknown")
+    hostname = os.getenv("HOSTNAME", "unknown")
+    port = os.getenv("PORT", "8080")
+    
     # Log Gunicorn timeout configuration (critical for worker boot)
     gunicorn_timeout = os.getenv("GUNICORN_TIMEOUT", "600")
     gunicorn_workers = os.getenv("GUNICORN_WORKERS", "1")
-    logger.info(f"[GUNICORN] timeout={gunicorn_timeout}s workers={gunicorn_workers}")
-    print(f"[GUNICORN] timeout={gunicorn_timeout}s workers={gunicorn_workers}", flush=True)
+    
+    # CRITICAL: Log with process info so we can track which worker/instance
+    logger.info(
+        "[APP_START]",
+        pid=pid,
+        hostname=hostname,
+        k_service=service_name,
+        k_revision=instance_id,
+        gunicorn_timeout=gunicorn_timeout,
+        gunicorn_workers=gunicorn_workers,
+        port=port,
+        message=f"Worker startup begin: pid={pid}, hostname={hostname}, service={service_name}, revision={instance_id}, timeout={gunicorn_timeout}s, workers={gunicorn_workers}, port={port}"
+    )
+    print(f"[APP_START] pid={pid} hostname={hostname} K_SERVICE={service_name} K_REVISION={instance_id} GUNICORN_TIMEOUT={gunicorn_timeout} GUNICORN_WORKERS={gunicorn_workers} PORT={port}", flush=True)
     
     # Check if heavy imports happened at module import time (should be False after lazy import fix)
     try:
@@ -1825,24 +1845,60 @@ async def readyz_check():
     This endpoint checks if the RAG index is loaded and ready to serve queries.
     It reads state only (non-blocking) and returns quickly.
     """
+    # Get process info for observability (include in response, but don't log every request)
+    import os
+    pid = os.getpid()
+    instance_id = os.getenv("K_REVISION", "unknown")
+    hostname = os.getenv("HOSTNAME", "unknown")
+    
     try:
         from backend.rag.index_manager import get_index_load_state
+        from backend.rag_pipeline import get_rag_pipeline
+        
         load_state = get_index_load_state()
         state = load_state.get_state()
         rag_status = state.get("status", "unknown")
         
+        # Get pipeline state
+        try:
+            pipeline = get_rag_pipeline()
+            pipeline_initialized = pipeline.is_initialized() if pipeline else False
+        except Exception:
+            pipeline_initialized = False
+        
+        # Get index_state phase
+        try:
+            from backend.rag.index_state import get_index_state
+            index_state = get_index_state()
+            phase = index_state.get("phase", "unknown")
+        except Exception:
+            phase = "unknown"
+        
+        # Base response fields (always include observability)
+        response_base = {
+            "pid": pid,
+            "revision": instance_id,
+            "hostname": hostname,
+        }
+        
         if rag_status == "ready":
             return {
+                **response_base,
                 "ready": True,
                 "rag_state": rag_status,
+                "phase": phase,
+                "pipeline_initialized": pipeline_initialized,
                 "detail": "RAG index is ready to serve queries"
             }
         elif rag_status == "loading":
             return JSONResponse(
                 status_code=503,
                 content={
+                    **response_base,
                     "ready": False,
                     "rag_state": rag_status,
+                    "phase": phase,
+                    "pipeline_initialized": pipeline_initialized,
                     "detail": "Index is currently loading"
                 }
             )
@@ -1851,8 +1907,11 @@ async def readyz_check():
             return JSONResponse(
                 status_code=503,
                 content={
+                    **response_base,
                     "ready": False,
                     "rag_state": rag_status,
+                    "phase": phase,
+                    "pipeline_initialized": pipeline_initialized,
                     "error": error_msg,
                     "detail": f"Index loading failed: {error_msg}"
                 }
@@ -1861,17 +1920,23 @@ async def readyz_check():
             return JSONResponse(
                 status_code=503,
                 content={
+                    **response_base,
                     "ready": False,
                     "rag_state": rag_status,
+                    "phase": phase,
+                    "pipeline_initialized": pipeline_initialized,
                     "detail": "Index loading has not started"
                 }
             )
     except Exception as e:
         # If state tracker fails, assume not ready (safe default)
-        logger.error("readyz_check_error", error=str(e), exc_info=True)
+        logger.error("readyz_check_error", pid=pid, revision=instance_id, error=str(e), exc_info=True)
         return JSONResponse(
             status_code=503,
             content={
+                "pid": pid,
+                "revision": instance_id,
+                "hostname": hostname,
                 "ready": False,
                 "rag_state": "error",
                 "error": f"Readiness check failed: {type(e).__name__}: {str(e)}"
