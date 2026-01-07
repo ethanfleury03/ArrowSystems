@@ -3809,7 +3809,16 @@ class RAGOrchestrator:
         
         # Re-ranker model
         try:
-            logger.info("Loading re-ranker model...")
+            import os
+            import time
+            pid = os.getpid()
+            hostname = os.getenv("HOSTNAME", "unknown")
+            revision = os.getenv("K_REVISION", "unknown")
+            reranker_start = time.time()
+            
+            logger.info("[RAG] reranker_model_load_begin", message="Loading re-ranker model...")
+            print(f"[RAG] reranker_load_START pid={pid} hostname={hostname} revision={revision} cache_dir={self.cache_dir} device={device}", flush=True)
+            
             try:
                 # Try with cache_folder first (older sentence-transformers)
                 self.reranker = CrossEncoder(
@@ -3823,9 +3832,15 @@ class RAGOrchestrator:
                     "BAAI/bge-reranker-large",
                     device=device
                 )
+            
+            reranker_duration = time.time() - reranker_start
             logger.info("reranker_loaded", device=device)
+            logger.info("[RAG] reranker_model_load_done", device=device, duration_seconds=reranker_duration)
+            print(f"[RAG] reranker_model_load_done duration={reranker_duration:.2f}s", flush=True)
+            print(f"[RAG] reranker_load_DONE pid={pid} hostname={hostname} revision={revision} cache_dir={self.cache_dir} duration={reranker_duration:.2f}s", flush=True)
         except Exception as e:
             logger.warning(f"Re-ranker not available: {e}")
+            print(f"[RAG] reranker_load_FAILED: {type(e).__name__}: {str(e)}", flush=True)
             self.reranker = None
         
         # Initialize semantic cache after embed model is ready
@@ -4134,8 +4149,29 @@ class RAGOrchestrator:
             # But since ingestion uses default, we don't specify index_id
             
             # CRITICAL CHECKPOINT: About to parse vector store (this is the slowest operation)
+            import os
+            import time
+            pid = os.getpid()
+            hostname = os.getenv("HOSTNAME", "unknown")
+            revision = os.getenv("K_REVISION", "unknown")
+            vector_store_path = os.path.join(storage_dir, "default__vector_store.json")
+            vector_store_size = os.path.getsize(vector_store_path) if os.path.exists(vector_store_path) else 0
+            parse_start_time = time.time()
+            
+            # CRITICAL: Increase timeout to match RAG_MAX_LOAD_TIME_SEC (default 600s)
+            # Parsing 183MB JSON can legitimately take 3-5 minutes on Cloud Run CPU
+            # Previous 120s timeout was too short and caused frequent timeouts
+            vector_store_parse_timeout = int(os.getenv("RAG_VECTOR_STORE_PARSE_TIMEOUT_SEC", os.getenv("RAG_MAX_LOAD_TIME_SEC", "600")))
+            
             logger.info(f"[RESOURCE] rag_vector_store_parse_start storage_dir={storage_dir}")
-            print(f"[RESOURCE] rag_vector_store_parse_start storage_dir={storage_dir}", flush=True)
+            logger.info(
+                "rag_vector_store_parse_timeout_config",
+                timeout_seconds=vector_store_parse_timeout,
+                vector_store_size_bytes=vector_store_size,
+                message=f"Vector store parse will timeout after {vector_store_parse_timeout}s for {vector_store_size:,} byte file"
+            )
+            print(f"[RAG] vector_store_parse_START pid={pid} hostname={hostname} revision={revision} storage_dir={storage_dir} vector_store_size_bytes={vector_store_size}", flush=True)
+            print(f"[RAG] vector_store_parse_timeout={vector_store_parse_timeout}s size={vector_store_size:,} bytes", flush=True)
             log_resource_checkpoint("rag_vector_store_parse_start", logger)
             
             # Wrap in timeout to prevent indefinite hangs (e.g., from corrupted files)
@@ -4150,19 +4186,26 @@ class RAGOrchestrator:
             
             load_thread = threading.Thread(target=_load_with_timeout, daemon=True)
             load_thread.start()
-            load_thread.join(timeout=120)  # 2 minute timeout for index loading
+            load_thread.join(timeout=vector_store_parse_timeout)  # Configurable timeout (default 600s)
             
             if load_thread.is_alive():
                 # Thread is still running - timeout occurred
+                # CRITICAL: Update index_state to "error" before raising
+                try:
+                    from backend.rag.index_state import set_phase
+                    set_phase("error", error=f"Vector store parse timed out after {vector_store_parse_timeout}s")
+                except Exception:
+                    pass  # Non-fatal
+                
                 error_msg = (
-                    f"Index loading timed out after 120 seconds. "
-                    f"This usually indicates corrupted index files or extremely large files. "
+                    f"Index loading timed out after {vector_store_parse_timeout} seconds. "
+                    f"Vector store file (default__vector_store.json) is 183MB and may take several minutes to parse on Cloud Run. "
                     f"Storage directory: {storage_dir}. "
                     f"Try re-downloading the index from GCS or check file sizes."
                 )
                 logger.error("orchestrator_index_load_timeout",
                            storage_dir=storage_dir,
-                           timeout_seconds=120,
+                           timeout_seconds=vector_store_parse_timeout,
                            message=error_msg)
                 raise RuntimeError(error_msg)
             
@@ -4171,8 +4214,9 @@ class RAGOrchestrator:
                 raise load_exception[0]
             
             # CRITICAL CHECKPOINT: Vector store parse complete
-            logger.info(f"[RESOURCE] rag_vector_store_parse_done storage_dir={storage_dir}")
-            print(f"[RESOURCE] rag_vector_store_parse_done storage_dir={storage_dir}", flush=True)
+            parse_duration = time.time() - parse_start_time
+            logger.info(f"[RESOURCE] rag_vector_store_parse_done storage_dir={storage_dir} duration={parse_duration:.2f}s")
+            print(f"[RAG] vector_store_parse_DONE pid={pid} hostname={hostname} revision={revision} storage_dir={storage_dir} duration={parse_duration:.2f}s", flush=True)
             log_resource_checkpoint("rag_vector_store_parse_done", logger)
             
             self.index = load_result[0]
