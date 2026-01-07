@@ -44,8 +44,69 @@ RUN python -c "import sys; lines = [l for l in open('requirements.txt') if not l
 # This allows these steps to be cached separately from code changes
 RUN mkdir -p /app/.cache/huggingface/hub
 
+# Pre-download embedding and reranker models during build
+# This ensures models are in the image cache and no network calls are needed at runtime
+# CRITICAL: These models must match what the RAG pipeline expects at runtime
+# CRITICAL: Use the EXACT same loading mechanism as runtime (SentenceTransformer/CrossEncoder)
+ENV HF_HOME=/app/.cache/huggingface
+ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+ENV HF_HUB_ENABLE_HF_TRANSFER=0
+
+RUN python - <<'PY'
+import os
+print("[BUILD] Pre-downloading embedding and reranker models...")
+print("[BUILD] VERIFICATION_MARKER: model_pre_download_start")
+
+cache = os.getenv("SENTENCE_TRANSFORMERS_HOME") or os.getenv("HF_HOME") or "/app/.cache/huggingface"
+print(f"[BUILD] Cache directory: {cache}")
+
+# Download embedding model (BAAI/bge-large-en-v1.5 - 1024 dimensions)
+# CRITICAL: Runtime uses SentenceTransformer via HuggingFaceEmbedding wrapper
+# So we must use SentenceTransformer here to download all required files
+from sentence_transformers import SentenceTransformer
+print("[BUILD] Downloading BAAI/bge-large-en-v1.5 (embedding model)...")
+print("[BUILD] VERIFICATION_MARKER: embedding_download_start")
+embed_model = SentenceTransformer("BAAI/bge-large-en-v1.5", cache_folder=cache)
+dim = embed_model.get_sentence_embedding_dimension()
+print(f"[BUILD] Embedding model downloaded. Dimension: {dim} (expected: 1024)")
+print("[BUILD] VERIFICATION_MARKER: embedding_download_done")
+if dim != 1024:
+    raise RuntimeError(f"Embedding dimension mismatch: expected 1024, got {dim}")
+
+# Download reranker model (BAAI/bge-reranker-large)
+# CRITICAL: Runtime uses CrossEncoder from sentence_transformers
+# So we must use CrossEncoder here to download all required files
+from sentence_transformers import CrossEncoder
+print("[BUILD] Downloading BAAI/bge-reranker-large (reranker model)...")
+print("[BUILD] VERIFICATION_MARKER: reranker_download_start")
+try:
+    # Use cache_folder parameter if available (older sentence-transformers)
+    try:
+        reranker = CrossEncoder("BAAI/bge-reranker-large", cache_folder=cache, device="cpu")
+    except TypeError:
+        # Fallback for newer versions that don't support cache_folder
+        os.environ["SENTENCE_TRANSFORMERS_HOME"] = cache
+        reranker = CrossEncoder("BAAI/bge-reranker-large", device="cpu")
+    print("[BUILD] Reranker model downloaded.")
+    print("[BUILD] VERIFICATION_MARKER: reranker_download_done")
+except Exception as e:
+    print(f"[BUILD] Reranker download warning (non-fatal): {e}")
+    print("[BUILD] VERIFICATION_MARKER: reranker_download_failed")
+
+print(f"[BUILD] Model pre-download complete. Cache contents:")
+import subprocess
+subprocess.run(["ls", "-la", cache], check=False)
+subprocess.run(["du", "-sh", cache], check=False)
+print("[BUILD] VERIFICATION_MARKER: model_pre_download_done")
+PY
+
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app
+
+# CRITICAL: Set ownership of cache directory to app user BEFORE copying code
+# This ensures the app user can read the models at runtime
+RUN chown -R app:app /app/.cache/huggingface
 
 # Copy entrypoint script (if it exists separately, otherwise it will be in COPY . .)
 # Copy it before the full code copy so it can be cached separately if it changes less frequently
@@ -58,8 +119,11 @@ COPY . .
 # Ensure SQLite database file exists
 RUN touch /app/database.sqlite
 
-# Set ownership after copying code
-RUN chown -R app:app /app
+# Set ownership after copying code (including cache directory)
+# CRITICAL: Ensure cache directory is accessible to app user
+RUN chown -R app:app /app && \
+    chmod -R u+rwX /app/.cache/huggingface && \
+    ls -la /app/.cache/huggingface | head -20
 # Don't switch to app user yet - entrypoint will do it after fixing permissions
 # USER app
 

@@ -195,6 +195,65 @@ Expected response should show `"mode": "eager"` and matching env values.
 
 If `/readyz` responds quickly with 503 while "eager" is supposedly enabled, then startup is not blocking and there's a bug.
 
+## Model Cache Status Endpoint
+
+**Endpoint:** `GET /api/model_cache_status`
+
+**Purpose:** Verify that embedding and reranker models are present in the Docker image cache.
+
+**Response:**
+```json
+{
+  "embedding_model": {
+    "name": "BAAI/bge-large-en-v1.5",
+    "expected_dim": 1024,
+    "exists": true,
+    "cache_dir": "/app/.cache/huggingface",
+    "notes": "Found model in: /app/.cache/huggingface/hub/models--BAAI--bge-large-en-v1.5"
+  },
+  "reranker_model": {
+    "name": "BAAI/bge-reranker-large",
+    "exists": true,
+    "cache_dir": "/app/.cache/huggingface",
+    "notes": "Found model in: /app/.cache/huggingface/hub/models--BAAI--bge-reranker-large"
+  },
+  "cache_dir": "/app/.cache/huggingface",
+  "all_models_cached": true
+}
+```
+
+**Use Cases:**
+- Verify Docker image has pre-downloaded models
+- Debug "model not found" errors
+- Confirm cache directory configuration
+
+**How to Confirm Models Are Cached:**
+
+1. After deployment, call the endpoint:
+   ```bash
+   curl $BACKEND_URL/api/model_cache_status
+   ```
+
+2. Check that `all_models_cached` is `true`
+
+3. If `false`, check:
+   - Docker build logs for model download step
+   - `cache_dir` path matches what's in the image
+   - `env_vars` show correct configuration
+
+**Local Smoke Test:**
+
+Run the offline embedding smoke test:
+```bash
+python scripts/smoke_embedding_offline.py
+```
+
+This validates:
+- Cache directory exists
+- Model files are present
+- Model loads without network calls
+- Embedding dimension is correct (1024 for bge-large-en-v1.5)
+
 ## Security Notes
 
 - Both endpoints are intentionally unauthenticated for health check compatibility

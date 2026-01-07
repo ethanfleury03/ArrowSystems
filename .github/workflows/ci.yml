@@ -1223,10 +1223,16 @@ jobs:
           
           echo ""
           echo "🔍 Validating index files (diagnostic)..."
-          VALIDATION=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/validate-index" || echo "ERROR")
-          echo "Index Validation: $VALIDATION" | jq '.' || echo "$VALIDATION"
+          VALIDATION=$(curl -sS -H "$AUTH_HEADER" "$BACKEND_URL/rag/validate-index" 2>/dev/null || echo '{"error":"request_failed"}')
+          # Only pipe to jq if it looks like valid JSON (starts with { or [)
+          if echo "$VALIDATION" | grep -qE '^\s*[\{\[]'; then
+            echo "Index Validation:"
+            echo "$VALIDATION" | jq '.' 2>/dev/null || echo "$VALIDATION"
+          else
+            echo "Index Validation (raw): $VALIDATION"
+          fi
           
-          # Check if files are corrupted
+          # Check if files are corrupted (safely handle non-JSON)
           CORRUPTED_FILES=$(echo "$VALIDATION" | jq -r '.corrupted_files[]?' 2>/dev/null || echo "")
           if [ -n "$CORRUPTED_FILES" ]; then
             echo ""
