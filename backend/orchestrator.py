@@ -4029,6 +4029,9 @@ class RAGOrchestrator:
         
         logger.info("orchestrator_loading_index", storage_dir=storage_dir, message="🔄 Loading index from storage...")
         
+        # LAZY IMPORT: Import Settings early so we can set embed_model before loading index
+        from llama_index.core import Settings
+        
         # CRITICAL: Set embedding model in Settings BEFORE loading index
         # This ensures the retriever uses the correct embedding model
         if self.embed_model:
@@ -4153,6 +4156,7 @@ class RAGOrchestrator:
                 raise RuntimeError(error_msg)
             
             # LAZY IMPORT: Import llama_index.core only when loading index (not at module import time)
+            # Note: Settings was already imported earlier in this function
             from llama_index.core import StorageContext, load_index_from_storage
             
             # CRITICAL: Use the absolute path directly - do not add any extra segments
