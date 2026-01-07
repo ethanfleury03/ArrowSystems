@@ -150,6 +150,19 @@ def build_offline_embedding(
     Raises:
         RuntimeError: If model cannot be loaded from cache (offline mode)
     """
+    import os
+    import time
+    pid = os.getpid()
+    hostname = os.getenv("HOSTNAME", "unknown")
+    revision = os.getenv("K_REVISION", "unknown")
+    
+    # Determine cache directory (check env vars in order)
+    resolved_cache_dir = cache_dir or get_embedding_cache_dir()
+    
+    # CRITICAL: Log start with observability info (plain text for gcloud searches)
+    start_time = time.time()
+    print(f"[RAG] build_offline_embedding_START pid={pid} hostname={hostname} revision={revision} model={model_name} cache_dir={resolved_cache_dir} device={device}", flush=True)
+    
     # LAZY IMPORT: Import only when function is called (not at module import time)
     # This prevents torch/sentence_transformers from blocking Gunicorn worker boot
     print(f"[RAG] embedding_import_begin model={model_name}", flush=True)
@@ -215,8 +228,10 @@ def build_offline_embedding(
                 # Non-fatal: dimension check failed but model loaded
                 print(f"[RAG] embedding_dim_check_warning: {e}", flush=True)
         
-        print(f"[RAG] embedding_load_done model={model_name}", flush=True)
-        print(f"[RAG] VERIFICATION_MARKER: embedding_model_ready model={model_name}", flush=True)
+        load_duration = time.time() - start_time
+        print(f"[RAG] embedding_load_done model={model_name} duration={load_duration:.2f}s", flush=True)
+        print(f"[RAG] VERIFICATION_MARKER: embedding_model_ready model={model_name} pid={pid} hostname={hostname} revision={revision}", flush=True)
+        print(f"[RAG] build_offline_embedding_DONE pid={pid} hostname={hostname} revision={revision} model={model_name} cache_dir={resolved_cache_dir} duration={load_duration:.2f}s", flush=True)
         return embed_model
         
     except Exception as e:

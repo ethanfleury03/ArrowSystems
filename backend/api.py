@@ -24,9 +24,14 @@ import hmac
 sys.dont_write_bytecode = True
 
 # Enable faulthandler early to catch startup hangs
-# Dumps stack traces every 60s if startup is stuck
+# CRITICAL: Increase timeout to match GUNICORN_TIMEOUT (default 600s)
+# The 60s timeout was too short for model loading, causing repeated traceback dumps
+# Now configurable via FAULTHANDLER_TIMEOUT_SEC env var (defaults to GUNICORN_TIMEOUT or 600)
+faulthandler_timeout = int(os.getenv("FAULTHANDLER_TIMEOUT_SEC", os.getenv("GUNICORN_TIMEOUT", "600")))
 faulthandler.enable()
-faulthandler.dump_traceback_later(60, repeat=True, file=sys.stderr)
+faulthandler.dump_traceback_later(faulthandler_timeout, repeat=True, file=sys.stderr)
+# Log faulthandler configuration (plain text for gcloud searches)
+print(f"[FAULTHANDLER] enabled with timeout={faulthandler_timeout}s (will dump traceback if stuck)", flush=True)
 
 def log_checkpoint(msg: str):
     """Log startup checkpoint with timestamp."""
