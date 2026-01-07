@@ -884,6 +884,8 @@ class HybridRetriever:
             
             # Ensure embedding model is set before creating retriever
             if self.embed_model:
+                # LAZY IMPORT: Import Settings at runtime (not just for type hints)
+                from llama_index.core import Settings
                 Settings.embed_model = self.embed_model
             
             # Try to get nodes directly from docstore (most reliable)
@@ -1068,6 +1070,8 @@ class HybridRetriever:
                 return []
             
             # Set embedding model globally BEFORE creating retriever
+            # LAZY IMPORT: Import Settings here since it's only needed at runtime
+            from llama_index.core import Settings
             Settings.embed_model = self.embed_model
             
             # Create retriever with explicit embedding model if possible
@@ -1082,6 +1086,12 @@ class HybridRetriever:
             results = retriever.retrieve(query)
             
             # Filter out inactive documents
+            # LAZY IMPORT: Import NodeWithScore at runtime (not just for type hints)
+            try:
+                from llama_index.core.schema import NodeWithScore
+            except ImportError:
+                from llama_index.schema import NodeWithScore  # older versions
+            
             filtered_results = []
             for node in results:
                 filename = ""
@@ -1405,6 +1415,12 @@ class HybridRetriever:
         Returns:
             Canonical filename string (empty if not found)
         """
+        # LAZY IMPORT: Import NodeWithScore at runtime (not just for type hints)
+        try:
+            from llama_index.core.schema import NodeWithScore
+        except ImportError:
+            from llama_index.schema import NodeWithScore  # older versions
+        
         metadata = None
         if isinstance(node, NodeWithScore) and hasattr(node, 'node'):
             if hasattr(node.node, 'metadata') and node.node.metadata:
@@ -1610,6 +1626,12 @@ class HybridRetriever:
             except Exception as e:
                 logger.error(f"Fallback retrieval also failed: {e}", exc_info=True)
         
+        # LAZY IMPORT: Import NodeWithScore at runtime (not just for type hints)
+        try:
+            from llama_index.core.schema import NodeWithScore
+        except ImportError:
+            from llama_index.schema import NodeWithScore  # older versions
+        
         # Combine results with scoring
         combined_scores = defaultdict(lambda: {'dense': 0.0, 'bm25': 0.0, 'node': None})
         
@@ -1678,6 +1700,12 @@ class HybridRetriever:
                 
                 # Create new NodeWithScore with hybrid score
                 # Handle both NodeWithScore and plain nodes
+                # LAZY IMPORT: Import NodeWithScore at runtime (not just for type hints)
+                try:
+                    from llama_index.core.schema import NodeWithScore
+                except ImportError:
+                    from llama_index.schema import NodeWithScore  # older versions
+                
                 node_wrapper = scores['node']
                 if isinstance(node_wrapper, NodeWithScore):
                     underlying_node = node_wrapper.node if hasattr(node_wrapper, 'node') else node_wrapper
@@ -1747,6 +1775,12 @@ class HybridRetriever:
         Returns:
             List of nodes with boosted scores
         """
+        # LAZY IMPORT: Import NodeWithScore at runtime (not just for type hints)
+        try:
+            from llama_index.core.schema import NodeWithScore
+        except ImportError:
+            from llama_index.schema import NodeWithScore  # older versions
+        
         boosted_count = 0
         for node in nodes:
             # Get filename from node metadata
@@ -1807,6 +1841,12 @@ class HybridRetriever:
         logger.debug(f"📑 Detected section numbers in query: {section_numbers}")
         
         # Boost nodes with matching page_label
+        # LAZY IMPORT: Import NodeWithScore at runtime (not just for type hints)
+        try:
+            from llama_index.core.schema import NodeWithScore
+        except ImportError:
+            from llama_index.schema import NodeWithScore  # older versions
+        
         boosted_count = 0
         for node in nodes:
             # Get page_label from node metadata
@@ -4677,6 +4717,12 @@ class RAGOrchestrator:
                 query_terms = [t for t in query_terms if len(t) > 2]  # Filter out short words
                 
                 # Search all nodes in corpus for filename matches
+                # LAZY IMPORT: Import NodeWithScore at runtime (not just for type hints)
+                try:
+                    from llama_index.core.schema import NodeWithScore
+                except ImportError:
+                    from llama_index.schema import NodeWithScore  # older versions
+                
                 filename_matches = []
                 if hasattr(self.retriever, 'corpus_nodes') and self.retriever.corpus_nodes:
                     for node_wrapper in self.retriever.corpus_nodes:
