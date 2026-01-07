@@ -573,6 +573,15 @@ def download_index_from_gcs() -> bool:
         set_phase("downloaded", local_dir=str(local_path))
         log_resource_checkpoint("rag_gcs_download_complete")
         
+        # Get total bytes from state (already updated by update_file_success)
+        from backend.rag.index_state import get_index_state
+        state = get_index_state()
+        total_bytes_downloaded = state.get("bytes_downloaded", 0)
+        
+        # CRITICAL: Plain text log for gcloud textPayload searches
+        logger.info(f"[RAG] Download complete: files_done={len(required_success)}/{len(REQUIRED_FILES)} bytes={total_bytes_downloaded:,} local_dir={local_path}")
+        print(f"[RAG] Download complete: files_done={len(required_success)}/{len(REQUIRED_FILES)} bytes={total_bytes_downloaded:,} local_dir={local_path}", flush=True)
+        
         logger.info(
             "[RAG] Index download and validation complete",
             local_dir=str(local_path),
@@ -580,9 +589,9 @@ def download_index_from_gcs() -> bool:
             optional_results=optional_results,
             files_done=len(required_success),
             files_total=len(REQUIRED_FILES),
+            total_bytes=total_bytes_downloaded,
             message="Ready to load RAG index",
         )
-        print(f"[RAG] ✅ Index download and validation complete - downloaded {len(required_success)} required files", flush=True)
         return True
     finally:
         # Release lock

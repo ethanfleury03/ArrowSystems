@@ -62,6 +62,7 @@ echo "=========================================="
 # Using 1 Gunicorn worker to fit within 4 GiB memory
 # Memory sizing based on measured peak RSS from instrumentation.
 # Increased timeout to 600s to allow time for index loading during startup
+# Eager mode makes worker startup block until RAG is ready (more reliable than background load)
 gcloud run services update $SERVICE \
   --execution-environment=gen2 \
   --cpu=2 \
@@ -72,6 +73,8 @@ gcloud run services update $SERVICE \
   --concurrency=100 \
   --set-env-vars="GUNICORN_WORKERS=1" \
   --set-env-vars="GUNICORN_TIMEOUT=600" \
+  --set-env-vars="RAG_EAGER_LOAD_ON_STARTUP=1" \
+  --set-env-vars="RAG_BACKGROUND_LOAD_ON_STARTUP=0" \
   --region=$REGION \
   --platform=managed \
   --project=$PROJECT
