@@ -22,10 +22,12 @@ spec:
           resources:
             limits:
               cpu: "2"
-              # Reduced from 8Gi → 4Gi after image removal (index: 1650MB → 191MB, ~88% reduction)
-              # Base footprint: ~700MB (191MB index + ~500MB models). 4Gi provides ~5.7x headroom.
-              # Memory sizing based on measured peak RSS from instrumentation, not estimates.
-              memory: "4Gi"
+              # CRITICAL: 8GiB memory is REQUIRED to prevent OOM/SIGKILL
+              # Base footprint: ~2-3GB (models) + ~200MB (index) + ~1GB (Python/runtime) = ~4-5GB
+              # 8GiB provides headroom for memory spikes during model loading and vector store parsing
+              # Previous 4GiB caused repeated SIGKILL errors and worker restarts
+              # DO NOT reduce this without extensive load testing and memory profiling
+              memory: "8Gi"
           startupProbe:
             httpGet:
               path: /health
