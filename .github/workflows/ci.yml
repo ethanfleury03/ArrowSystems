@@ -1604,18 +1604,18 @@ jobs:
           LLM_WARMUP=$(echo "$ENV_VARS" | jq -r 'map(select(.name=="LLM_WARMUP_ON_STARTUP")) | if length > 0 then .[0].value // "" else "" end')
           GUNICORN_WORKERS=$(echo "$ENV_VARS" | jq -r 'map(select(.name=="GUNICORN_WORKERS")) | if length > 0 then .[0].value // "" else "" end')
           
-          echo "  RAG_EAGER_LOAD_ON_STARTUP: '$RAG_EAGER' (expected: '0')"
-          echo "  RAG_BACKGROUND_LOAD_ON_STARTUP: '$RAG_BACKGROUND' (expected: '1')"
+          echo "  RAG_EAGER_LOAD_ON_STARTUP: '$RAG_EAGER' (expected: '1')"
+          echo "  RAG_BACKGROUND_LOAD_ON_STARTUP: '$RAG_BACKGROUND' (expected: '0')"
           echo "  LLM_WARMUP_ON_STARTUP: '$LLM_WARMUP' (expected: '0')"
           echo "  GUNICORN_WORKERS: '$GUNICORN_WORKERS' (expected: '1')"
           
           ERRORS=0
-          if [ "$RAG_EAGER" != "0" ]; then
-            echo "❌ ERROR: RAG_EAGER_LOAD_ON_STARTUP is '$RAG_EAGER', expected '0'"
+          if [ "$RAG_EAGER" != "1" ]; then
+            echo "❌ ERROR: RAG_EAGER_LOAD_ON_STARTUP is '$RAG_EAGER', expected '1'"
             ERRORS=$((ERRORS + 1))
           fi
-          if [ "$RAG_BACKGROUND" != "1" ]; then
-            echo "❌ ERROR: RAG_BACKGROUND_LOAD_ON_STARTUP is '$RAG_BACKGROUND', expected '1'"
+          if [ "$RAG_BACKGROUND" != "0" ]; then
+            echo "❌ ERROR: RAG_BACKGROUND_LOAD_ON_STARTUP is '$RAG_BACKGROUND', expected '0'"
             ERRORS=$((ERRORS + 1))
           fi
           if [ "$LLM_WARMUP" != "0" ]; then
@@ -1633,7 +1633,7 @@ jobs:
             echo "   gcloud run services update arrow-rag-backend \\"
             echo "     --region=us-central1 \\"
             echo "     --project=${{ secrets.GCP_PROJECT_ID }} \\"
-            echo "     --update-env-vars=RAG_EAGER_LOAD_ON_STARTUP=0,RAG_BACKGROUND_LOAD_ON_STARTUP=1,LLM_WARMUP_ON_STARTUP=0,GUNICORN_WORKERS=1"
+            echo "     --update-env-vars=RAG_EAGER_LOAD_ON_STARTUP=1,RAG_BACKGROUND_LOAD_ON_STARTUP=0,LLM_WARMUP_ON_STARTUP=0,GUNICORN_WORKERS=1"
             exit 1
           fi
           

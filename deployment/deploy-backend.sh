@@ -203,6 +203,27 @@ DEPLOYED_HF_OFFLINE=$(gcloud run services describe $SERVICE \
   --format="value(spec.template.spec.containers[0].env)" 2>/dev/null | \
   grep -A 1 "HF_HUB_OFFLINE" | grep "value:" | sed 's/.*value: //' || echo "")
 
+DEPLOYED_RAG_EAGER=$(gcloud run services describe $SERVICE \
+  --region=$REGION \
+  --platform=managed \
+  --project=$PROJECT \
+  --format="value(spec.template.spec.containers[0].env)" 2>/dev/null | \
+  grep -A 1 "RAG_EAGER_LOAD_ON_STARTUP" | grep "value:" | sed 's/.*value: //' || echo "")
+
+DEPLOYED_RAG_BACKGROUND=$(gcloud run services describe $SERVICE \
+  --region=$REGION \
+  --platform=managed \
+  --project=$PROJECT \
+  --format="value(spec.template.spec.containers[0].env)" 2>/dev/null | \
+  grep -A 1 "RAG_BACKGROUND_LOAD_ON_STARTUP" | grep "value:" | sed 's/.*value: //' || echo "")
+
+DEPLOYED_LLM_WARMUP=$(gcloud run services describe $SERVICE \
+  --region=$REGION \
+  --platform=managed \
+  --project=$PROJECT \
+  --format="value(spec.template.spec.containers[0].env)" 2>/dev/null | \
+  grep -A 1 "LLM_WARMUP_ON_STARTUP" | grep "value:" | sed 's/.*value: //' || echo "")
+
 echo "  Memory: $DEPLOYED_MEMORY (required: $REQUIRED_MEMORY)"
 echo "  CPU: $DEPLOYED_CPU (required: $REQUIRED_CPU)"
 echo "  Concurrency: $DEPLOYED_CONCURRENCY (required: $REQUIRED_CONCURRENCY)"
@@ -210,6 +231,9 @@ echo "  Min instances: $DEPLOYED_MIN_INSTANCES (required: 1)"
 echo "  Gunicorn workers: $DEPLOYED_GUNICORN_WORKERS (required: $REQUIRED_WORKERS)"
 echo "  Gunicorn timeout: $DEPLOYED_GUNICORN_TIMEOUT (required: $REQUIRED_TIMEOUT)"
 echo "  HF offline mode: $DEPLOYED_HF_OFFLINE (required: 1)"
+echo "  RAG eager load: $DEPLOYED_RAG_EAGER (required: 1)"
+echo "  RAG background load: $DEPLOYED_RAG_BACKGROUND (required: 0)"
+echo "  LLM warmup: $DEPLOYED_LLM_WARMUP (required: 0)"
 
 # Validate memory
 if [ "$DEPLOYED_MEMORY" != "$REQUIRED_MEMORY" ]; then
@@ -233,6 +257,24 @@ fi
 if [ "$DEPLOYED_HF_OFFLINE" != "1" ]; then
   echo "⚠️  WARNING: HF_HUB_OFFLINE is not set to 1. Runtime may attempt network model downloads."
   echo "   This can cause latency and memory pressure. Consider fixing."
+fi
+
+# Validate RAG eager load mode
+if [ "$DEPLOYED_RAG_EAGER" != "1" ]; then
+  echo "❌ ERROR: RAG_EAGER_LOAD_ON_STARTUP must be 1 for deterministic readiness. Current: $DEPLOYED_RAG_EAGER"
+  exit 1
+fi
+
+# Validate RAG background load is disabled
+if [ "$DEPLOYED_RAG_BACKGROUND" != "0" ]; then
+  echo "❌ ERROR: RAG_BACKGROUND_LOAD_ON_STARTUP must be 0 when eager load is enabled. Current: $DEPLOYED_RAG_BACKGROUND"
+  exit 1
+fi
+
+# Validate LLM warmup is disabled (not critical, but good to enforce)
+if [ -n "$DEPLOYED_LLM_WARMUP" ] && [ "$DEPLOYED_LLM_WARMUP" != "0" ]; then
+  echo "⚠️  WARNING: LLM_WARMUP_ON_STARTUP is not 0. Current: $DEPLOYED_LLM_WARMUP"
+  echo "   This may add startup latency. Consider setting to 0."
 fi
 
 echo "✅ Resource configuration verified"
