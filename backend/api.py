@@ -1658,6 +1658,64 @@ async def healthz_check():
     }
 
 
+@app.get("/api/model_cache_status")
+# Note: /api/model_cache_status is NOT rate limited for monitoring purposes
+async def model_cache_status():
+    """
+    Check if embedding and reranker models are present in the cache.
+    
+    Returns JSON with:
+    - embedding_model: model name
+    - cache_dir: cache directory being used
+    - exists: whether the model appears to be cached
+    - notes: additional information
+    - env_vars: relevant environment variables
+    
+    This endpoint helps diagnose model loading issues without triggering actual model loads.
+    
+    VERIFICATION: This endpoint logs access so you can confirm the new revision is running.
+    """
+    # Log access to verify new revision is running
+    logger.info("VERIFICATION_MARKER: model_cache_status_accessed", message="Model cache status endpoint accessed")
+    print("[VERIFICATION_MARKER] model_cache_status_accessed", flush=True)
+    
+    try:
+        from backend.utils.embedding_utils import check_embedding_model_cache, get_embedding_cache_dir
+        
+        cache_dir = get_embedding_cache_dir()
+        
+        # Check embedding model
+        embedding_status = check_embedding_model_cache("BAAI/bge-large-en-v1.5", cache_dir)
+        
+        # Check reranker model
+        reranker_status = check_embedding_model_cache("BAAI/bge-reranker-large", cache_dir)
+        
+        all_cached = embedding_status.get("exists", False) and reranker_status.get("exists", False)
+        
+        return {
+            "embedding_model": {
+                "name": "BAAI/bge-large-en-v1.5",
+                "expected_dim": 1024,
+                **embedding_status
+            },
+            "reranker_model": {
+                "name": "BAAI/bge-reranker-large",
+                **reranker_status
+            },
+            "cache_dir": cache_dir,
+            "all_models_cached": all_cached,
+            "verification_note": "If all_models_cached is false, check Dockerfile model download step and permissions"
+        }
+    except Exception as e:
+        logger.error("model_cache_status_error", error=str(e), exc_info=True)
+        return {
+            "error": f"Failed to check model cache: {type(e).__name__}: {str(e)}",
+            "embedding_model": {"exists": False},
+            "reranker_model": {"exists": False},
+            "all_models_cached": False
+        }
+
+
 @app.get("/api/rag_mode")
 # Note: /api/rag_mode is NOT rate limited for monitoring purposes
 async def rag_mode():
