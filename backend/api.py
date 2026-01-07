@@ -1670,6 +1670,7 @@ async def model_cache_status():
     - exists: whether the model appears to be cached
     - notes: additional information
     - env_vars: relevant environment variables
+    - import_check: whether build_offline_embedding is importable
     
     This endpoint helps diagnose model loading issues without triggering actual model loads.
     
@@ -1679,7 +1680,19 @@ async def model_cache_status():
     logger.info("VERIFICATION_MARKER: model_cache_status_accessed", message="Model cache status endpoint accessed")
     print("[VERIFICATION_MARKER] model_cache_status_accessed", flush=True)
     
+    import_check = {"build_offline_embedding_importable": False, "error": None}
+    
     try:
+        # CRITICAL: Verify build_offline_embedding is importable (guards against NameError)
+        try:
+            from backend.utils.embedding_utils import build_offline_embedding
+            import_check["build_offline_embedding_importable"] = True
+            import_check["function_name"] = build_offline_embedding.__name__
+            logger.info("model_cache_status_import_check_passed", message="build_offline_embedding is importable")
+        except Exception as import_err:
+            import_check["error"] = f"{type(import_err).__name__}: {str(import_err)}"
+            logger.error("model_cache_status_import_check_failed", error=str(import_err), exc_info=True)
+        
         from backend.utils.embedding_utils import check_embedding_model_cache, get_embedding_cache_dir
         
         cache_dir = get_embedding_cache_dir()
@@ -1704,7 +1717,8 @@ async def model_cache_status():
             },
             "cache_dir": cache_dir,
             "all_models_cached": all_cached,
-            "verification_note": "If all_models_cached is false, check Dockerfile model download step and permissions"
+            "import_check": import_check,
+            "verification_note": "If all_models_cached is false, check Dockerfile model download step and permissions. If import_check failed, check NameError in logs."
         }
     except Exception as e:
         logger.error("model_cache_status_error", error=str(e), exc_info=True)
@@ -1712,7 +1726,8 @@ async def model_cache_status():
             "error": f"Failed to check model cache: {type(e).__name__}: {str(e)}",
             "embedding_model": {"exists": False},
             "reranker_model": {"exists": False},
-            "all_models_cached": False
+            "all_models_cached": False,
+            "import_check": import_check
         }
 
 
