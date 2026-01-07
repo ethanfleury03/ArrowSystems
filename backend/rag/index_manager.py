@@ -48,6 +48,7 @@ class IndexLoadState:
         self._error: Optional[str] = None
         self._started_at: Optional[float] = None
         self._finished_at: Optional[float] = None
+        self._load_task: Optional[asyncio.Task] = None  # Global task for single-flight
         self._initialized = True
     
     @property
@@ -142,6 +143,9 @@ class IndexLoadState:
         """
         Ensure index is loaded, with singleflight semantics.
         
+        Uses a global task to ensure only one load attempt runs at a time.
+        If a load is already in progress, waits for it instead of starting a new one.
+        
         Args:
             force: If True, force reload even if already loaded or failed.
         
@@ -152,7 +156,30 @@ class IndexLoadState:
         if self._status == "ready" and not force:
             return
         
-        # If loading in progress, wait for it
+        # Single-flight: If a load task is already running, wait for it
+        if self._load_task is not None and not self._load_task.done():
+            logger.info(
+                "rag_index_load_waiting_existing_task",
+                task_done=self._load_task.done(),
+                message="Index load task already in progress, waiting for existing task..."
+            )
+            try:
+                # Wait for the existing task with shield to prevent cancellation
+                await asyncio.shield(self._load_task)
+            except asyncio.CancelledError:
+                # If we're cancelled, the task continues running (shield protects it)
+                logger.warning(
+                    "rag_index_load_wait_cancelled",
+                    message="Wait for existing load task was cancelled, but task continues running"
+                )
+                raise
+            # Check final status after task completes
+            if self._status == "failed":
+                raise RuntimeError(self._error or "Index loading failed")
+            if self._status == "ready":
+                return
+        
+        # If loading in progress (but no task - shouldn't happen, but handle defensively)
         if self._status == "loading":
             logger.info("rag_index_load_waiting", message="Index load already in progress, waiting...")
             await self._ready_event.wait()
@@ -166,6 +193,26 @@ class IndexLoadState:
             # Double-check after acquiring lock
             if self._status == "ready" and not force:
                 return
+            
+            # Check again if task was created while waiting for lock
+            if self._load_task is not None and not self._load_task.done():
+                logger.info(
+                    "rag_index_load_waiting_after_lock",
+                    message="Load task was created while waiting for lock, waiting for it..."
+                )
+                try:
+                    await asyncio.shield(self._load_task)
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "rag_index_load_wait_cancelled_after_lock",
+                        message="Wait for load task was cancelled after lock, but task continues"
+                    )
+                    raise
+                if self._status == "failed":
+                    raise RuntimeError(self._error or "Index loading failed")
+                if self._status == "ready":
+                    return
+            
             if self._status == "loading":
                 await self._ready_event.wait()
                 if self._status == "failed":
@@ -173,23 +220,7 @@ class IndexLoadState:
                 if self._status == "ready":
                     return
             
-            # Reset state if forcing reload
-            if force:
-                self._ready_event.clear()
-                self._error = None
-                self._started_at = None
-                self._finished_at = None
-            
-            # Start loading
-            load_start_time = time.time()
-            self._status = "loading"
-            self._started_at = load_start_time
-            self._error = None
-            self._ready_event.clear()
-            # Resource checkpoint: loading started
-            log_resource_checkpoint("rag_index_load_start")
-            
-            # Determine trigger source for logging
+            # Determine trigger source for logging (before creating task)
             import traceback
             stack = traceback.extract_stack()
             trigger_source = "unknown"
@@ -206,235 +237,464 @@ class IndexLoadState:
                         trigger_source = "/rag/status"
                         break
             
-            try:
-                logger.info(
-                    "rag_index_load_start",
-                    status=self._status,
-                    started_at=self._started_at,
-                    trigger=trigger_source,
-                    message=f"Starting RAG index download and load (triggered by: {trigger_source})"
-                )
-                log_resource_checkpoint("rag_gcs_download_start")
-                
-                # Resolve storage path
-                from backend.utils.storage_path import resolve_storage_path
-                from backend.utils.test_mode import is_test_mode, get_index_dir
-                
-                if is_test_mode():
-                    storage_path = get_index_dir()
-                else:
-                    storage_path_obj = resolve_storage_path()
-                    if storage_path_obj is None:
-                        storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
-                    else:
-                        storage_path = str(storage_path_obj.resolve())
-                
-                bucket_name = getattr(settings, "RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
-                index_prefix = getattr(settings, "RAG_INDEX_GCS_PREFIX", "latest_model/")
-                
-                logger.info(
-                    "rag_index_load_config",
-                    bucket=bucket_name,
-                    prefix=index_prefix,
-                    local_dir=storage_path,
-                    message=f"Index load config: gs://{bucket_name}/{index_prefix} -> {storage_path}"
-                )
-                
-                # Step 1: Download index from GCS (if in production and files missing)
-                download_duration = None
-                if settings.is_prod:
-                    # Check for missing files
-                    required = ["docstore.json", "index_store.json", "default__vector_store.json"]
-                    missing = []
-                    for f in required:
-                        if not os.path.exists(os.path.join(storage_path, f)):
-                            missing.append(f)
-                    if missing:
-                        download_start = time.time()
-                        logger.info(
-                            "rag_index_download_needed",
-                            missing_files=missing,
-                            message=f"Missing {len(missing)} required index files, downloading from GCS"
-                        )
-                        from backend.rag.startup_downloader import download_index_from_gcs
-                        download_ok = await asyncio.to_thread(download_index_from_gcs)
-                        download_duration = time.time() - download_start
-                        if not download_ok:
-                            from backend.rag.startup_downloader import get_last_download_error
-                            error_msg = get_last_download_error() or "Index download failed (unknown)"
-                            raise RuntimeError(f"Index download failed: {error_msg}")
-                        logger.info(
-                            "rag_index_download_complete",
-                            duration_seconds=download_duration,
-                            message=f"Index download completed successfully in {download_duration:.2f}s"
-                        )
-                        log_resource_checkpoint("rag_gcs_download_complete")
-                        
-                        # Validate downloaded files have non-trivial size
-                        for f in required:
-                            file_path = os.path.join(storage_path, f)
-                            if os.path.exists(file_path):
-                                size = os.path.getsize(file_path)
-                                if size <= 1024:  # 1KB threshold
-                                    raise RuntimeError(
-                                        f"Downloaded file {f} is too small ({size} bytes). "
-                                        f"Expected > 1KB. File may be corrupted or empty."
-                                    )
-                                logger.info(
-                                    "rag_index_file_validated",
-                                    filename=f,
-                                    size_bytes=size,
-                                    message=f"Validated {f}: {size:,} bytes"
-                                )
-                    else:
-                        logger.info("rag_index_files_present", message="All required index files already present locally")
-                        
-                        # Validate existing files have non-trivial size
-                        for f in required:
-                            file_path = os.path.join(storage_path, f)
-                            if os.path.exists(file_path):
-                                size = os.path.getsize(file_path)
-                                if size <= 1024:
-                                    raise RuntimeError(
-                                        f"Existing file {f} is too small ({size} bytes). "
-                                        f"Expected > 1KB. File may be corrupted."
-                                    )
-                
-                # Step 2: Load index into pipeline
-                load_start_time = time.time()
-                logger.info("rag_index_load_pipeline_start", message="Loading index into RAG pipeline")
-                log_resource_checkpoint("rag_index_load_pipeline_start")
-                from backend.rag_pipeline import get_rag_pipeline
-                from backend.api import get_db_manager_instance
-                
-                db_manager = get_db_manager_instance()
-                cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
-                
-                # Get or create global pipeline instance
-                pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
-                
-                # Initialize pipeline (this loads models and index)
-                # This is a blocking call that will download models if needed and load the index
-                initialized = pipeline.ensure_initialized(storage_path)
-                load_duration = time.time() - load_start_time
-                if not initialized:
-                    error_msg = pipeline.debug_status().get("last_error") or "Pipeline initialization failed"
-                    raise RuntimeError(f"Pipeline initialization failed: {error_msg}")
-                
-                # Verify pipeline is actually ready
-                if not pipeline.is_initialized():
-                    raise RuntimeError("Pipeline initialization completed but is_initialized() returned False")
-                
-                logger.info(
-                    "rag_index_pipeline_load_complete",
-                    duration_seconds=load_duration,
-                    message=f"Pipeline index load completed in {load_duration:.2f}s"
-                )
-                log_resource_checkpoint("rag_index_loaded")
-                
-                # Log sample metadata keys for compatibility checking
-                try:
-                    from backend.rag_pipeline import get_rag_pipeline
-                    loaded_pipeline = get_rag_pipeline()
-                    if loaded_pipeline and loaded_pipeline.is_initialized():
-                        orchestrator = loaded_pipeline.orchestrator
-                        if orchestrator and orchestrator.index:
-                            # Try to get a sample node to check metadata keys
-                            try:
-                                docstore = orchestrator.index.storage_context.docstore
-                                if docstore:
-                                    # Get first node ID from docstore
-                                    all_doc_ids = list(docstore.docs.keys())
-                                    if all_doc_ids:
-                                        sample_id = all_doc_ids[0]
-                                        sample_node = docstore.get_document(sample_id)
-                                        if sample_node and hasattr(sample_node, 'metadata'):
-                                            meta_keys = list(sample_node.metadata.keys()) if sample_node.metadata else []
-                                            logger.info(
-                                                "rag_index_metadata_sample",
-                                                sample_node_id=sample_id,
-                                                metadata_keys=meta_keys,
-                                                metadata_keys_count=len(meta_keys),
-                                                message=f"Sample node metadata keys: {meta_keys}"
-                                            )
-                            except Exception as meta_check_error:
-                                logger.warning(
-                                    "rag_index_metadata_check_failed",
-                                    error=str(meta_check_error),
-                                    message="Could not check sample metadata keys (non-fatal)"
-                                )
-                except Exception:
-                    pass  # Non-fatal - just logging
-                
-                # Success!
-                self._status = "ready"
-                self._finished_at = time.time()
+            # Reset state if forcing reload
+            if force:
+                self._ready_event.clear()
                 self._error = None
-                total_elapsed = self._finished_at - self._started_at
-                
-                # Build message with timing breakdown
-                timing_parts = []
-                if download_duration is not None:
-                    timing_parts.append(f"download: {download_duration:.2f}s")
-                if 'load_duration' in locals():
-                    timing_parts.append(f"load: {load_duration:.2f}s")
-                timing_msg = f" ({', '.join(timing_parts)})" if timing_parts else ""
+                self._started_at = None
+                self._finished_at = None
+                # Cancel existing task if any
+                if self._load_task is not None and not self._load_task.done():
+                    logger.warning(
+                        "rag_index_load_cancelling_existing_task",
+                        message="Force reload requested, but existing task is running (will wait for it to complete first)"
+                    )
+                    # Don't cancel - wait for it to finish, then start new one
+                    try:
+                        await asyncio.shield(self._load_task)
+                    except Exception:
+                        pass
+                    self._load_task = None
+            
+            # Start loading state
+            load_start_time = time.time()
+            self._status = "loading"
+            self._started_at = load_start_time
+            self._error = None
+            self._ready_event.clear()
+            # Resource checkpoint: loading started
+            log_resource_checkpoint("rag_index_load_start")
+            
+            # Create the load task (single-flight: only one task exists at a time)
+            async def _load_worker() -> None:
+                """Internal worker that performs the actual load."""
+                try:
+                    await self._do_load(trigger_source)
+                except Exception:
+                    # Exceptions are handled in _do_load
+                    raise
+            
+            # Create and store the global task
+            self._load_task = asyncio.create_task(_load_worker())
+            
+            # Wait for the task to complete (with shield to prevent cancellation)
+            try:
+                await asyncio.shield(self._load_task)
+            except asyncio.CancelledError:
+                # If we're cancelled, the task continues running (shield protects it)
+                logger.warning(
+                    "rag_index_load_wait_cancelled_shield",
+                    message="Wait for load task was cancelled, but task continues running (shield protected)"
+                )
+                raise
+            
+            # Check final status
+            if self._status == "failed":
+                raise RuntimeError(self._error or "Index loading failed")
+            if self._status != "ready":
+                raise RuntimeError(f"Index loading completed but status is {self._status}")
+    
+    async def _do_load(self, trigger_source: str = "unknown") -> None:
+        """
+        Internal method that performs the actual index load.
+        
+        This is separated from ensure_loaded to allow the task to run independently
+        while ensure_loaded can wait for it with shield.
+        
+        Args:
+            trigger_source: Source that triggered the load (for logging)
+        """
+        try:
+            logger.info(
+                "rag_index_load_start",
+                status=self._status,
+                started_at=self._started_at,
+                trigger=trigger_source,
+                message=f"Starting RAG index download and load (triggered by: {trigger_source})"
+            )
+            log_resource_checkpoint("rag_gcs_download_start")
+            
+            # Resolve storage path
+            from backend.utils.storage_path import resolve_storage_path
+            from backend.utils.test_mode import is_test_mode, get_index_dir
+            
+            if is_test_mode():
+                storage_path = get_index_dir()
+            else:
+                storage_path_obj = resolve_storage_path()
+                if storage_path_obj is None:
+                    storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+                else:
+                    storage_path = str(storage_path_obj.resolve())
+            
+            bucket_name = getattr(settings, "RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
+            index_prefix = getattr(settings, "RAG_INDEX_GCS_PREFIX", "latest_model/")
+            
+            logger.info(
+                "rag_index_load_config",
+                bucket=bucket_name,
+                prefix=index_prefix,
+                local_dir=storage_path,
+                message=f"Index load config: gs://{bucket_name}/{index_prefix} -> {storage_path}"
+            )
+            
+            # Step 1: Download index from GCS (if in production and files missing)
+            download_duration = None
+            if settings.is_prod:
+                # Check for missing files
+                required = ["docstore.json", "index_store.json", "default__vector_store.json"]
+                missing = []
+                for f in required:
+                    if not os.path.exists(os.path.join(storage_path, f)):
+                        missing.append(f)
+                if missing:
+                    download_start = time.time()
+                    logger.info(
+                        "rag_index_download_needed",
+                        missing_files=missing,
+                        message=f"Missing {len(missing)} required index files, downloading from GCS"
+                    )
+                    from backend.rag.startup_downloader import download_index_from_gcs
+                    download_ok = await asyncio.to_thread(download_index_from_gcs)
+                    download_duration = time.time() - download_start
+                    if not download_ok:
+                        from backend.rag.startup_downloader import get_last_download_error
+                        error_msg = get_last_download_error() or "Index download failed (unknown)"
+                        raise RuntimeError(f"Index download failed: {error_msg}")
+                    logger.info(
+                        "rag_index_download_complete",
+                        duration_seconds=download_duration,
+                        message=f"Index download completed successfully in {download_duration:.2f}s"
+                    )
+                    log_resource_checkpoint("rag_gcs_download_complete")
+                    
+                    # Validate downloaded files have non-trivial size
+                    for f in required:
+                        file_path = os.path.join(storage_path, f)
+                        if os.path.exists(file_path):
+                            size = os.path.getsize(file_path)
+                            if size <= 1024:  # 1KB threshold
+                                raise RuntimeError(
+                                    f"Downloaded file {f} is too small ({size} bytes). "
+                                    f"Expected > 1KB. File may be corrupted or empty."
+                                )
+                            logger.info(
+                                "rag_index_file_validated",
+                                filename=f,
+                                size_bytes=size,
+                                message=f"Validated {f}: {size:,} bytes"
+                            )
+                else:
+                    logger.info("rag_index_files_present", message="All required index files already present locally")
+                    
+                    # Validate existing files have non-trivial size
+                    for f in required:
+                        file_path = os.path.join(storage_path, f)
+                        if os.path.exists(file_path):
+                            size = os.path.getsize(file_path)
+                            if size <= 1024:
+                                raise RuntimeError(
+                                    f"Existing file {f} is too small ({size} bytes). "
+                                    f"Expected > 1KB. File may be corrupted."
+                                    )
+            
+            # Step 2: Load index into pipeline
+            # Set phase to "loading" before starting pipeline load
+            from backend.rag.index_state import set_phase
+            set_phase("loading", local_dir=storage_path)
+            
+            load_start_time = time.time()
+            logger.info("rag_index_load_pipeline_start", message="Loading index into RAG pipeline")
+            log_resource_checkpoint("rag_index_load_pipeline_start")
+            
+            # Checkpoint: Validate required files exist before load
+            required_files = ["docstore.json", "index_store.json", "default__vector_store.json"]
+            logger.info(
+                "rag_index_load_validate_files_start",
+                storage_dir=storage_path,
+                required_files=required_files,
+                message="Validating required index files before load"
+            )
+            
+            missing_files = []
+            file_sizes = {}
+            for f in required_files:
+                file_path = os.path.join(storage_path, f)
+                if os.path.exists(file_path):
+                    size = os.path.getsize(file_path)
+                    file_sizes[f] = size
+                    if size <= 1024:
+                        missing_files.append(f"{f} (too small: {size} bytes)")
+                else:
+                    missing_files.append(f"{f} (missing)")
+            
+            if missing_files:
+                error_msg = f"Missing or invalid required files: {', '.join(missing_files)}"
+                logger.error(
+                    "rag_index_load_validate_files_failed",
+                    storage_dir=storage_path,
+                    missing_files=missing_files,
+                    message=error_msg
+                )
+                raise RuntimeError(error_msg)
+            
+            logger.info(
+                "rag_index_load_validate_files_complete",
+                storage_dir=storage_path,
+                file_sizes=file_sizes,
+                message=f"All required files validated: {', '.join([f'{f}={file_sizes[f]:,} bytes' for f in required_files])}"
+            )
+            
+            # Checkpoint: About to read/parse docstore.json
+            docstore_path = os.path.join(storage_path, "docstore.json")
+            logger.info(
+                "rag_index_load_docstore_start",
+                docstore_path=docstore_path,
+                docstore_size_bytes=file_sizes.get("docstore.json", 0),
+                message="Starting docstore.json read/parse"
+            )
+            
+            from backend.rag_pipeline import get_rag_pipeline
+            from backend.api import get_db_manager_instance
+            
+            db_manager = get_db_manager_instance()
+            cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
+            
+            # Get or create global pipeline instance
+            pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
+            
+            # Checkpoint: About to read/parse vector store
+            vector_store_path = os.path.join(storage_path, "default__vector_store.json")
+            logger.info(
+                "rag_index_load_vector_store_start",
+                vector_store_path=vector_store_path,
+                vector_store_size_bytes=file_sizes.get("default__vector_store.json", 0),
+                message="Starting default__vector_store.json read/parse"
+            )
+            
+            # CRITICAL: Move blocking pipeline.ensure_initialized() to thread pool
+            # This prevents blocking the event loop and making HTTP endpoints unresponsive
+            logger.info(
+                "rag_index_load_pipeline_init_start",
+                storage_dir=storage_path,
+                message="Starting pipeline.ensure_initialized() in thread pool (non-blocking)"
+            )
+            
+            # Get timeout from environment (default: 10 minutes)
+            max_load_time = int(os.getenv("RAG_MAX_LOAD_TIME_SEC", "600"))  # 10 minutes default
+            
+            try:
+                # Run the blocking initialization in a thread pool
+                initialized = await asyncio.wait_for(
+                    asyncio.to_thread(pipeline.ensure_initialized, storage_path),
+                    timeout=max_load_time
+                )
+            except asyncio.TimeoutError:
+                elapsed = time.time() - load_start_time
+                error_msg = (
+                    f"Pipeline initialization timed out after {elapsed:.0f} seconds (max: {max_load_time}s). "
+                    f"This usually indicates a stuck index load operation. "
+                    f"Check file sizes, disk I/O, and memory usage."
+                )
+                logger.error(
+                    "rag_index_load_pipeline_timeout",
+                    elapsed_seconds=elapsed,
+                    max_time_seconds=max_load_time,
+                    storage_dir=storage_path,
+                    message=error_msg
+                )
+                raise RuntimeError(error_msg)
+            
+            load_duration = time.time() - load_start_time
+            
+            logger.info(
+                "rag_index_load_pipeline_init_complete",
+                duration_seconds=load_duration,
+                initialized=initialized,
+                message=f"Pipeline.ensure_initialized() completed in {load_duration:.2f}s"
+            )
+            
+            if not initialized:
+                error_msg = pipeline.debug_status().get("last_error") or "Pipeline initialization failed"
+                logger.error(
+                    "rag_index_load_pipeline_init_failed",
+                    error=error_msg,
+                    message=f"Pipeline initialization returned False: {error_msg}"
+                )
+                raise RuntimeError(f"Pipeline initialization failed: {error_msg}")
+            
+            # Checkpoint: Verify pipeline is actually ready
+            logger.info(
+                "rag_index_load_pipeline_verify_start",
+                message="Verifying pipeline is initialized"
+            )
+            
+            if not pipeline.is_initialized():
+                error_msg = "Pipeline initialization completed but is_initialized() returned False"
+                logger.error(
+                    "rag_index_load_pipeline_verify_failed",
+                    error=error_msg,
+                    message=error_msg
+                )
+                raise RuntimeError(error_msg)
+            
+            logger.info(
+                "rag_index_load_pipeline_verify_complete",
+                message="Pipeline verified as initialized"
+            )
+            
+            # Checkpoint: Finalize pipeline (build vector store object)
+            logger.info(
+                "rag_index_load_pipeline_finalize_start",
+                message="Finalizing pipeline (building vector store object)"
+            )
+            
+            # Pipeline is ready - log completion
+            logger.info(
+                "rag_index_pipeline_load_complete",
+                duration_seconds=load_duration,
+                message=f"Pipeline index load completed in {load_duration:.2f}s"
+            )
+            log_resource_checkpoint("rag_index_loaded")
+            
+            # Log sample metadata keys for compatibility checking
+            try:
+                from backend.rag_pipeline import get_rag_pipeline
+                loaded_pipeline = get_rag_pipeline()
+                if loaded_pipeline and loaded_pipeline.is_initialized():
+                    orchestrator = loaded_pipeline.orchestrator
+                    if orchestrator and orchestrator.index:
+                        # Try to get a sample node to check metadata keys
+                        try:
+                            docstore = orchestrator.index.storage_context.docstore
+                            if docstore:
+                                # Get first node ID from docstore
+                                all_doc_ids = list(docstore.docs.keys())
+                                if all_doc_ids:
+                                    sample_id = all_doc_ids[0]
+                                    sample_node = docstore.get_document(sample_id)
+                                    if sample_node and hasattr(sample_node, 'metadata'):
+                                        meta_keys = list(sample_node.metadata.keys()) if sample_node.metadata else []
+                                        logger.info(
+                                            "rag_index_metadata_sample",
+                                            sample_node_id=sample_id,
+                                            metadata_keys=meta_keys,
+                                            metadata_keys_count=len(meta_keys),
+                                            message=f"Sample node metadata keys: {meta_keys}"
+                                        )
+                        except Exception as meta_check_error:
+                            logger.warning(
+                                "rag_index_metadata_check_failed",
+                                error=str(meta_check_error),
+                                message="Could not check sample metadata keys (non-fatal)"
+                            )
+            except Exception:
+                pass  # Non-fatal - just logging
+            
+            # Success! Update phase to "ready"
+            try:
+                from backend.rag.index_state import set_phase
+                set_phase("ready", local_dir=storage_path)
+            except Exception:
+                pass  # Non-fatal
+            
+            self._status = "ready"
+            self._finished_at = time.time()
+            self._error = None
+            total_elapsed = self._finished_at - self._started_at
+            
+            # Build message with timing breakdown
+            timing_parts = []
+            if download_duration is not None:
+                timing_parts.append(f"download: {download_duration:.2f}s")
+            if 'load_duration' in locals():
+                timing_parts.append(f"load: {load_duration:.2f}s")
+            timing_msg = f" ({', '.join(timing_parts)})" if timing_parts else ""
+            
+            logger.info(
+                "rag_index_load_done",
+                status=self._status,
+                total_elapsed_s=total_elapsed,
+                download_duration_s=download_duration,
+                load_duration_s=load_duration if 'load_duration' in locals() else None,
+                started_at=self._started_at,
+                finished_at=self._finished_at,
+                trigger=trigger_source,
+                message=f"RAG index load completed successfully in {total_elapsed:.2f}s{timing_msg} (triggered by: {trigger_source})"
+            )
+            log_resource_checkpoint("rag_bg_task_success")
+            
+        except asyncio.CancelledError:
+            # If cancelled (shouldn't happen with shield, but handle defensively)
+            # Keep state as "loading" and let task continue (don't corrupt state)
+            logger.warning(
+                "rag_index_load_cancelled",
+                message="Index load was cancelled (should not happen with shield). Keeping state as loading."
+            )
+            # Don't reset status - keep it as "loading" so the task can continue
+            # Don't set finished_at - task is still running
+            self._ready_event.set()  # Unblock waiters
+            raise  # Re-raise to propagate cancellation
+        except Exception as e:
+            self._status = "failed"
+            self._finished_at = time.time()
+            # Store full exception details including traceback
+            import traceback
+            error_traceback = traceback.format_exc()
+            # Store error as string (extract key message, truncate traceback if too long)
+            error_str = str(e)
+            if len(error_traceback) > 2000:
+                error_traceback = error_traceback[:2000] + "... (truncated)"
+            self._error = f"{type(e).__name__}: {error_str}"
+            elapsed = (self._finished_at - self._started_at) if self._started_at else None
+            
+            # Update phase to error
+            try:
+                from backend.rag.index_state import set_phase
+                set_phase("error", error=self._error)
+            except Exception:
+                pass
+            
+            elapsed_str = f"{elapsed:.2f}s" if elapsed else "unknown"
+            logger.error(
+                "rag_index_load_failed",
+                status=self._status,
+                error_type=type(e).__name__,
+                error_message=error_str,
+                elapsed_s=elapsed,
+                trigger=trigger_source,
+                traceback=error_traceback,
+                exc_info=True,
+                message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {error_str} (triggered by: {trigger_source})"
+            )
+            log_resource_checkpoint("rag_bg_task_failed")
+            raise RuntimeError(self._error) from e
+        
+        finally:
+                # CRITICAL: Always log final state in finally block (runs even on exception/cancellation)
+                try:
+                    from backend.rag.index_state import get_index_state
+                    index_state = get_index_state()
+                    current_phase = index_state.get("phase", "unknown")
+                except Exception:
+                    current_phase = "unknown"
                 
                 logger.info(
-                    "rag_index_load_done",
+                    "rag_index_load_finally",
                     status=self._status,
-                    total_elapsed_s=total_elapsed,
-                    download_duration_s=download_duration,
-                    load_duration_s=load_duration if 'load_duration' in locals() else None,
+                    phase=current_phase,
+                    error=self._error,
                     started_at=self._started_at,
                     finished_at=self._finished_at,
-                    trigger=trigger_source,
-                    message=f"RAG index load completed successfully in {total_elapsed:.2f}s{timing_msg} (triggered by: {trigger_source})"
+                    elapsed_s=(self._finished_at - self._started_at) if (self._started_at and self._finished_at) else None,
+                    message=f"Index load finally block: status={self._status}, phase={current_phase}, error={self._error or 'none'}"
                 )
-                log_resource_checkpoint("rag_bg_task_success")
                 
-            except asyncio.CancelledError:
-                # If cancelled (shouldn't happen with shield, but handle defensively)
-                # Reset to not_started so a new load can be attempted
-                logger.warning(
-                    "rag_index_load_cancelled",
-                    message="Index load was cancelled (should not happen with shield). Resetting to not_started."
-                )
-                self._status = "not_started"
-                self._error = "Load was cancelled"
-                self._finished_at = time.time()
-                self._ready_event.set()
-                raise  # Re-raise to propagate cancellation
-            except Exception as e:
-                self._status = "failed"
-                self._finished_at = time.time()
-                # Store full exception details including traceback
-                import traceback
-                error_traceback = traceback.format_exc()
-                # Store error as string (extract key message, truncate traceback if too long)
-                error_str = str(e)
-                if len(error_traceback) > 2000:
-                    error_traceback = error_traceback[:2000] + "... (truncated)"
-                self._error = f"{type(e).__name__}: {error_str}"
-                elapsed = (self._finished_at - self._started_at) if self._started_at else None
-                
-                elapsed_str = f"{elapsed:.2f}s" if elapsed else "unknown"
-                logger.error(
-                    "rag_index_load_failed",
-                    status=self._status,
-                    error_type=type(e).__name__,
-                    error_message=error_str,
-                    elapsed_s=elapsed,
-                    trigger=trigger_source,
-                    exc_info=True,
-                    message=f"RAG index load failed after {elapsed_str}: {type(e).__name__}: {error_str} (triggered by: {trigger_source})"
-                )
-                log_resource_checkpoint("rag_bg_task_failed")
-                raise RuntimeError(self._error) from e
-            
-            finally:
                 # Always set event to unblock waiters
                 self._ready_event.set()
+                
+                # Clear the global task reference
+                self._load_task = None
 
 
 # Global singleton instance
