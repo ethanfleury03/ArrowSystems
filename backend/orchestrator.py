@@ -11,22 +11,31 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 import os
 import re
 import threading
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from dataclasses import dataclass
 from datetime import datetime
 from collections import defaultdict
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-
-from llama_index.core import StorageContext, load_index_from_storage, Settings
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core.schema import NodeWithScore, TextNode
-from .utils.embedding_utils import build_offline_embedding
-from sentence_transformers import CrossEncoder
-from rank_bm25 import BM25Okapi
 import json
 import hashlib
+
+# TYPE_CHECKING: Import types only for type hints, not at runtime
+# This prevents torch/sentence_transformers from blocking Gunicorn worker boot
+if TYPE_CHECKING:
+    from llama_index.core.schema import NodeWithScore
+    from llama_index.core import StorageContext, Settings
+
+# LAZY IMPORTS: Heavy ML dependencies are imported inside functions that need them
+# This prevents torch/sentence_transformers from blocking Gunicorn worker boot
+# DO NOT import llama_index, sentence_transformers, or torch at module level
+# 
+# Imports moved to function scope:
+# - llama_index.core: imported in initialize_models() and load_index()
+# - sentence_transformers.CrossEncoder: imported in initialize_models()
+# - llama_index.embeddings.huggingface: imported via build_offline_embedding() (already lazy)
+# - rank_bm25: imported in _initialize_bm25()
 
 from .logging_config import get_logger
 from .logging_context import get_user_id, get_user_role
@@ -904,6 +913,9 @@ class HybridRetriever:
                         continue
             
             if self.corpus_nodes:
+                # LAZY IMPORT: Import rank_bm25 only when needed
+                from rank_bm25 import BM25Okapi
+                
                 self.corpus_nodes = self.corpus_nodes[:1000]  # Limit to 1000
                 tokenized_corpus = [_get_node_text(node).lower().split() for node in self.corpus_nodes]
                 self.bm25 = BM25Okapi(tokenized_corpus)
@@ -916,7 +928,9 @@ class HybridRetriever:
             logger.error(f"BM25 initialization failed: {e}", exc_info=True)
             self.bm25 = None
     
-    def bm25_search(self, query: str, top_k: int = 20) -> List[Tuple[NodeWithScore, float]]:
+    def bm25_search(self, query: str, top_k: int = 20) -> List[Tuple['NodeWithScore', float]]:
+        # LAZY IMPORT: Import NodeWithScore only when needed
+        from llama_index.core.schema import NodeWithScore
         """
         Perform BM25 keyword search with filename boosting and pluralization handling.
         Documents with matching filenames get significant score boost.
@@ -3700,6 +3714,23 @@ class RAGOrchestrator:
         # Note: Model loading is allowed on Cloud Run for query embeddings
         # Ingestion is blocked separately via should_skip_ingestion() check
         
+        logger.info("[RAG] models_import_begin")
+        print("[RAG] models_import_begin", flush=True)
+        
+        # LAZY IMPORTS: Import heavy ML dependencies only when needed (not at module import time)
+        # This prevents torch/sentence_transformers from blocking Gunicorn worker boot
+        try:
+            import torch
+            from sentence_transformers import CrossEncoder
+            from llama_index.core import Settings
+            logger.info("[RAG] models_import_done")
+            print("[RAG] models_import_done", flush=True)
+        except Exception as e:
+            import traceback
+            logger.error(f"[RAG] models_import_failed: {type(e).__name__}: {str(e)}", exc_info=True)
+            print(f"[RAG] models_import_failed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}", flush=True)
+            raise
+        
         logger.info("🚀 Initializing models for RAG orchestrator...")
         
         # Disable hf_transfer if not installed (RunPod issue)
@@ -3709,7 +3740,8 @@ class RAGOrchestrator:
             os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
         
         # Detect GPU
-        import torch
+        logger.info("[RAG] embedding_model_load_begin")
+        print("[RAG] embedding_model_load_begin", flush=True)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"🖥️ Using device: {device}")
         if device == "cuda":
@@ -3732,7 +3764,12 @@ class RAGOrchestrator:
                 device=device
             )
             logger.info("embedding_model_loaded", model=display_name, device=device, offline=True)
+            logger.info("[RAG] embedding_model_load_done")
+            print("[RAG] embedding_model_load_done", flush=True)
         except Exception as e:
+            import traceback
+            logger.error(f"[RAG] embedding_model_load_failed: {type(e).__name__}: {str(e)}", exc_info=True)
+            print(f"[RAG] embedding_model_load_failed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}", flush=True)
             raise RuntimeError(
                 f"Could not load embedding model {model_name} from cache. "
                 f"Index was built with this model (1024 dim). "
@@ -4046,6 +4083,9 @@ class RAGOrchestrator:
                            corrupted_files=corrupted_files,
                            message=error_msg)
                 raise RuntimeError(error_msg)
+            
+            # LAZY IMPORT: Import llama_index.core only when loading index (not at module import time)
+            from llama_index.core import StorageContext, load_index_from_storage
             
             # CRITICAL: Use the absolute path directly - do not add any extra segments
             # In Cloud Run, if mount is at /app/latest_model, files are at /app/latest_model/docstore.json

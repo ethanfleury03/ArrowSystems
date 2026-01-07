@@ -79,11 +79,14 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
 ENTRYPOINT ["/docker-entrypoint.sh"]
 
 # Run the FastAPI server with Gunicorn (multi-worker production setup)
-CMD ["gunicorn", "backend.api:app", \
-     "--workers", "3", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8000", \
-     "--timeout", "300", \
-     "--keep-alive", "5", \
-     "--max-requests", "1000", \
-     "--max-requests-jitter", "100"]
+# Timeout is read from GUNICORN_TIMEOUT env var (default 600s) to allow for model loading
+# Use sh -c to expand env var since CMD doesn't support variable substitution
+CMD ["sh", "-c", "gunicorn backend.api:app \
+     --workers ${GUNICORN_WORKERS:-1} \
+     --worker-class uvicorn.workers.UvicornWorker \
+     --bind 0.0.0.0:8000 \
+     --timeout ${GUNICORN_TIMEOUT:-600} \
+     --graceful-timeout ${GUNICORN_TIMEOUT:-600} \
+     --keep-alive 5 \
+     --max-requests 1000 \
+     --max-requests-jitter 100"]
