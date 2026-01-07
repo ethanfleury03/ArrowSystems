@@ -1684,8 +1684,9 @@ async def model_cache_status():
     
     try:
         # CRITICAL: Verify build_offline_embedding is importable (guards against NameError)
+        # Use relative import for consistency with other imports in this file
         try:
-            from backend.utils.embedding_utils import build_offline_embedding
+            from .utils.embedding_utils import build_offline_embedding
             import_check["build_offline_embedding_importable"] = True
             import_check["function_name"] = build_offline_embedding.__name__
             logger.info("model_cache_status_import_check_passed", message="build_offline_embedding is importable")
@@ -1693,7 +1694,7 @@ async def model_cache_status():
             import_check["error"] = f"{type(import_err).__name__}: {str(import_err)}"
             logger.error("model_cache_status_import_check_failed", error=str(import_err), exc_info=True)
         
-        from backend.utils.embedding_utils import check_embedding_model_cache, get_embedding_cache_dir
+        from .utils.embedding_utils import check_embedding_model_cache, get_embedding_cache_dir
         
         cache_dir = get_embedding_cache_dir()
         
