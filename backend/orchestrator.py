@@ -3,6 +3,8 @@ Elite RAG Orchestrator with Hybrid Search (Dense + BM25 + Metadata)
 Implements query rewriting, intent classification, and structured response generation
 """
 
+from __future__ import annotations  # CRITICAL: Makes all annotations strings (postponed evaluation)
+
 import warnings
 # Suppress annoying Pydantic warnings
 warnings.filterwarnings("ignore", message=".*validate_default.*")
@@ -24,7 +26,10 @@ import hashlib
 # TYPE_CHECKING: Import types only for type hints, not at runtime
 # This prevents torch/sentence_transformers from blocking Gunicorn worker boot
 if TYPE_CHECKING:
-    from llama_index.core.schema import NodeWithScore
+    try:
+        from llama_index.core.schema import NodeWithScore
+    except Exception:
+        from llama_index.schema import NodeWithScore  # older versions
     from llama_index.core import StorageContext, Settings
 
 # LAZY IMPORTS: Heavy ML dependencies are imported inside functions that need them
@@ -368,7 +373,7 @@ class QueryIntent:
 @dataclass
 class RetrievalContext:
     """Retrieved context with metadata and scoring."""
-    nodes: List[NodeWithScore]
+    nodes: List["NodeWithScore"]  # String forward reference - never evaluated at runtime
     source_ids: Dict[str, str]  # Maps node_id to source identifier like [1], [2]
     relevance_scores: Dict[str, float]
     metadata_priority: Dict[str, float]
@@ -1045,7 +1050,7 @@ class HybridRetriever:
         
         return results
     
-    def dense_search(self, query: str, top_k: int = 20) -> List[NodeWithScore]:
+    def dense_search(self, query: str, top_k: int = 20) -> List["NodeWithScore"]:
         """Perform dense embedding search. Filters out inactive documents."""
         try:
             # Import document metadata checker
@@ -1113,7 +1118,7 @@ class HybridRetriever:
             logger.error(f"Dense search failed: {e}", exc_info=True)
             return []
     
-    def _search_by_filename(self, query: str, top_k: int = 10) -> List[NodeWithScore]:
+    def _search_by_filename(self, query: str, top_k: int = 10) -> List["NodeWithScore"]:
         """
         Direct filename-based search that queries the index for documents with matching filenames.
         This is critical for queries like "system requirements" matching "System Requirements.pdf".
@@ -1425,7 +1430,7 @@ class HybridRetriever:
         # Canonicalize for consistent matching
         return canonicalize_filename(filename)
     
-    def _filter_by_allowed_filenames(self, nodes: List[NodeWithScore], allowed_filenames: Optional[set]) -> List[NodeWithScore]:
+    def _filter_by_allowed_filenames(self, nodes: List["NodeWithScore"], allowed_filenames: Optional[set]) -> List["NodeWithScore"]:
         """
         Filter nodes to only include those from allowed filenames.
         
@@ -1493,7 +1498,7 @@ class HybridRetriever:
         machine_filename_patterns: Optional[List[str]] = None,  # Unused but kept for API compatibility
         role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER)
         user_machine_models: Optional[List[str]] = None  # Machine models for document-level filtering
-    ) -> List[NodeWithScore]:
+    ) -> List["NodeWithScore"]:
         """
         Perform hybrid search combining BM25 and dense embeddings (in parallel).
         Includes aggressive filename matching for queries that match document names.
@@ -1730,7 +1735,7 @@ class HybridRetriever:
         
         return hybrid_results[:top_k]
     
-    def _boost_machine_documents(self, nodes: List[NodeWithScore], filename_patterns: List[str]) -> List[NodeWithScore]:
+    def _boost_machine_documents(self, nodes: List["NodeWithScore"], filename_patterns: List[str]) -> List["NodeWithScore"]:
         """
         Boost nodes from documents matching machine name filename patterns.
         This prioritizes chunks from the matched machine's documentation.
@@ -1773,7 +1778,7 @@ class HybridRetriever:
         
         return nodes
     
-    def _boost_section_matches(self, query: str, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
+    def _boost_section_matches(self, query: str, nodes: List["NodeWithScore"]) -> List["NodeWithScore"]:
         """
         Boost nodes that match section numbers mentioned in query.
         E.g., "5.2" or "section 5.2" should boost chunks from page_label "5.2"
@@ -1843,7 +1848,7 @@ class HybridRetriever:
         machine_filename_patterns: Optional[List[str]] = None,
         role: Optional[str] = None,  # User role (ADMIN, TECHNICIAN, CUSTOMER)
         user_machine_models: Optional[List[str]] = None  # Machine models for document-level filtering
-    ) -> List[NodeWithScore]:
+    ) -> List["NodeWithScore"]:
         """
         Perform hybrid search with optional LLM-based document evaluation.
         
@@ -1952,7 +1957,7 @@ class HybridRetriever:
                 return False
         return True
     
-    def _rerank(self, query: str, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
+    def _rerank(self, query: str, nodes: List["NodeWithScore"]) -> List["NodeWithScore"]:
         """Apply cross-encoder re-ranking."""
         try:
             pairs = [(query, _get_node_text(node)) for node in nodes]
@@ -2268,10 +2273,10 @@ class DocumentEvaluator:
     def evaluate_retrieved_documents(
         self, 
         query: str, 
-        nodes: List[NodeWithScore],
+        nodes: List["NodeWithScore"],
         max_documents: int = 15,  # Increased from 3 to 15 for better coverage
         machine_filename_patterns: Optional[List[str]] = None  # For compatibility with hybrid_search calls
-    ) -> List[NodeWithScore]:
+    ) -> List["NodeWithScore"]:
         """
         Evaluate and re-rank retrieved documents using Claude.
         
@@ -2937,7 +2942,7 @@ class ClaudeIterativeRetriever:
                 logger.warning(f"⚠️ Claude Iterative Retriever initialization failed: {error_msg[:200]}")
             self.claude_client = None
     
-    def refine_query(self, query: str, initial_results: List[NodeWithScore], intent: QueryIntent) -> Optional[str]:
+    def refine_query(self, query: str, initial_results: List["NodeWithScore"], intent: QueryIntent) -> Optional[str]:
         """
         Generate refined query based on initial retrieval results.
         
@@ -3020,7 +3025,7 @@ Refined query:"""
             logger.warning(f"Query refinement failed: {e}")
             return None
     
-    def should_iterate(self, query: str, initial_results: List[NodeWithScore], intent: QueryIntent) -> bool:
+    def should_iterate(self, query: str, initial_results: List["NodeWithScore"], intent: QueryIntent) -> bool:
         """
         Determine if iterative retrieval should be performed.
         
@@ -3122,7 +3127,7 @@ class ClaudeAnswerGenerator:
     def generate_answer(
         self, 
         query: str, 
-        documents: List[NodeWithScore],
+        documents: List["NodeWithScore"],
         intent: QueryIntent,
         chat_history: Optional[List[Dict[str, str]]] = None,
         user_machine_models: Optional[List[str]] = None,
@@ -3328,7 +3333,7 @@ class ClaudeAnswerGenerator:
         
         return trimmed_history
     
-    def _prepare_document_context(self, documents: List[NodeWithScore]) -> str:
+    def _prepare_document_context(self, documents: List["NodeWithScore"]) -> str:
         """Prepare document context for LLM."""
         context_parts = []
         
@@ -3424,7 +3429,7 @@ Generate a comprehensive technical answer:"""
         
         return answer
     
-    def _validate_answer_facts(self, answer: str, documents: List[NodeWithScore]) -> str:
+    def _validate_answer_facts(self, answer: str, documents: List["NodeWithScore"]) -> str:
         """Validate that answer facts are supported by source documents."""
         # Extract citations from answer
         citations = re.findall(r'\[(\d+)\]', answer)
@@ -3442,14 +3447,14 @@ Generate a comprehensive technical answer:"""
         
         return answer
     
-    def _create_answer_cache_key(self, query: str, documents: List[NodeWithScore]) -> str:
+    def _create_answer_cache_key(self, query: str, documents: List["NodeWithScore"]) -> str:
         """Create cache key for answer generation."""
         query_hash = hashlib.md5(query.encode()).hexdigest()
         doc_hashes = [hashlib.md5(node.text[:200].encode()).hexdigest() for node in documents[:3]]
         docs_hash = hashlib.md5("".join(doc_hashes).encode()).hexdigest()
         return f"answer_{query_hash}_{docs_hash}"
     
-    def _fallback_answer(self, query: str, documents: List[NodeWithScore]) -> str:
+    def _fallback_answer(self, query: str, documents: List["NodeWithScore"]) -> str:
         """Fallback answer when LLM is not available."""
         if not documents:
             return "I couldn't find relevant information to answer your query."
@@ -4761,9 +4766,9 @@ class RAGOrchestrator:
     
     def _apply_dynamic_windowing(
         self,
-        nodes: List[NodeWithScore],
+        nodes: List["NodeWithScore"],
         base_top_k: int
-    ) -> List[NodeWithScore]:
+    ) -> List["NodeWithScore"]:
         """Apply dynamic context windowing based on relevance scores."""
         
         if not nodes:
@@ -4790,7 +4795,7 @@ class RAGOrchestrator:
         
         return windowed_nodes
     
-    def _build_retrieval_context(self, nodes: List[NodeWithScore]) -> RetrievalContext:
+    def _build_retrieval_context(self, nodes: List["NodeWithScore"]) -> RetrievalContext:
         """Build retrieval context with metadata."""
         
         # Assign source IDs
