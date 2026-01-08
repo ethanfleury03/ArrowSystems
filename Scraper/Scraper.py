@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional, Set, Union
@@ -27,8 +28,8 @@ class Scraper:
         output_dir: str = "data",
         cookies: Optional[Dict[str, str]] = None,
         headers: Optional[Dict[str, str]] = None,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: Optional[str] = "jung.gilee@memjet.partners",
+        password: Optional[str] = "INK28Dm8",
         login_callback: Optional[Callable[[requests.Session], bool]] = None,
         page_size: int = 50,
         rate_limit: float = 1.0,
@@ -78,6 +79,10 @@ class Scraper:
         
         self.logger.info(f"Scraper initialized for {self.base_url}")
         self.logger.info(f"Output directory: {self.output_dir.absolute()}")
+
+    def proof_of_concept(self) -> None:
+        "Make a funciton that will make a count of all the tickets to prove its working, then extract one ticket."
+        pass
     
     def _setup_logging(self) -> None:
         """Setup logging to both file and console."""
@@ -311,42 +316,198 @@ class Scraper:
             - "url": str
             - (optional metadata)
         
-        TODO: Implement site-specific logic to:
-            - Determine list page URL pattern
-            - Extract ticket references from list pages
-            - Handle pagination (page=1, page=2, ...)
-            - Stop when no more results
+        Supports both JSON API endpoints and HTML pages with best-effort extraction.
         """
         page = 1
         consecutive_empty_pages = 0
         max_empty_pages = 3
         
+        # Try multiple URL patterns in order
+        # Zendesk Help Center uses /hc/en-us/requests with pagination
+        url_patterns = [
+            lambda p: f"{self.base_url}/hc/en-us/requests?page={p}",  # Zendesk Help Center requests
+            lambda p: f"{self.base_url}/hc/requests?page={p}",  # Alternative format
+            lambda p: f"{self.base_url}/api/tickets?page={p}",  # API endpoint (if available)
+            lambda p: f"{self.base_url}/tickets?page={p}",  # Standard tickets
+            lambda p: f"{self.base_url}/tickets/list?page={p}",  # Alternative tickets format
+            lambda p: f"{self.base_url}/tickets?pageNumber={p}",  # Another alternative
+        ]
+        
+        # Track which URL pattern works (try first page with all patterns)
+        working_pattern = None
+        if page == 1:
+            for pattern_func in url_patterns:
+                test_url = pattern_func(1)
+                try:
+                    test_response = self._make_request(test_url)
+                    # Check if we get a valid response (not 404)
+                    if test_response.status_code == 200:
+                        working_pattern = pattern_func
+                        self.logger.info(f"Using URL pattern: {test_url}")
+                        break
+                except requests.RequestException:
+                    continue
+            
+            # Fallback to first pattern if none worked
+            if working_pattern is None:
+                working_pattern = url_patterns[0]
+                self.logger.warning(f"No URL pattern worked, defaulting to: {working_pattern(1)}")
+        
         while True:
             self.logger.info(f"Fetching ticket list page {page}...")
             
-            # TODO: Build the list page URL
-            # Example: list_url = f"{self.base_url}/tickets?page={page}"
-            list_url = f"{self.base_url}/tickets?page={page}"  # PLACEHOLDER - REPLACE
+            # Build list page URL using working pattern
+            if working_pattern:
+                list_url = working_pattern(page)
+            else:
+                list_url = f"{self.base_url}/tickets?page={page}"
             
             try:
                 response = self._make_request(list_url)
                 
-                # TODO: Determine if response is JSON or HTML
-                # If JSON: parse JSON and extract ticket refs
-                # If HTML: use BeautifulSoup to extract ticket refs
+                ticket_refs = []
+                content_type = response.headers.get('Content-Type', '').lower()
+                is_json_response = 'application/json' in content_type
                 
-                # PLACEHOLDER: Try JSON first, fallback to HTML
-                try:
-                    data = response.json()
-                    # TODO: Extract ticket refs from JSON structure
-                    # Example: ticket_refs = [{"ticket_id": t["id"], "url": t["url"]} for t in data.get("tickets", [])]
-                    ticket_refs = []  # PLACEHOLDER
-                except ValueError:
-                    # Not JSON, try HTML
+                # Try JSON first
+                if is_json_response:
+                    try:
+                        data = response.json()
+                        
+                        # Look for tickets under common keys
+                        tickets_list = None
+                        for key in ["tickets", "results", "data", "items"]:
+                            if key in data and isinstance(data[key], list):
+                                tickets_list = data[key]
+                                break
+                        
+                        if tickets_list:
+                            for ticket_obj in tickets_list:
+                                if not isinstance(ticket_obj, dict):
+                                    continue
+                                
+                                # Extract ticket_id from common keys
+                                ticket_id = None
+                                for id_key in ["id", "ticket_id", "number", "ticket_number"]:
+                                    if id_key in ticket_obj:
+                                        ticket_id = str(ticket_obj[id_key])
+                                        break
+                                
+                                if not ticket_id:
+                                    continue
+                                
+                                # Extract URL from common keys
+                                ticket_url = None
+                                for url_key in ["url", "href", "link", "permalink"]:
+                                    if url_key in ticket_obj:
+                                        ticket_url = str(ticket_obj[url_key])
+                                        break
+                                
+                                # Build URL if not present
+                                if not ticket_url:
+                                    ticket_url = f"{self.base_url}/tickets/{ticket_id}"
+                                
+                                ticket_refs.append({
+                                    "ticket_id": ticket_id,
+                                    "url": ticket_url
+                                })
+                    except (ValueError, KeyError, TypeError) as e:
+                        self.logger.debug(f"JSON parsing failed, trying HTML: {e}")
+                        is_json_response = False
+                
+                # Try HTML if JSON didn't work
+                if not is_json_response or not ticket_refs:
                     soup = BeautifulSoup(response.text, 'html.parser')
-                    # TODO: Extract ticket refs using BeautifulSoup selectors
-                    # Example: ticket_refs = [{"ticket_id": el.get("data-id"), "url": el.get("href")} for el in soup.select(".ticket-link")]
-                    ticket_refs = []  # PLACEHOLDER
+                    
+                    # Try multiple selectors for ticket links
+                    selectors = [
+                        "a[href*='ticket']",
+                        "a[href*='/tickets/']",
+                        "tr a[href]",
+                        "a.ticket",
+                        "a.ticket-link",
+                        "a[data-ticket-id]",
+                        ".ticket-row a",
+                        ".ticket-item a",
+                    ]
+                    
+                    links_found = set()
+                    for selector in selectors:
+                        for link in soup.select(selector):
+                            href = link.get("href")
+                            if not href:
+                                continue
+                            
+                            # Extract ticket_id
+                            ticket_id = None
+                            
+                            # Try data attribute first
+                            ticket_id = link.get("data-ticket-id") or link.get("data-id")
+                            
+                            # Try regex from href
+                            if not ticket_id:
+                                import re
+                                patterns = [
+                                    r"/tickets/(\d+)",
+                                    r"ticketId=(\d+)",
+                                    r"id=(\d+)",
+                                    r"ticket/(\d+)",
+                                    r"tickets/([^/]+)",
+                                ]
+                                for pattern in patterns:
+                                    match = re.search(pattern, href, re.IGNORECASE)
+                                    if match:
+                                        ticket_id = match.group(1)
+                                        break
+                            
+                            if not ticket_id:
+                                # Last resort: use href as-is if it looks like a ticket URL
+                                if "ticket" in href.lower():
+                                    ticket_id = href.split("/")[-1].split("?")[0]
+                            
+                            if ticket_id:
+                                # Normalize URL
+                                if not href.startswith("http"):
+                                    href = urljoin(self.base_url, href)
+                                
+                                # Deduplicate by ticket_id
+                                if ticket_id not in links_found:
+                                    links_found.add(ticket_id)
+                                    ticket_refs.append({
+                                        "ticket_id": str(ticket_id),
+                                        "url": href
+                                    })
+                    
+                    # Also try extracting from embedded JSON in script tags
+                    if not ticket_refs:
+                        for script in soup.find_all("script", type="application/json"):
+                            try:
+                                embedded_data = json.loads(script.string)
+                                # Recursively search for ticket-like structures
+                                def find_tickets(obj, path=""):
+                                    if isinstance(obj, dict):
+                                        for key, val in obj.items():
+                                            if "ticket" in key.lower() and isinstance(val, list):
+                                                for item in val:
+                                                    if isinstance(item, dict):
+                                                        tid = item.get("id") or item.get("ticket_id")
+                                                        url = item.get("url") or item.get("href")
+                                                        if tid:
+                                                            ticket_refs.append({
+                                                                "ticket_id": str(tid),
+                                                                "url": url or f"{self.base_url}/tickets/{tid}"
+                                                            })
+                                            find_tickets(val, f"{path}.{key}")
+                                    elif isinstance(obj, list):
+                                        for item in obj:
+                                            find_tickets(item, path)
+                                
+                                find_tickets(embedded_data)
+                            except (json.JSONDecodeError, AttributeError):
+                                continue
+                
+                # Debug logging
+                self.logger.info(f"Page {page} ({list_url}): extracted {len(ticket_refs)} ticket refs")
                 
                 if not ticket_refs:
                     consecutive_empty_pages += 1
@@ -438,56 +599,168 @@ class Scraper:
         raw_data = raw_ticket["raw"]
         format_type = raw_ticket["format"]
         
+        metadata = {
+            "source_url": raw_ticket["source_url"],
+            "fetched_at": raw_ticket["fetched_at"],
+            "format": format_type,
+        }
+        
         if format_type == "json":
             # Already JSON - extract messages if possible
-            # TODO: Map site-specific JSON structure to normalized format
-            # Example: return {"ticket_id": ticket_id, "messages": raw_data.get("conversation", []), "metadata": {...}}
+            messages = []
+            
+            # Look for message list under common keys
+            message_list = None
+            for key in ["messages", "conversation", "thread", "comments", "events", "replies"]:
+                if key in raw_data and isinstance(raw_data[key], list):
+                    message_list = raw_data[key]
+                    break
+            
+            if message_list:
+                for idx, msg_obj in enumerate(message_list):
+                    if not isinstance(msg_obj, dict):
+                        continue
+                    
+                    # Extract id
+                    msg_id = None
+                    for id_key in ["id", "message_id", "comment_id", "event_id"]:
+                        if id_key in msg_obj:
+                            msg_id = str(msg_obj[id_key])
+                            break
+                    if not msg_id:
+                        msg_id = str(idx)
+                    
+                    # Extract role
+                    role = "unknown"
+                    for role_key in ["role", "author_role", "authorType", "author", "sender", "user_type"]:
+                        if role_key in msg_obj:
+                            role_val = msg_obj[role_key]
+                            if isinstance(role_val, str):
+                                role = role_val.lower()
+                            else:
+                                role = str(role_val).lower()
+                            break
+                    
+                    # Extract text
+                    text = ""
+                    for text_key in ["text", "body", "content", "comment", "message", "description"]:
+                        if text_key in msg_obj:
+                            text_val = msg_obj[text_key]
+                            if isinstance(text_val, str):
+                                text = text_val.strip()
+                            elif isinstance(text_val, dict):
+                                # Sometimes text is nested in a content object
+                                text = str(text_val).strip()
+                            break
+                    
+                    # Filter out empty messages
+                    if text and len(text) >= 3:
+                        messages.append({
+                            "id": msg_id,
+                            "role": role,
+                            "text": text
+                        })
+            
+            self.logger.info(f"Parsed ticket {ticket_id}: extracted {len(messages)} messages from JSON")
+            
             return {
                 "ticket_id": ticket_id,
-                "messages": raw_data.get("messages", raw_data.get("conversation", [])),
-                "metadata": {
-                    "source_url": raw_ticket["source_url"],
-                    "fetched_at": raw_ticket["fetched_at"],
-                    "format": "json",
-                }
+                "messages": messages,
+                "metadata": metadata,
+                "raw_format": "json"
             }
         
         else:  # HTML
-            # TODO: Extract messages from HTML using BeautifulSoup
-            # Example:
-            #   soup = BeautifulSoup(raw_data, 'html.parser')
-            #   messages = []
-            #   for msg_el in soup.select(".message"):
-            #       messages.append({
-            #           "body": msg_el.get_text(),
-            #           "author": msg_el.get("data-author"),
-            #           "timestamp": msg_el.get("data-timestamp"),
-            #       })
-            
-            # For now, return HTML wrapped in JSON
             soup = BeautifulSoup(raw_data, 'html.parser')
-            messages = []  # PLACEHOLDER - implement extraction
+            messages = []
+            
+            # Try multiple selectors for message containers
+            selectors = [
+                ".message",
+                ".comment",
+                ".reply",
+                ".ticket-comment",
+                ".conversation-item",
+                "article.message",
+                "li.message",
+                ".chat-message",
+                ".thread-item",
+                "[data-message-id]",
+                "[data-comment-id]",
+            ]
+            
+            found_containers = []
+            for selector in selectors:
+                containers = soup.select(selector)
+                if containers:
+                    found_containers.extend(containers)
+                    break  # Use first selector that finds results
+            
+            # If no specific selectors worked, try broader patterns
+            if not found_containers:
+                # Look for common message-like structures
+                found_containers = soup.find_all(["div", "article", "li"], class_=re.compile(r"message|comment|reply", re.I))
+            
+            for idx, container in enumerate(found_containers):
+                # Extract text
+                text = container.get_text(" ", strip=True)
+                
+                # Filter out tiny/empty blocks
+                if not text or len(text) < 3:
+                    continue
+                
+                # Extract role from data attributes or class names
+                role = "unknown"
+                role_attrs = ["data-author", "data-role", "data-author-type", "data-user-type"]
+                for attr in role_attrs:
+                    role_val = container.get(attr)
+                    if role_val:
+                        role = str(role_val).lower()
+                        break
+                
+                # Check class names for role hints
+                if role == "unknown":
+                    classes = container.get("class", [])
+                    class_str = " ".join(classes).lower()
+                    if "agent" in class_str or "staff" in class_str or "admin" in class_str:
+                        role = "agent"
+                    elif "customer" in class_str or "user" in class_str or "client" in class_str:
+                        role = "user"
+                
+                # Extract id
+                msg_id = container.get("data-id") or container.get("data-message-id") or container.get("data-comment-id") or str(idx)
+                
+                messages.append({
+                    "id": str(msg_id),
+                    "role": role,
+                    "text": text
+                })
+            
+            # Safety fallback: if we found too many messages (likely wrong selector),
+            # keep only the longest ones
+            if len(messages) > 50:
+                self.logger.warning(f"Found {len(messages)} messages, keeping top 50 longest")
+                messages.sort(key=lambda m: len(m["text"]), reverse=True)
+                messages = messages[:50]
+            
+            self.logger.info(f"Parsed ticket {ticket_id}: extracted {len(messages)} messages from HTML")
             
             if messages:
                 return {
                     "ticket_id": ticket_id,
                     "messages": messages,
-                    "metadata": {
-                        "source_url": raw_ticket["source_url"],
-                        "fetched_at": raw_ticket["fetched_at"],
-                        "format": "html_extracted",
-                    }
+                    "metadata": metadata,
+                    "raw_format": "html_extracted"
                 }
             else:
                 # Fallback: store HTML
+                self.logger.warning(f"Could not extract messages from HTML for ticket {ticket_id}, storing raw HTML")
                 return {
                     "ticket_id": ticket_id,
+                    "messages": [],
                     "html": raw_data,
-                    "metadata": {
-                        "source_url": raw_ticket["source_url"],
-                        "fetched_at": raw_ticket["fetched_at"],
-                        "format": "html",
-                    }
+                    "metadata": metadata,
+                    "raw_format": "html"
                 }
     
     def save_ticket(self, ticket_id: str, payload: Dict[str, Any]) -> str:
@@ -541,15 +814,190 @@ class Scraper:
         
         Returns:
             Number of tickets, or -1 if unknown
-            
-        TODO: Implement site-specific logic to determine total count
         """
-        # TODO: Fetch first page or a count endpoint to determine total
-        # Example:
-        #   response = self._make_request(f"{self.base_url}/tickets/count")
-        #   return response.json().get("total", -1)
+        # Try count endpoint first
+        count_endpoints = [
+            f"{self.base_url}/api/tickets/count",
+            f"{self.base_url}/tickets/count",
+            f"{self.base_url}/api/tickets?count=true",
+        ]
+        
+        for endpoint in count_endpoints:
+            try:
+                response = self._make_request(endpoint)
+                if response.headers.get('Content-Type', '').startswith('application/json'):
+                    data = response.json()
+                    for key in ["total", "count", "totalCount", "total_items", "total_count"]:
+                        if key in data:
+                            count = data[key]
+                            if isinstance(count, int):
+                                return count
+            except requests.RequestException:
+                continue
+        
+        # Try to get count from first page metadata
+        try:
+            url_patterns = [
+                f"{self.base_url}/api/tickets?page=1",
+                f"{self.base_url}/tickets?page=1",
+            ]
+            
+            for url in url_patterns:
+                try:
+                    response = self._make_request(url)
+                    if response.headers.get('Content-Type', '').startswith('application/json'):
+                        data = response.json()
+                        # Look for total in pagination metadata
+                        for key in ["total", "count", "totalCount", "total_items", "total_count"]:
+                            if key in data:
+                                count = data[key]
+                                if isinstance(count, int):
+                                    return count
+                        # Check pagination object
+                        if "pagination" in data:
+                            pagination = data["pagination"]
+                            for key in ["total", "total_count", "totalItems"]:
+                                if key in pagination:
+                                    count = pagination[key]
+                                    if isinstance(count, int):
+                                        return count
+                except requests.RequestException:
+                    continue
+        except Exception:
+            pass
         
         return -1  # Unknown
+    
+    def proof_of_concept(self, expected_count: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Prove the scraper works by:
+          1) Counting how many ticket refs we can discover (should match expected_count if provided)
+          2) Fetching + saving exactly one ticket (the first one not already saved)
+        
+        Args:
+            expected_count: Optional expected number of tickets to validate against
+        
+        Returns:
+            Dict with summary info including:
+                - discovered_ticket_refs: int
+                - expected_count: Optional[int]
+                - count_matches: Optional[bool]
+                - extracted_ticket_id: Optional[str]
+                - saved_path: Optional[str]
+        """
+        existing_ids = self.load_existing_ticket_ids()
+        
+        discovered = 0
+        first_new_ref: Optional[Dict[str, Any]] = None
+        
+        for ref in self.iter_ticket_refs():
+            discovered += 1
+            tid = ref.get("ticket_id")
+            if first_new_ref is None and tid and tid not in existing_ids:
+                first_new_ref = ref
+        
+        if expected_count is not None:
+            if discovered != expected_count:
+                self.logger.warning(
+                    f"Ticket count mismatch: discovered={discovered} expected={expected_count}"
+                )
+            else:
+                self.logger.info(f"Ticket count matches expected_count={expected_count}")
+        else:
+            self.logger.info(f"Discovered ticket refs: {discovered}")
+        
+        result: Dict[str, Any] = {
+            "discovered_ticket_refs": discovered,
+            "expected_count": expected_count,
+            "count_matches": (discovered == expected_count) if expected_count is not None else None,
+            "extracted_ticket_id": None,
+            "saved_path": None,
+        }
+        
+        if not first_new_ref:
+            self.logger.warning(
+                "No new ticket refs found to extract (maybe all are already saved)."
+            )
+            return result
+        
+        # Fetch one ticket
+        raw_ticket = self.fetch_ticket(first_new_ref)
+        
+        # Convert to JSON payload you want to persist (lossless if needed)
+        payload = self.parse_ticket_to_json(raw_ticket)
+        
+        ticket_id = raw_ticket.get("ticket_id") or first_new_ref.get("ticket_id") or "unknown_ticket"
+        saved_path = self.save_ticket(ticket_id, payload)
+        
+        self.logger.info(f"Extracted 1 ticket: ticket_id={ticket_id} saved_path={saved_path}")
+        
+        # Print ticket summary
+        self._print_ticket_summary(payload)
+        
+        result["extracted_ticket_id"] = ticket_id
+        result["saved_path"] = saved_path
+        result["ticket_summary"] = payload  # Include full ticket data in result
+        return result
+    
+    def _print_ticket_summary(self, ticket_data: Dict[str, Any]) -> None:
+        """
+        Print a formatted summary of the ticket data.
+        
+        Args:
+            ticket_data: Parsed ticket JSON dict
+        """
+        print("\n" + "=" * 70)
+        print("TICKET SUMMARY")
+        print("=" * 70)
+        
+        ticket_id = ticket_data.get("ticket_id", "unknown")
+        print(f"Ticket ID: {ticket_id}")
+        
+        # Metadata
+        metadata = ticket_data.get("metadata", {})
+        if metadata:
+            print(f"Source URL: {metadata.get('source_url', 'N/A')}")
+            print(f"Fetched At: {metadata.get('fetched_at', 'N/A')}")
+            print(f"Format: {metadata.get('format', ticket_data.get('raw_format', 'N/A'))}")
+        
+        # Messages
+        messages = ticket_data.get("messages", [])
+        message_count = len(messages)
+        print(f"\nMessage Count: {message_count}")
+        
+        if messages:
+            print("\nMessages Preview:")
+            print("-" * 70)
+            # Show first 3 messages
+            for idx, msg in enumerate(messages[:3], 1):
+                role = msg.get("role", "unknown")
+                text = msg.get("text", "")
+                # Truncate long messages
+                preview = text[:200] + "..." if len(text) > 200 else text
+                print(f"\n[{idx}] Role: {role}")
+                print(f"    Text: {preview}")
+            
+            if message_count > 3:
+                print(f"\n... and {message_count - 3} more message(s)")
+        else:
+            print("\nNo messages extracted.")
+            # Check if HTML fallback was used
+            if "html" in ticket_data:
+                html_preview = ticket_data["html"][:200] if isinstance(ticket_data["html"], str) else str(ticket_data["html"])[:200]
+                print(f"HTML Content (preview): {html_preview}...")
+        
+        # Other fields
+        other_fields = {k: v for k, v in ticket_data.items() 
+                       if k not in ["ticket_id", "messages", "metadata", "html", "raw_format"]}
+        if other_fields:
+            print("\nOther Fields:")
+            for key, value in other_fields.items():
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    print(f"  {key}: {value}")
+                elif isinstance(value, (list, dict)):
+                    print(f"  {key}: {type(value).__name__} ({len(value) if isinstance(value, list) else 'dict'})")
+        
+        print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
