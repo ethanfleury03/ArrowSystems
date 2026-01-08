@@ -11,12 +11,13 @@ This module handles the chunking phase of document ingestion:
 import os
 import json
 import logging
+import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from sqlalchemy.orm import Session
-from llama_index.core.schema import Document
+from llama_index.core.schema import Document as LlamaDocument
 from llama_index.core.schema import TextNode
 
 from backend.utils.db import SessionLocal, DocumentIngestionMetadata
@@ -94,8 +95,8 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
         
         # Determine file source: prefer GCS path, fall back to local file_path
         # First, try to get GCS path from Document table
-        from backend.utils.db import Document
-        doc_record = session.query(Document).filter(Document.file_name == metadata.filename).first()
+        from backend.utils.db import Document as DBDocument
+        doc_record = session.query(DBDocument).filter(DBDocument.file_name == metadata.filename).first()
         gcs_path = doc_record.gcs_path if doc_record else None
         
         # If no GCS path in Document table, check if we have a local file_path
@@ -177,7 +178,7 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
         
         # Load document using existing DocumentLoader
         loader = DocumentLoader(str(file_path.parent))
-        documents: List[Document] = []
+        documents: List[LlamaDocument] = []
         
         if file_ext == '.pdf':
             from llama_index.core import SimpleDirectoryReader
@@ -205,7 +206,7 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
             original_text = doc.text or ""
             cleaned_text = text_preprocessor.clean_text(original_text, metadata=doc.metadata)
             if not text_preprocessor.is_low_content_page(cleaned_text) and cleaned_text:
-                new_doc = Document(
+                new_doc = LlamaDocument(
                     text=cleaned_text,
                     metadata=doc.metadata
                 )
@@ -353,7 +354,12 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
         return metadata_id
         
     except Exception as e:
+        error_type = type(e).__name__
         error_msg = str(e)
+        full_traceback = traceback.format_exc()
+        # Store full error details for debugging
+        error_detail = f"{error_type}: {error_msg}\n{full_traceback}"
+        
         logger.exception(
             {
                 "event": "document_ingestion_failed",
@@ -361,7 +367,10 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
                 "filename": getattr(document, "filename", None) if document else None,
                 "request_id": request_id,
                 "error": error_msg,
-            }
+                "error_type": error_type,
+                "traceback": full_traceback,
+            },
+            exc_info=True
         )
         
         # Update status to FAILED
@@ -372,7 +381,8 @@ def run_chunking(metadata_id: str, request_id: Optional[str] = None) -> Optional
                 ).first()
                 if metadata:
                     metadata.status = "FAILED"
-                    metadata.error_message = error_msg
+                    # Store full traceback (truncate if too long for DB column)
+                    metadata.error_message = error_detail[:5000] if len(error_detail) > 5000 else error_detail
                     session.commit()
             except Exception as commit_error:
                 logger.error(
