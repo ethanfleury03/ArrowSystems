@@ -1,4 +1,7 @@
+import json
+import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -25,20 +28,21 @@ class Ticket:
     - solution_description: LLM-generated solution description (populated via derive())
     """
     
-    def __init__(self, ticket_id: str, ticket_content: Dict[str, Any]):
+    def __init__(self, ticket_id: str, ticket_content: Any):
         """
         Initialize a Ticket with raw data.
         
         Args:
             ticket_id: Unique identifier for the ticket
-            ticket_content: Raw JSON dictionary of the ticket conversation
+            ticket_content: Raw JSON (dict, list, or any structure) of the ticket conversation
         """
         self.ticket_id = ticket_id
         self.ticket_content = ticket_content
         
         # Deterministic fields computed immediately
-        self.message_count = self._get_ticket_length(ticket_content)
-        self.error_codes = self._extract_error_codes(ticket_content)
+        messages = self.extract_messages(ticket_content)
+        self.message_count = len(messages)
+        self.error_codes = self._extract_error_codes()
         
         # LLM-derived fields (None until derive() is called)
         self.ticket_title: Optional[str] = None
@@ -46,89 +50,129 @@ class Ticket:
         self.is_resolved: Optional[bool] = None
         self.solution_description: Optional[str] = None
     
-    def _extract_messages(self, ticket_content: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def extract_messages(self, ticket_content: Any) -> List[Dict[str, Any]]:
         """
-        Extract a list of messages from ticket_content.
+        Extract and normalize messages from ticket_content.
         
-        Tries common keys like 'messages', 'conversation', 'thread'.
-        If ticket_content is already a list, returns it.
-        Otherwise returns empty list.
+        Returns normalized messages with structure:
+        {
+            "id": str (or index),
+            "role": str (e.g., "user", "agent", "system", or "unknown"),
+            "text": str
+        }
+        
+        Supports common shapes:
+        - ticket_content["messages"] list
+        - ticket_content["conversation"] list
+        - ticket_content["thread"] list
+        - if ticket_content is already a list -> treat as messages
+        
+        Within each message dict, text may be under keys like:
+        "text", "body", "comment", "message", "content"
         
         Args:
             ticket_content: Raw ticket JSON
             
         Returns:
-            List of message dictionaries
+            List of normalized message dictionaries
         """
-        if isinstance(ticket_content, list):
-            return ticket_content
+        raw_messages = []
         
-        if isinstance(ticket_content, dict):
+        # Handle different input shapes
+        if isinstance(ticket_content, list):
+            raw_messages = ticket_content
+        elif isinstance(ticket_content, dict):
             # Try common keys
             for key in ['messages', 'conversation', 'thread', 'comments', 'replies']:
                 if key in ticket_content and isinstance(ticket_content[key], list):
-                    return ticket_content[key]
+                    raw_messages = ticket_content[key]
+                    break
         
-        return []
-    
-    def _get_ticket_length(self, ticket_content: Dict[str, Any]) -> int:
-        """
-        Get the number of messages in the ticket conversation.
+        # Normalize messages
+        normalized = []
+        for idx, msg in enumerate(raw_messages):
+            if isinstance(msg, str):
+                # Simple string message
+                normalized.append({
+                    "id": str(idx),
+                    "role": "unknown",
+                    "text": msg
+                })
+            elif isinstance(msg, dict):
+                # Extract text from common fields
+                text = None
+                for field in ['text', 'body', 'comment', 'message', 'content']:
+                    if field in msg and isinstance(msg[field], str):
+                        text = msg[field]
+                        break
+                
+                if text is None:
+                    # Try to stringify the whole dict
+                    text = str(msg)
+                
+                # Extract role if available
+                role = msg.get('role', msg.get('author', msg.get('sender', 'unknown')))
+                if not isinstance(role, str):
+                    role = 'unknown'
+                
+                # Extract id if available
+                msg_id = msg.get('id', msg.get('message_id', str(idx)))
+                if not isinstance(msg_id, str):
+                    msg_id = str(msg_id)
+                
+                normalized.append({
+                    "id": msg_id,
+                    "role": role.lower() if isinstance(role, str) else "unknown",
+                    "text": text
+                })
         
-        Args:
-            ticket_content: Raw ticket JSON
-            
-        Returns:
-            Number of messages (0 if unable to determine)
-        """
-        messages = self._extract_messages(ticket_content)
-        return len(messages)
+        return normalized
     
-    def _extract_error_codes(self, ticket_content: Dict[str, Any]) -> List[str]:
+    def _extract_error_codes(self) -> List[str]:
         """
         Extract error codes from the ticket conversation text using regex.
         
         Captures patterns like:
-        - E123, ERR123 (alphanumeric codes)
-        - Error 52, Error: 52 (Error + number)
+        - "Error 52", "Error: 52" -> normalized to "ERROR_52"
+        - "E52", "ERR52", "E-52"
+        - Codes like "DF-102" or "AB1234" (2-5 letters + optional dash + 2-5 digits)
         
-        Args:
-            ticket_content: Raw ticket JSON
-            
         Returns:
-            List of unique error codes found (sorted)
+            List of unique error codes found (sorted, normalized)
         """
-        # Get combined text from messages
-        messages = self._extract_messages(ticket_content)
-        text_parts = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                for field in ['body', 'text', 'content', 'message', 'comment']:
-                    if field in msg and isinstance(msg[field], str):
-                        text_parts.append(msg[field])
-                        break
-            elif isinstance(msg, str):
-                text_parts.append(msg)
-        text = ' '.join(text_parts)
-        
-        # Patterns to match:
-        # - Alphanumeric codes: E123, ERR123, ERROR123, etc.
-        # - "Error" + number: Error 52, Error: 52, etc.
-        patterns = [
-            r'\bE[A-Z0-9]+\d+\b',  # E123, ERR123, ERROR123
-            r'\bERR[A-Z0-9]*\d+\b',  # ERR123, ERRCODE123
-            r'Error\s*:?\s*(\d+)',  # Error 52, Error: 52
-        ]
+        text = self.combined_text
         
         error_codes = set()
-        for pattern in patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                if isinstance(match, tuple):
-                    # For groups, take the first non-empty group
-                    match = next((m for m in match if m), '')
-                if match:
-                    error_codes.add(str(match).upper())
+        
+        # Pattern 1: "Error" + number (Error 52, Error: 52)
+        error_number_pattern = r'Error\s*:?\s*(\d+)'
+        matches = re.findall(error_number_pattern, text, re.IGNORECASE)
+        for match in matches:
+            error_codes.add(f"ERROR_{match}")
+        
+        # Pattern 2: E + digits (E52, E-52, E123)
+        e_pattern = r'\bE-?\d+\b'
+        matches = re.findall(e_pattern, text, re.IGNORECASE)
+        for match in matches:
+            normalized = match.replace('-', '').upper()
+            error_codes.add(normalized)
+        
+        # Pattern 3: ERR + alphanumeric (ERR52, ERR123, ERRCODE123)
+        err_pattern = r'\bERR[A-Z0-9]*\d+\b'
+        matches = re.findall(err_pattern, text, re.IGNORECASE)
+        for match in matches:
+            error_codes.add(match.upper())
+        
+        # Pattern 4: Letter codes with optional dash + digits (DF-102, AB1234)
+        # 2-5 letters, optional dash, 2-5 digits
+        letter_code_pattern = r'\b[A-Z]{2,5}-?\d{2,5}\b'
+        matches = re.findall(letter_code_pattern, text, re.IGNORECASE)
+        for match in matches:
+            # Normalize: remove dash, uppercase
+            normalized = match.replace('-', '').upper()
+            # Only add if it looks like an error code (has both letters and digits)
+            if re.search(r'[A-Z]', normalized) and re.search(r'\d', normalized):
+                error_codes.add(normalized)
         
         return sorted(list(error_codes))
     
@@ -137,36 +181,39 @@ class Ticket:
         """
         Get a clean concatenation of all message text from the conversation.
         
+        Messages are joined with blank lines for readability.
         This is deterministic and used for embeddings/semantic matching.
         Does not call the LLM.
         
         Returns:
-            Concatenated text from all messages
+            Concatenated text from all messages (separated by blank lines)
         """
-        messages = self._extract_messages(self.ticket_content)
-        
-        text_parts = []
-        for msg in messages:
-            # Try common text fields
-            if isinstance(msg, dict):
-                for field in ['body', 'text', 'content', 'message', 'comment']:
-                    if field in msg and isinstance(msg[field], str):
-                        text_parts.append(msg[field])
-                        break
-            elif isinstance(msg, str):
-                text_parts.append(msg)
-        
-        return ' '.join(text_parts)
+        messages = self.extract_messages(self.ticket_content)
+        text_parts = [msg.get("text", "") for msg in messages if msg.get("text")]
+        return "\n\n".join(text_parts)
     
-    def derive(self, llm_client: Any, *, force: bool = False) -> None:
+    def derive(
+        self,
+        *,
+        force: bool = False,
+        model: str = "claude-sonnet-4-5-20250929",
+        max_tokens: int = 1200,
+        env_path: Optional[str] = None
+    ) -> None:
         """
-        Populate LLM-derived fields using the provided LLM client.
+        Populate LLM-derived fields using Anthropic API with tool-use for structured output.
         
         If fields are already present and force=False, does nothing.
         
         Args:
-            llm_client: LLM client instance (provider-agnostic interface)
             force: If True, regenerate fields even if they already exist
+            model: Anthropic model to use (default: claude-3-5-sonnet-20241022)
+            max_tokens: Maximum tokens for response
+            env_path: Optional path to .env file (default: Scraper/.env relative to this file)
+        
+        Raises:
+            ValueError: If ANTHROPIC_API_KEY is not found
+            RuntimeError: If LLM response doesn't contain expected tool-use block
         """
         if not force:
             if all([
@@ -177,74 +224,165 @@ class Ticket:
             ]):
                 return
         
-        # Generate LLM-derived fields
-        self.ticket_title = self._generate_ticket_title(llm_client, self.ticket_content)
-        self.ticket_description = self._generate_ticket_description(llm_client, self.ticket_content)
-        self.is_resolved = self._generate_is_resolved(llm_client, self.ticket_content)
-        
-        if self.is_resolved:
-            self.solution_description = self._generate_solution_description(llm_client, self.ticket_content)
+        # Load environment variables (only when needed, not at import time)
+        if env_path is None:
+            # Default to Scraper/.env relative to this file
+            ticket_file = Path(__file__).parent
+            env_path = ticket_file / ".env"
         else:
-            self.solution_description = "The ticket was not resolved."
+            env_path = Path(env_path)
+        
+        # Load .env file if it exists
+        if env_path.exists():
+            from dotenv import load_dotenv
+            load_dotenv(env_path)
+        
+        # Get API key
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError(
+                f"ANTHROPIC_API_KEY not found in environment. "
+                f"Please set it in {env_path} or as an environment variable."
+            )
+        
+        # Import anthropic only when needed
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError(
+                "anthropic package not installed. Install with: pip install anthropic"
+            )
+        
+        # Create client
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        # Prepare input text (truncate if extremely long)
+        combined = self.combined_text
+        if len(combined) > 100000:  # Very long conversations
+            # Keep first 50k chars and last 10k chars
+            combined = combined[:50000] + "\n\n[... truncated ...]\n\n" + combined[-10000:]
+        
+        # Build user message
+        user_content = f"""Ticket ID: {self.ticket_id}
+
+Error Codes Found: {', '.join(self.error_codes) if self.error_codes else 'None'}
+
+Ticket Conversation:
+{combined}
+
+Please extract the ticket information using the tool."""
+        
+        # Define tool schema
+        tool_schema = {
+            "type": "object",
+            "properties": {
+                "ticket_title": {
+                    "type": "string",
+                    "description": "A concise one-sentence summary of the ticket"
+                },
+                "ticket_description": {
+                    "type": "string",
+                    "description": "A detailed description of the problem or issue"
+                },
+                "is_resolved": {
+                    "type": "boolean",
+                    "description": "Whether the ticket was resolved/solved"
+                },
+                "solution_description": {
+                    "type": "string",
+                    "description": "If resolved, describe the solution. If not resolved, describe why or what was attempted."
+                }
+            },
+            "required": ["ticket_title", "ticket_description", "is_resolved", "solution_description"],
+            "additionalProperties": False
+        }
+        
+        # Make API call
+        try:
+            message = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system="You are a ticket analysis system. Return the result ONLY by calling the extract_ticket_record tool. Do not output extra text or explanations.",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": user_content
+                    }
+                ],
+                tools=[
+                    {
+                        "name": "extract_ticket_record",
+                        "description": "Extract structured information from a ticket conversation",
+                        "input_schema": tool_schema
+                    }
+                ],
+                tool_choice={"type": "tool", "name": "extract_ticket_record"}
+            )
+        except Exception as e:
+            raise RuntimeError(f"Anthropic API call failed: {e}")
+        
+        # Parse response - find tool_use block
+        tool_use_block = None
+        for content_block in message.content:
+            if content_block.type == "tool_use" and content_block.name == "extract_ticket_record":
+                tool_use_block = content_block
+                break
+        
+        if not tool_use_block:
+            # Log the raw response for debugging
+            raw_content = "\n".join(str(block) for block in message.content)
+            raise RuntimeError(
+                f"Expected tool_use block 'extract_ticket_record' not found in response. "
+                f"Raw response content:\n{raw_content}"
+            )
+        
+        # Extract fields from tool input
+        try:
+            extracted = tool_use_block.input
+            self.ticket_title = extracted.get("ticket_title", "")
+            self.ticket_description = extracted.get("ticket_description", "")
+            self.is_resolved = extracted.get("is_resolved", False)
+            self.solution_description = extracted.get("solution_description", "")
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse tool_use input: {e}")
     
-    def _generate_ticket_title(self, llm_client: Any, ticket_content: Dict[str, Any]) -> str:
+    def to_dict(self) -> Dict[str, Any]:
         """
-        Use LLM to generate a one-sentence summary of the entire ticket.
+        Convert ticket to a dictionary representation.
+        
+        Returns:
+            Dictionary with all ticket fields
+        """
+        return {
+            "ticket_id": self.ticket_id,
+            "message_count": self.message_count,
+            "error_codes": self.error_codes,
+            "ticket_title": self.ticket_title,
+            "ticket_description": self.ticket_description,
+            "is_resolved": self.is_resolved,
+            "solution_description": self.solution_description,
+        }
+    
+    def save_derived(self, path: Optional[str] = None) -> str:
+        """
+        Save derived ticket data to a JSON file.
         
         Args:
-            llm_client: LLM client instance
-            ticket_content: Raw ticket JSON
+            path: Optional file path. If None, uses Scraper/out/derived_{ticket_id}.json
             
         Returns:
-            One-sentence summary string
+            Path to saved file
         """
-        # Placeholder: implement with your LLM client
-        # Example: return llm_client.generate_title(ticket_content)
-        return ""
-    
-    def _generate_ticket_description(self, llm_client: Any, ticket_content: Dict[str, Any]) -> str:
-        """
-        Use LLM to generate a description of the ticket.
+        if path is None:
+            ticket_file = Path(__file__).parent
+            out_dir = ticket_file / "out"
+            out_dir.mkdir(exist_ok=True)
+            path = str(out_dir / f"derived_{self.ticket_id}.json")
         
-        Args:
-            llm_client: LLM client instance
-            ticket_content: Raw ticket JSON
-            
-        Returns:
-            Ticket description string
-        """
-        # Placeholder: implement with your LLM client
-        # Example: return llm_client.generate_description(ticket_content)
-        return ""
-    
-    def _generate_is_resolved(self, llm_client: Any, ticket_content: Dict[str, Any]) -> bool:
-        """
-        Use LLM to determine if the ticket was resolved.
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         
-        Args:
-            llm_client: LLM client instance
-            ticket_content: Raw ticket JSON
-            
-        Returns:
-            True if resolved, False otherwise
-        """
-        # Placeholder: implement with your LLM client
-        # Example: return llm_client.is_resolved(ticket_content)
-        return False
-    
-    def _generate_solution_description(self, llm_client: Any, ticket_content: Dict[str, Any]) -> str:
-        """
-        Use LLM to generate a description of the solution to the ticket.
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
         
-        Only called if is_resolved is True.
-        
-        Args:
-            llm_client: LLM client instance
-            ticket_content: Raw ticket JSON
-            
-        Returns:
-            Solution description string
-        """
-        # Placeholder: implement with your LLM client
-        # Example: return llm_client.generate_solution_description(ticket_content)
-        return ""
+        return str(path)
