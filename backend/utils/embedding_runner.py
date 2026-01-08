@@ -12,6 +12,7 @@ This module handles the embedding phase of document ingestion:
 import os
 import json
 import logging
+import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -359,7 +360,12 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
         )
         
     except Exception as e:
+        error_type = type(e).__name__
         error_msg = str(e)
+        full_traceback = traceback.format_exc()
+        # Store full error details for debugging
+        error_detail = f"{error_type}: {error_msg}\n{full_traceback}"
+        
         logger.exception(
             {
                 "event": "document_ingestion_failed",
@@ -367,7 +373,10 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
                 "filename": getattr(document, "filename", None) if document else None,
                 "request_id": request_id,
                 "error": error_msg,
-            }
+                "error_type": error_type,
+                "traceback": full_traceback,
+            },
+            exc_info=True
         )
         
         # Update status to FAILED
@@ -378,7 +387,8 @@ def run_embedding(metadata_id: str, request_id: Optional[str] = None) -> None:
                 ).first()
                 if metadata:
                     metadata.status = "FAILED"
-                    metadata.error_message = error_msg
+                    # Store full traceback (truncate if too long for DB column)
+                    metadata.error_message = error_detail[:5000] if len(error_detail) > 5000 else error_detail
                     session.commit()
             except Exception as commit_error:
                 logger.error(
