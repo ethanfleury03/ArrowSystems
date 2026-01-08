@@ -55,11 +55,25 @@ ENV HF_HUB_ENABLE_HF_TRANSFER=0
 
 RUN python - <<'PY'
 import os
+import glob
 print("[BUILD] Pre-downloading embedding and reranker models...")
 print("[BUILD] VERIFICATION_MARKER: model_pre_download_start")
 
-cache = os.getenv("SENTENCE_TRANSFORMERS_HOME") or os.getenv("HF_HOME") or "/app/.cache/huggingface"
-print(f"[BUILD] Cache directory: {cache}")
+# CRITICAL FIX: Use consistent cache directory structure
+# Runtime expects models in /app/.cache/huggingface/hub/
+# Set environment variables to match runtime expectations
+cache_base = "/app/.cache/huggingface"
+cache_hub = os.path.join(cache_base, "hub")
+os.makedirs(cache_hub, exist_ok=True)
+
+# Set environment variables to match runtime
+os.environ["HF_HOME"] = cache_base
+os.environ["HF_HUB_CACHE"] = cache_hub
+os.environ["TRANSFORMERS_CACHE"] = cache_base
+os.environ["SENTENCE_TRANSFORMERS_HOME"] = cache_base
+
+print(f"[BUILD] Cache base directory: {cache_base}")
+print(f"[BUILD] Cache hub directory: {cache_hub}")
 
 # Download embedding model (BAAI/bge-large-en-v1.5 - 1024 dimensions)
 # CRITICAL: Runtime uses SentenceTransformer via HuggingFaceEmbedding wrapper
@@ -67,7 +81,11 @@ print(f"[BUILD] Cache directory: {cache}")
 from sentence_transformers import SentenceTransformer
 print("[BUILD] Downloading BAAI/bge-large-en-v1.5 (embedding model)...")
 print("[BUILD] VERIFICATION_MARKER: embedding_download_start")
-embed_model = SentenceTransformer("BAAI/bge-large-en-v1.5", cache_folder=cache)
+try:
+    embed_model = SentenceTransformer("BAAI/bge-large-en-v1.5", cache_folder=cache_hub)
+except TypeError:
+    # Fallback for newer versions
+    embed_model = SentenceTransformer("BAAI/bge-large-en-v1.5")
 dim = embed_model.get_sentence_embedding_dimension()
 print(f"[BUILD] Embedding model downloaded. Dimension: {dim} (expected: 1024)")
 print("[BUILD] VERIFICATION_MARKER: embedding_download_done")
@@ -83,21 +101,40 @@ print("[BUILD] VERIFICATION_MARKER: reranker_download_start")
 try:
     # Use cache_folder parameter if available (older sentence-transformers)
     try:
-        reranker = CrossEncoder("BAAI/bge-reranker-large", cache_folder=cache, device="cpu")
+        reranker = CrossEncoder("BAAI/bge-reranker-large", cache_folder=cache_hub, device="cpu")
     except TypeError:
         # Fallback for newer versions that don't support cache_folder
-        os.environ["SENTENCE_TRANSFORMERS_HOME"] = cache
+        # Environment variables should be sufficient
         reranker = CrossEncoder("BAAI/bge-reranker-large", device="cpu")
-    print("[BUILD] Reranker model downloaded.")
-    print("[BUILD] VERIFICATION_MARKER: reranker_download_done")
+    
+    # Verify reranker model files exist
+    reranker_pattern = os.path.join(cache_hub, "models--BAAI--bge-reranker-large", "**", "*.safetensors")
+    reranker_files = glob.glob(reranker_pattern, recursive=True)
+    if not reranker_files:
+        # Also check for .bin files (older format)
+        reranker_pattern_bin = os.path.join(cache_hub, "models--BAAI--bge-reranker-large", "**", "*.bin")
+        reranker_files = glob.glob(reranker_pattern_bin, recursive=True)
+    
+    if reranker_files:
+        print(f"[BUILD] Reranker model downloaded. Found {len(reranker_files)} model file(s).")
+        print("[BUILD] VERIFICATION_MARKER: reranker_download_done")
+    else:
+        print("[BUILD] WARNING: Reranker loaded but model files not found in expected location")
+        print("[BUILD] VERIFICATION_MARKER: reranker_download_done")
 except Exception as e:
-    print(f"[BUILD] Reranker download warning (non-fatal): {e}")
+    print(f"[BUILD] Reranker download error: {e}")
+    import traceback
+    print(f"[BUILD] Reranker error traceback: {traceback.format_exc()}")
     print("[BUILD] VERIFICATION_MARKER: reranker_download_failed")
+    raise  # Make reranker download failure fatal to catch issues early
 
-print(f"[BUILD] Model pre-download complete. Cache contents:")
+# Verify cache structure
+print(f"[BUILD] Model pre-download complete. Verifying cache structure...")
 import subprocess
-subprocess.run(["ls", "-la", cache], check=False)
-subprocess.run(["du", "-sh", cache], check=False)
+subprocess.run(["ls", "-la", cache_base], check=False)
+if os.path.exists(cache_hub):
+    subprocess.run(["find", cache_hub, "-name", "*.safetensors", "-o", "-name", "*.bin"], check=False)
+    subprocess.run(["du", "-sh", cache_hub], check=False)
 print("[BUILD] VERIFICATION_MARKER: model_pre_download_done")
 PY
 

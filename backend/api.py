@@ -3193,14 +3193,8 @@ async def query_knowledge_base(request: Request):
                 dynamic_windowing=query_request.dynamic_windowing
             )
         
-        # Check machine confirmation for customers
-        # Customers must confirm their machine list before querying
-        if user_role and user_role.upper() == "CUSTOMER":
-            if query_request.machine_confirmation is not True:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Please confirm your machines first."
-                )
+        # Machine confirmation is no longer required - users can query immediately
+        # The machine_confirmation flag is kept for backward compatibility but is not enforced
         
         # Hybrid approach: If selected_machine is provided, use only that machine + GENERAL
         # Otherwise, use all assigned machines (backward compatibility)
