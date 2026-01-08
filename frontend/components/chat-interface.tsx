@@ -53,7 +53,7 @@ export function ChatInterface() {
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [machineConfirmation, setMachineConfirmation] = useState(false)
+  const [machineConfirmation, setMachineConfirmation] = useState(true) // Default to true - no confirmation required
   const [selectedMachine, setSelectedMachine] = useState<string | null>(null)
   // Tri-state auth: null = loading, false = guest (not authenticated), UserInfo = authenticated
   const [userInfo, setUserInfo] = useState<UserInfo | null | false>(null) // null = loading
@@ -157,32 +157,19 @@ export function ChatInterface() {
         // Start RAG status polling (non-blocking, happens in background)
         startRagPolling()
         
-        // Only show onboarding for customers and if not already shown and no messages
-        if (user.role?.toUpperCase() === "CUSTOMER" && !onboardingShownRef.current && messages.length === 0) {
-          const filteredMachines = user.machine_models && user.machine_models.length > 0
-            ? user.machine_models.filter(m => m !== "GENERAL")
-            : []
-          
-          const companyName = user.company_name || "Customer"
-          
-          // Format machine list as Markdown bullet points
-          let machineListText = ""
-          if (filteredMachines.length > 0) {
-            // Use Markdown list syntax (- for bullet points)
-            machineListText = filteredMachines.map(m => `- ${m}`).join("\n")
-          } else {
-            machineListText = "No machines assigned"
-          }
-          
-          const onboardingMessage: Message = {
-            id: `onboarding-${Date.now()}`,
+        // Show welcome message for all users on first load
+        if (!onboardingShownRef.current && messages.length === 0) {
+          const welcomeMessage: Message = {
+            id: `welcome-${Date.now()}`,
             role: "assistant",
-            content: `Hello ${companyName}, let's try to solve your problem.\n\nAccording to our records, you have the following machines:\n\n${machineListText}\n\nIs that correct?`,
+            content: "Thank you for using Arrow Systems AI Support. Please feel free to ask questions to try and solve issues with your machine or if you just want to know more information about your machine. AI can be wrong so always double check important informaiton with technicians!",
             timestamp: new Date(),
           }
           
-          setMessages([onboardingMessage])
+          setMessages([welcomeMessage])
           onboardingShownRef.current = true
+          // Set machine confirmation to true by default so users can ask questions immediately
+          setMachineConfirmation(true)
         }
       } catch (error) {
         console.error("Failed to fetch user info:", error)
@@ -260,103 +247,9 @@ export function ChatInterface() {
     setInput("")
     setIsLoading(true)
 
-    // Handle machine confirmation for customers
-    // userInfo is now guaranteed to be UserInfo after type guard above
-    if (userInfo.role?.toUpperCase() === "CUSTOMER" && !machineConfirmation) {
-      // Add user message first
-      setMessages((prev) => [...prev, userMessage])
-      
-      if (userInput === "yes" || userInput === "y") {
-        // User confirmed machines
-        const filteredMachines = userInfo.machine_models && userInfo.machine_models.length > 0
-          ? userInfo.machine_models.filter(m => m !== "GENERAL")
-          : []
-        
-        if (filteredMachines.length === 0) {
-          // No machines assigned, just confirm
-          const confirmMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: "assistant",
-            content: "Perfect. What can I help you with today?",
-            timestamp: new Date(),
-          }
-          setMessages((prev) => [...prev, confirmMessage])
-          setMachineConfirmation(true)
-          setIsLoading(false)
-          return
-        } else if (filteredMachines.length === 1) {
-          // Only one machine, auto-select it
-          const confirmMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: "assistant",
-            content: `Perfect! I'll help you with your ${filteredMachines[0]}. What can I help you with today?`,
-            timestamp: new Date(),
-          }
-          setMessages((prev) => [...prev, confirmMessage])
-          setMachineConfirmation(true)
-          setSelectedMachine(filteredMachines[0])
-          setIsLoading(false)
-          return
-        } else {
-          // Multiple machines - direct to sidebar selection
-          const confirmMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: "assistant",
-            content: "Perfect! Select the machine you would like to query in the sidebar and go ahead and get started.",
-            timestamp: new Date(),
-          }
-          setMessages((prev) => [...prev, confirmMessage])
-          setMachineConfirmation(true)
-          setIsLoading(false)
-          return
-        }
-      } else if (userInput === "no" || userInput === "n") {
-        // User said machines are wrong
-        const rejectMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "Understood. Your machine list can only be updated by your company's administrator.\n\nPlease contact your admin if something needs to be changed.",
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, rejectMessage])
-        setIsLoading(false)
-        return
-      } else {
-        // User tried to ask a question before confirming
-        const blockMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "Please confirm your machines first by replying 'yes' or 'no'.",
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, blockMessage])
-        setIsLoading(false)
-        return
-      }
-    }
-
-    // Block queries until machine is selected (for customers with multiple machines)
-    // Check if user has multiple machines and hasn't selected one yet
-    // userInfo is guaranteed to be UserInfo after type guard in handleSubmit
-    if (userInfo.role?.toUpperCase() === "CUSTOMER" && machineConfirmation) {
-      const filteredMachines = userInfo.machine_models && userInfo.machine_models.length > 0
-        ? userInfo.machine_models.filter(m => m !== "GENERAL")
-        : []
-      
-      // If multiple machines and none selected, block queries and direct to sidebar
-      if (filteredMachines.length > 1 && !selectedMachine) {
-        setMessages((prev) => [...prev, userMessage])
-        const blockMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "Please select a machine from the sidebar first before asking questions.",
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, blockMessage])
-        setIsLoading(false)
-        return
-      }
-    }
+    // Machine confirmation is no longer required - users can ask questions immediately
+    // If no machine is selected and user has multiple machines, proceed with all machines
+    // Machine selection in sidebar is optional for better accuracy but not required
 
     // Add user message to chat (only if we're proceeding to RAG query)
     setMessages((prev) => [...prev, userMessage])
@@ -562,14 +455,8 @@ export function ChatInterface() {
     setConversationId(null) // Reset conversation_id when loading from history (starts new conversation)
     setSidebarOpen(false)
     setInput("")
-    // Reset confirmation state when loading a conversation
-    // Check if confirmation was already done in the loaded messages
-    const hasConfirmation = loadedMessages.some(
-      msg => msg.role === "assistant" && 
-      (msg.content.includes("Perfect. What can I help you with today?") || 
-       msg.content.includes("What can I help you with today?"))
-    )
-    setMachineConfirmation(hasConfirmation)
+    // Machine confirmation is no longer required - always set to true
+    setMachineConfirmation(true)
     textareaRef.current?.focus()
   }
   

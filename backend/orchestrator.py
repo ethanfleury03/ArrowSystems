@@ -2092,6 +2092,20 @@ class ResponseGenerator:
         if not context.nodes:
             return "The provided context does not include information to answer this query."
         
+        # CRITICAL FIX: Log why LLM is not being used (for debugging)
+        if not answer_generator:
+            logger.warning(
+                "llm_answer_generation_skipped",
+                reason="answer_generator_is_none",
+                message="Answer generator is None. Check enable_llm_answers flag and initialization."
+            )
+        elif not answer_generator.claude_client:
+            logger.warning(
+                "llm_answer_generation_skipped",
+                reason="claude_client_not_available",
+                message="Answer generator exists but Claude client is None. Check ANTHROPIC_API_KEY environment variable."
+            )
+        
         # Try LLM answer generation first if available
         if answer_generator and answer_generator.claude_client:
             try:
@@ -2107,11 +2121,20 @@ class ResponseGenerator:
                     machine_confirmation=machine_confirmation,
                     detected_language=detected_language
                 )
+                logger.info("llm_answer_generated_successfully", answer_length=len(llm_answer))
                 return llm_answer
             except Exception as e:
-                logger.warning(f"LLM answer generation failed: {e}, falling back to chunk-based answer")
+                logger.warning(
+                    "llm_answer_generation_failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e)[:500],
+                    message="LLM answer generation failed, falling back to chunk-based answer"
+                )
+                import traceback
+                logger.debug(f"LLM generation error details: {traceback.format_exc()}")
         
         # Fallback to chunk-based answer (original method)
+        logger.info("using_chunk_based_answer_fallback", reason="llm_unavailable_or_failed")
         return self._build_chunk_based_answer(query, context, intent)
     
     def _build_chunk_based_answer(
@@ -3527,6 +3550,15 @@ class RAGOrchestrator:
     """
     
     def __init__(self, cache_dir="/root/.cache/huggingface/hub", enable_llm_evaluation: bool = False, enable_llm_answers: bool = True, config_path: str = "config.yaml", db_manager=None):
+        # CRITICAL FIX: Normalize cache directory to match Dockerfile structure
+        # Dockerfile uses /app/.cache/huggingface, ensure runtime can find it
+        if cache_dir.endswith('/hub'):
+            # If cache_dir is /root/.cache/huggingface/hub, use /root/.cache/huggingface as base
+            cache_dir = cache_dir[:-4]
+        # Check if /app/.cache/huggingface exists (from Dockerfile), use it if available
+        if os.path.exists("/app/.cache/huggingface"):
+            cache_dir = "/app/.cache/huggingface"
+            logger.info("using_dockerfile_cache_dir", cache_dir=cache_dir)
         self.cache_dir = cache_dir
         self.embed_model = None
         self.reranker = None
@@ -3851,6 +3883,8 @@ class RAGOrchestrator:
         try:
             # Note: os is already imported at module level (line 13)
             import time
+            import glob
+            from pathlib import Path
             pid = os.getpid()
             hostname = os.getenv("HOSTNAME", "unknown")
             revision = os.getenv("K_REVISION", "unknown")
@@ -3858,6 +3892,48 @@ class RAGOrchestrator:
             
             logger.info("[RAG] reranker_model_load_begin", message="Loading re-ranker model...")
             print(f"[RAG] reranker_load_START pid={pid} hostname={hostname} revision={revision} cache_dir={self.cache_dir} device={device}", flush=True)
+            
+            # CRITICAL FIX: Verify cache directory and model files exist before loading
+            # CrossEncoder expects models in HF_HOME/hub/models--BAAI--bge-reranker-large/
+            # Dockerfile downloads to /app/.cache/huggingface, ensure we check the right path
+            cache_base = self.cache_dir
+            if cache_base.endswith('/hub'):
+                cache_base = cache_base[:-4]  # Remove /hub suffix
+            elif not cache_base.endswith('huggingface'):
+                # If cache_dir is something else, try common locations
+                possible_bases = [
+                    "/app/.cache/huggingface",
+                    "/root/.cache/huggingface",
+                    cache_base
+                ]
+                for base in possible_bases:
+                    if os.path.exists(base):
+                        cache_base = base
+                        break
+            
+            # Check for model files in expected location
+            model_patterns = [
+                os.path.join(cache_base, "hub", "models--BAAI--bge-reranker-large", "**", "config.json"),
+                os.path.join(cache_base, "hub", "models--BAAI--bge-reranker-large", "**", "*.safetensors"),
+                os.path.join(cache_base, "hub", "models--BAAI--bge-reranker-large", "**", "*.bin"),
+            ]
+            model_files_found = False
+            for pattern in model_patterns:
+                matches = glob.glob(pattern, recursive=True)
+                if matches:
+                    model_files_found = True
+                    logger.info(f"[RAG] reranker_cache_verified", pattern=pattern, files_found=len(matches))
+                    print(f"[RAG] reranker_cache_verified: found {len(matches)} files matching {pattern}", flush=True)
+                    break
+            
+            if not model_files_found:
+                logger.warning(
+                    "[RAG] reranker_cache_missing",
+                    cache_dir=self.cache_dir,
+                    cache_base=cache_base,
+                    message="Reranker model files not found in cache. Model may need to be pre-downloaded in Dockerfile."
+                )
+                print(f"[RAG] reranker_cache_missing: cache_dir={self.cache_dir}, cache_base={cache_base}", flush=True)
             
             # CRITICAL: Ensure offline mode is enforced before loading CrossEncoder
             # CrossEncoder from sentence-transformers may not respect HF_HUB_OFFLINE by default
@@ -3867,19 +3943,32 @@ class RAGOrchestrator:
             try:
                 os.environ["HF_HUB_OFFLINE"] = "1"
                 os.environ["TRANSFORMERS_OFFLINE"] = "1"
-                os.environ["HF_HOME"] = self.cache_dir
-                os.environ["TRANSFORMERS_CACHE"] = self.cache_dir
-                os.environ["SENTENCE_TRANSFORMERS_HOME"] = self.cache_dir
+                # CRITICAL: Set cache directories to match Dockerfile structure
+                # Dockerfile uses /app/.cache/huggingface, ensure runtime uses same
+                os.environ["HF_HOME"] = cache_base
+                os.environ["TRANSFORMERS_CACHE"] = cache_base
+                os.environ["SENTENCE_TRANSFORMERS_HOME"] = cache_base
+                # Also set HF_HUB_CACHE explicitly
+                os.environ["HF_HUB_CACHE"] = os.path.join(cache_base, "hub")
+                
+                logger.info(
+                    "[RAG] reranker_loading_with_env",
+                    HF_HOME=cache_base,
+                    HF_HUB_CACHE=os.environ.get("HF_HUB_CACHE"),
+                    HF_HUB_OFFLINE="1",
+                    TRANSFORMERS_OFFLINE="1"
+                )
                 
                 try:
                     # Try with cache_folder first (older sentence-transformers)
                     self.reranker = CrossEncoder(
                         "BAAI/bge-reranker-large",
-                        cache_folder=self.cache_dir,
+                        cache_folder=os.path.join(cache_base, "hub"),
                         device=device
                     )
                 except TypeError:
                     # Fallback for newer sentence-transformers that don't support cache_folder
+                    # Environment variables should be sufficient
                     self.reranker = CrossEncoder(
                         "BAAI/bge-reranker-large",
                         device=device
@@ -3896,13 +3985,17 @@ class RAGOrchestrator:
                     os.environ["TRANSFORMERS_OFFLINE"] = "1"  # Keep offline mode
             
             reranker_duration = time.time() - reranker_start
-            logger.info("reranker_loaded", device=device)
+            logger.info("reranker_loaded", device=device, cache_verified=model_files_found)
             logger.info("[RAG] reranker_model_load_done", device=device, duration_seconds=reranker_duration)
             print(f"[RAG] reranker_model_load_done duration={reranker_duration:.2f}s", flush=True)
-            print(f"[RAG] reranker_load_DONE pid={pid} hostname={hostname} revision={revision} cache_dir={self.cache_dir} duration={reranker_duration:.2f}s", flush=True)
+            print(f"[RAG] reranker_load_DONE pid={pid} hostname={hostname} revision={revision} cache_dir={self.cache_dir} cache_base={cache_base} duration={reranker_duration:.2f}s", flush=True)
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
             logger.warning(f"Re-ranker not available: {e}")
+            logger.debug(f"Reranker load error details: {error_details}")
             print(f"[RAG] reranker_load_FAILED: {type(e).__name__}: {str(e)}", flush=True)
+            print(f"[RAG] reranker_load_FAILED_traceback: {error_details}", flush=True)
             self.reranker = None
         
         # Initialize semantic cache after embed model is ready
@@ -4885,11 +4978,22 @@ class RAGOrchestrator:
         # Step 4: Generate structured response (with chat history if provided)
         # Use original query for LLM response (so it responds in user's language)
         query_for_llm = query_original if query_original else query
+        
+        # CRITICAL FIX: Ensure answer generator is initialized before use
+        # This prevents fallback to chunk-based answers when LLM is available
+        answer_generator = self._ensure_answer_generator()
+        if answer_generator and not answer_generator.claude_client:
+            logger.warning(
+                "llm_answer_generator_unavailable",
+                reason="claude_client_not_initialized",
+                message="Answer generator exists but Claude client is None. Check ANTHROPIC_API_KEY."
+            )
+        
         response = self.response_generator.generate_structured_response(
             query=query_for_llm,  # Use original query for LLM
             context=context,
             intent=intent,
-            answer_generator=self.answer_generator,
+            answer_generator=answer_generator,  # Use ensured answer generator
             chat_history=chat_history or [],
             matched_machine_name=matched_machine_name,
             user_machine_models=user_machine_models,
