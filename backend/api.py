@@ -4349,21 +4349,59 @@ async def get_all_documents(request: Request):
             )
 
         # Query database: DocumentIngestionMetadata LEFT JOIN Document
+        # Also include Document records without DocumentIngestionMetadata to match /documents count
         def _get_documents_from_db():
             with SessionLocal() as session:
                 from backend.utils.db import DocumentIngestionMetadata, Document, MachineModel, document_machine_models
                 
-                # Query all metadata records with optional Document join
-                query = (
+                # Query 1: All metadata records with optional Document join (filtered to active only)
+                metadata_query = (
                     session.query(DocumentIngestionMetadata, Document)
                     .outerjoin(Document, DocumentIngestionMetadata.filename == Document.file_name)
-                    .order_by(DocumentIngestionMetadata.created_at.desc())
+                    .filter(
+                        # Only include if Document doesn't exist OR Document is active
+                        (Document.id.is_(None)) | (Document.is_active == True)
+                    )
                 )
                 
-                results = query.all()
-                logger.info(f"Found {len(results)} documents in database")
+                # Query 2: Active Document records without DocumentIngestionMetadata
+                # These are the "orphaned" Document records that cause the count mismatch
+                orphaned_docs_query = (
+                    session.query(Document)
+                    .filter(Document.is_active == True)
+                    .filter(
+                        ~session.query(DocumentIngestionMetadata)
+                        .filter(DocumentIngestionMetadata.filename == Document.file_name)
+                        .exists()
+                    )
+                )
+                
+                metadata_results = metadata_query.all()
+                orphaned_docs = orphaned_docs_query.all()
+                
+                logger.info(f"Found {len(metadata_results)} documents with metadata, {len(orphaned_docs)} orphaned Document records")
+                
+                # Combine results: metadata results + orphaned documents (as (None, Document) tuples)
+                results = list(metadata_results) + [(None, doc) for doc in orphaned_docs]
+                
+                # Sort combined results: metadata records by created_at desc, orphaned docs by file_name asc
+                from datetime import datetime, timezone
+                def sort_key(item):
+                    meta, doc = item
+                    if meta:
+                        # Metadata records: sort by created_at descending (most recent first)
+                        # Use negative timestamp for descending sort within same group
+                        created_at = meta.created_at if meta.created_at else datetime.min.replace(tzinfo=timezone.utc)
+                        timestamp = created_at.timestamp() if hasattr(created_at, 'timestamp') else 0
+                        return (0, -timestamp)  # Negative for descending
+                    else:
+                        # Orphaned docs: sort by filename alphabetically ascending
+                        return (1, doc.file_name.lower() if doc.file_name else '')
+                
+                results.sort(key=sort_key)  # Metadata first (newest first), then orphaned docs alphabetically
                 
                 # Preload machine model mappings for all document_ids in this page (avoid N+1)
+                # Include both metadata results and orphaned docs
                 doc_ids = [doc.id for (_meta, doc) in results if doc is not None]
                 doc_id_to_models: dict[int, list[dict[str, Any]]] = {}
                 if doc_ids:
@@ -4389,6 +4427,61 @@ async def get_all_documents(request: Request):
 
                 documents = []
                 for meta, doc in results:
+                    # Handle orphaned Document records (meta is None)
+                    if meta is None and doc is not None:
+                        # This is an orphaned Document record without DocumentIngestionMetadata
+                        # Parse machine_model from Document.machine_model (can be JSON string or single string)
+                        machine_model = doc.machine_model
+                        if machine_model:
+                            try:
+                                import json
+                                machine_model = json.loads(machine_model)
+                            except (json.JSONDecodeError, TypeError):
+                                machine_model = [machine_model] if machine_model else []
+                        else:
+                            machine_model = []
+                        
+                        # Get machine models from join table
+                        machine_models = doc_id_to_models.get(int(doc.id), [])
+                        machine_model_ids = [m["id"] for m in machine_models]
+                        machine_model_names = [m["name"] for m in machine_models if m.get("name")]
+                        
+                        # Use machine_model_names if available, otherwise fall back to parsed machine_model
+                        machine_model = machine_model_names if machine_model_names else machine_model
+                        
+                        # Get file type from filename
+                        file_ext = os.path.splitext(doc.file_name)[1].lower()
+                        file_type = file_ext[1:] if file_ext else 'pdf'
+                        
+                        documents.append({
+                            "metadata_id": None,
+                            "document_id": doc.id,
+                            "filename": doc.file_name,
+                            "display_name": doc.display_name or doc.file_name,
+                            "gcs_path": doc.gcs_path,
+                            "file_path": doc.gcs_path,  # Use GCS path as file_path
+                            "file_type": file_type,
+                            "size_bytes": doc.file_size_bytes,
+                            "uploaded_date": doc.created_at.isoformat() if doc.created_at else None,
+                            "chunk_count": 0,
+                            "page_count": 0,
+                            "is_active": doc.is_active,
+                            "machine_model": machine_model if machine_model else None,
+                            "machine_model_ids": machine_model_ids,
+                            "machine_models": machine_models,
+                            "missing_machine_model": machine_model is None or len(machine_model) == 0,
+                            "requires_admin_review": doc.requires_admin_review if doc else False,
+                            "category": doc.category if doc else None,
+                            "product_family": doc.product_family if doc else None,
+                            "ingestion_status": "UNKNOWN",  # No metadata, status unknown
+                            "ingestion_metadata_id": None,
+                            "ingestion_error": "No DocumentIngestionMetadata record found",
+                            "created_at": doc.created_at.isoformat() if doc.created_at else None,
+                            "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
+                        })
+                        continue
+                    
+                    # Normal case: metadata exists (doc may or may not exist)
                     # Get GCS path from Document if available, otherwise from metadata.file_path
                     gcs_path = None
                     if doc and doc.gcs_path:
