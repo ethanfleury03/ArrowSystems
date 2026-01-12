@@ -108,8 +108,14 @@ deploy-key.json
 arrow-rag-backend.json
 env_vars.json
 
-# Scraper folder (local development tooling)
-Scraper/
+# Scraper folder - track source code but ignore generated outputs
+# Track: *.py, *.md, requirements.txt, config files
+# Ignore: data/, out/, debug_dump/, generated JSONL files
+Scraper/data/
+Scraper/out/
+Scraper/debug_dump/
+Scraper/*.jsonl
+Scraper/audit_results_*.jsonl
 
 # TypeScript build info
 *.tsbuildinfo
