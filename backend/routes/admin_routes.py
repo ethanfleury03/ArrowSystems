@@ -2059,5 +2059,47 @@ def create_admin_router(
                 detail=f"Failed to fetch user insights: {str(e)}"
             )
 
+    @router.get("/tickets")
+    async def get_tickets(
+        page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+        page_size: int = Query(50, ge=1, le=200, description="Items per page (max 200)"),
+        q: Optional[str] = Query(None, description="Search query (ticket_id, subject, outcome)"),
+        sort: str = Query("judged_at DESC", description="Sort order (field ASC/DESC)"),
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Get paginated list of tickets from Scraper SQLite database.
+        
+        Admin-only endpoint. Returns tickets with their judgment and review status.
+        """
+        from ..utils.tickets_admin import get_tickets_page
+        
+        try:
+            items, total = get_tickets_page(
+                page=page,
+                page_size=page_size,
+                q=q,
+                sort=sort
+            )
+            
+            return {
+                "items": items,
+                "page": page,
+                "page_size": page_size,
+                "total": total
+            }
+        except FileNotFoundError as e:
+            logger.warning(f"Tickets DB not available: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
+        except Exception as e:
+            logger.error(f"Error fetching tickets: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch tickets: {str(e)}"
+            )
+
     return router
 
