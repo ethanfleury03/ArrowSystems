@@ -12,7 +12,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 
 from .db import Document, MachineModel, SessionLocal
 from .filenames import canonicalize_filename
@@ -119,8 +119,100 @@ def get_document_by_id(session: Session, doc_id: int) -> Optional[Document]:
 
 
 def get_document_by_filename(session: Session, filename: str) -> Optional[Document]:
-    """Get a document by filename."""
-    return session.query(Document).filter(Document.file_name == filename).first()
+    """
+    Get a document by filename with multiple fallback strategies.
+    
+    Tries in order:
+    1. Exact match on Document.file_name (is_active=True)
+    2. Exact match on Document.display_name (is_active=True)
+    3. Canonicalized match: canonicalize input and match against canonicalized file_name/display_name
+    4. Case-insensitive match on file_name (is_active=True)
+    5. Case-insensitive match on display_name (is_active=True)
+    
+    Logs which strategy succeeded for debugging.
+    
+    Args:
+        session: SQLAlchemy session
+        filename: Filename to search for (may be original or canonicalized)
+    
+    Returns:
+        Document object if found, None otherwise
+    """
+    if not filename:
+        return None
+    
+    # Strategy 1: Exact match on file_name (is_active=True)
+    doc = session.query(Document).filter(
+        Document.file_name == filename,
+        Document.is_active == True
+    ).first()
+    if doc:
+        return doc
+    
+    # Strategy 2: Exact match on display_name (is_active=True)
+    doc = session.query(Document).filter(
+        Document.display_name == filename,
+        Document.is_active == True
+    ).filter(Document.display_name.isnot(None)).first()
+    if doc:
+        logger.info(
+            f"Document lookup fallback: display_name exact match succeeded. "
+            f"Requested: '{filename}', Matched doc.id={doc.id}, doc.file_name='{doc.file_name}'"
+        )
+        return doc
+    
+    # Strategy 3: Canonicalized match
+    canonical_input = canonicalize_filename(filename)
+    if canonical_input:
+        # Try matching canonicalized input against canonicalized file_name
+        all_active_docs = session.query(Document).filter(Document.is_active == True).all()
+        for doc in all_active_docs:
+            canonical_db = canonicalize_filename(doc.file_name)
+            if canonical_db == canonical_input:
+                logger.info(
+                    f"Document lookup fallback: canonicalized file_name match succeeded. "
+                    f"Requested: '{filename}' (canonical: '{canonical_input}'), "
+                    f"Matched doc.id={doc.id}, doc.file_name='{doc.file_name}'"
+                )
+                return doc
+        
+        # Also try against display_name
+        for doc in all_active_docs:
+            if doc.display_name:
+                canonical_display = canonicalize_filename(doc.display_name)
+                if canonical_display == canonical_input:
+                    logger.info(
+                        f"Document lookup fallback: canonicalized display_name match succeeded. "
+                        f"Requested: '{filename}' (canonical: '{canonical_input}'), "
+                        f"Matched doc.id={doc.id}, doc.file_name='{doc.file_name}', doc.display_name='{doc.display_name}'"
+                    )
+                    return doc
+    
+    # Strategy 4: Case-insensitive match on file_name (is_active=True)
+    doc = session.query(Document).filter(
+        func.lower(Document.file_name) == func.lower(filename),
+        Document.is_active == True
+    ).first()
+    if doc:
+        logger.info(
+            f"Document lookup fallback: case-insensitive file_name match succeeded. "
+            f"Requested: '{filename}', Matched doc.id={doc.id}, doc.file_name='{doc.file_name}'"
+        )
+        return doc
+    
+    # Strategy 5: Case-insensitive match on display_name (is_active=True)
+    doc = session.query(Document).filter(
+        func.lower(Document.display_name) == func.lower(filename),
+        Document.is_active == True
+    ).filter(Document.display_name.isnot(None)).first()
+    if doc:
+        logger.info(
+            f"Document lookup fallback: case-insensitive display_name match succeeded. "
+            f"Requested: '{filename}', Matched doc.id={doc.id}, doc.file_name='{doc.file_name}', doc.display_name='{doc.display_name}'"
+        )
+        return doc
+    
+    return None
 
 
 def get_document_metadata(filename: str, session: Optional[Session] = None) -> Dict[str, Any]:
