@@ -622,18 +622,34 @@ export default function AdminDocumentsPage() {
     }
     setActionSubmitting(true);
     try {
-      // Use metadata_id endpoint (preferred) or ingestion_metadata_id (fallback)
+      // Check if this is an orphan document (no metadata_id)
       const metadataId = selectedDocument.metadata_id || selectedDocument.ingestion_metadata_id;
-      if (!metadataId) {
-        throw new Error("Document metadata ID not found. Cannot delete.");
-      }
+      const documentId = selectedDocument.document_id;
+      const isOrphan = !metadataId && (documentId !== null && documentId !== undefined);
       
-      // Use the reliable delete endpoint that works even if GCS object is missing
-      // Go through Next.js API route for proper authentication
-      const response = await fetch(`/api/admin/documents/metadata/${metadataId}`, {
+      let response: Response;
+      
+      if (isOrphan) {
+        // Orphan document: use orphan deletion endpoint
+        if (!documentId) {
+          throw new Error("Document ID not found. Cannot delete orphan document.");
+        }
+        
+        response = await fetch(`/api/admin/documents/orphan/${documentId}`, {
           method: "DELETE",
           credentials: "include",
         });
+      } else {
+        // Normal document: use metadata deletion endpoint
+        if (!metadataId) {
+          throw new Error("Document metadata ID not found. Cannot delete.");
+        }
+        
+        response = await fetch(`/api/admin/documents/metadata/${metadataId}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      }
       
       if (!response.ok) {
         let errorDetail = null;
@@ -652,7 +668,10 @@ export default function AdminDocumentsPage() {
       setDeleteConfirmation("");
       
       // Show success message - deletion always succeeds, index cleanup is best-effort
-        showToast("✅ Document deleted successfully.", "success");
+      const successMessage = isOrphan 
+        ? "✅ Orphan document deactivated successfully." 
+        : "✅ Document deleted successfully.";
+      showToast(successMessage, "success");
       await fetchDocuments();
     } catch (err) {
       console.error("Delete document failed:", err);

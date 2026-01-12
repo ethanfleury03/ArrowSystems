@@ -5386,6 +5386,155 @@ async def delete_document_by_metadata_id(
         )
 
 
+@app.delete("/admin/documents/orphan/{document_id}")
+async def delete_orphan_document_endpoint(
+    http_request: Request,
+    document_id: int,
+):
+    """
+    Delete an orphan Document record (no DocumentIngestionMetadata).
+    
+    This endpoint handles deletion of Document records that don't have corresponding
+    DocumentIngestionMetadata records. It:
+    - Soft-deletes the Document row (sets is_active=False)
+    - Deletes chunks from vector index by document_id (best-effort)
+    - Deletes GCS file (best-effort, 404 is OK)
+    - Returns success even if GCS object is missing
+    
+    Args:
+        document_id: Integer Document.id to delete
+    
+    Returns:
+        200 with deletion summary
+        404 if document_id not found
+        400 if document is not an orphan (has metadata)
+        500 on error
+    """
+    # Enforce admin authentication
+    global db_manager
+    if not db_manager:
+        ok = await ensure_db_manager_initialized(max_attempts=2, initial_delay_s=0.3, max_delay_s=2.0)
+        if ok:
+            pass
+
+    if not db_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_db_unavailable_detail(),
+        )
+
+    token = http_request.headers.get("X-User-Token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing user token",
+        )
+
+    try:
+        from .security import decode_access_token
+        payload = decode_access_token(token)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+        ) from None
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+        ) from None
+
+    email = payload.get("email")
+    role = payload.get("role")
+    if not email or not role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token payload"
+        )
+
+    user = await db_manager.get_user_by_email(email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User no longer exists",
+        )
+    if user.get("role") != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    
+    request_id = http_request.headers.get("X-Request-ID", "unknown")
+    
+    # Delete orphan document using simple delete
+    from backend.utils.simple_delete import delete_orphan_document
+    
+    try:
+        delete_result = await run_sync(delete_orphan_document, document_id)
+        filename = delete_result.get("filename", "unknown")
+        
+        logger.info(
+            {
+                "event": "orphan_document_deleted",
+                "document_id": document_id,
+                "filename": filename,
+                "request_id": request_id,
+                "deleted_document": delete_result.get("deleted_document"),
+                "deleted_gcs": delete_result.get("deleted_gcs"),
+                "deleted_index_nodes": delete_result.get("deleted_index_nodes", 0),
+                "deleted_index_ref_docs": delete_result.get("deleted_index_ref_docs", 0),
+            }
+        )
+        
+        # Audit log
+        await audit_log(
+            "orphan_document_deleted",
+            level="info",
+            user_id=email,
+            role=role,
+            metadata={
+                "document_id": document_id,
+                "filename": filename,
+            },
+            request=http_request,
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Orphan document {filename} deactivated successfully.",
+            "document_id": document_id,
+            "filename": filename,
+            "deleted_document": delete_result.get("deleted_document"),
+            "deleted_gcs": delete_result.get("deleted_gcs"),
+            "deleted_index_nodes": delete_result.get("deleted_index_nodes", 0),
+            "deleted_index_ref_docs": delete_result.get("deleted_index_ref_docs", 0),
+        }
+        
+    except ValueError as e:
+        # Document is not an orphan
+        logger.warning(f"Attempted to delete non-orphan document {document_id}: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.exception(
+            {
+                "event": "orphan_document_delete_failed",
+                "document_id": document_id,
+                "request_id": request_id,
+                "error_type": error_type,
+                "error_message": error_msg,
+            }
+        )
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Delete failed: {error_type}: {error_msg}"
+        )
+
+
 @app.delete("/admin/documents/{document_id}/chunks")
 async def delete_document_chunks_by_document_id(
     http_request: Request,
