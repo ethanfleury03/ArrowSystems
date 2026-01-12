@@ -3788,21 +3788,50 @@ async def serve_document(filename: str):
     then downloaded from Cloud Storage using the stored gcs_path.
     """
     import urllib.parse
+    import json
+    import os
     from fastapi.responses import Response
     import mimetypes
     from .utils.db import SessionLocal
     from .utils.document_metadata import get_document_by_filename
     from .utils.gcs_client import download_document, download_document_by_filename, get_docs_bucket_name
     
+    # #region agent log
+    log_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.cursor', 'debug.log')
+    try:
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "backend/api.py:3798", "message": "serve_document entry", "data": {"filename_raw": filename}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+    except: pass
+    # #endregion
+    
     # URL decode the filename
     filename = urllib.parse.unquote(filename)
     
+    # #region agent log
+    try:
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "backend/api.py:3801", "message": "filename after decode", "data": {"filename_decoded": filename}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+    except: pass
+    # #endregion
+    
     # Security: prevent directory traversal
     if '..' in filename or filename.startswith('/'):
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "backend/api.py:3804", "message": "security check failed", "data": {"filename": filename}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+        except: pass
+        # #endregion
         raise HTTPException(status_code=400, detail="Invalid filename")
     
     # Check file extension for security
     if not filename.lower().endswith(('.pdf', '.docx', '.md', '.markdown')):
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "backend/api.py:3808", "message": "invalid file type", "data": {"filename": filename}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+        except: pass
+        # #endregion
         raise HTTPException(status_code=400, detail="Invalid file type")
     
     # Look up document in database
@@ -3810,21 +3839,64 @@ async def serve_document(filename: str):
     try:
         doc = get_document_by_filename(session, filename)
         
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "backend/api.py:3814", "message": "database lookup result", "data": {"filename": filename, "doc_found": doc is not None, "doc_id": doc.id if doc else None, "doc_file_name": doc.file_name if doc else None, "doc_is_active": doc.is_active if doc else None, "doc_gcs_path": doc.gcs_path if doc else None}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+        except: pass
+        # #endregion
+        
         if not doc:
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "backend/api.py:3817", "message": "document not found in DB", "data": {"filename": filename}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+            except: pass
+            # #endregion
             raise HTTPException(status_code=404, detail="Document not found")
         
         # Download from Cloud Storage
         content = None
         if doc.gcs_path:
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "C", "location": "backend/api.py:3823", "message": "attempting GCS download via gcs_path", "data": {"filename": filename, "gcs_path": doc.gcs_path}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+            except: pass
+            # #endregion
             # Use stored GCS path
             content = download_document(doc.gcs_path)
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "C", "location": "backend/api.py:3826", "message": "GCS download result via gcs_path", "data": {"filename": filename, "content_size": len(content) if content else None, "content_found": content is not None}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+            except: pass
+            # #endregion
         else:
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "C", "location": "backend/api.py:3829", "message": "no gcs_path, trying fallback", "data": {"filename": filename}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+            except: pass
+            # #endregion
             # Fallback: try to download by filename from default bucket
             bucket_name = get_docs_bucket_name()
             if bucket_name:
                 content = download_document_by_filename(filename, bucket_name)
+                # #region agent log
+                try:
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "C", "location": "backend/api.py:3834", "message": "fallback download result", "data": {"filename": filename, "bucket_name": bucket_name, "content_size": len(content) if content else None, "content_found": content is not None}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+                except: pass
+                # #endregion
         
         if not content:
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "C", "location": "backend/api.py:3840", "message": "content not found in GCS", "data": {"filename": filename, "gcs_path": doc.gcs_path if doc else None}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+            except: pass
+            # #endregion
             raise HTTPException(status_code=404, detail="Document file not found in Cloud Storage")
         
         # Determine media type
@@ -3839,6 +3911,13 @@ async def serve_document(filename: str):
             if not media_type:
                 media_type = "application/octet-stream"
         
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "backend/api.py:3855", "message": "returning successful response", "data": {"filename": filename, "media_type": media_type, "content_length": len(content)}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+        except: pass
+        # #endregion
+        
         # Return response with inline content-disposition header
         return Response(
                 content=content,
@@ -3848,6 +3927,22 @@ async def serve_document(filename: str):
                     "Content-Length": str(len(content))
                 }
             )
+    except HTTPException as e:
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "backend/api.py:3868", "message": "HTTPException raised", "data": {"filename": filename, "status_code": e.status_code, "detail": str(e.detail)}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+        except: pass
+        # #endregion
+        raise
+    except Exception as e:
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "backend/api.py:3874", "message": "unexpected exception", "data": {"filename": filename, "error_type": type(e).__name__, "error_message": str(e)}, "timestamp": int(__import__('time').time() * 1000)}) + "\n")
+        except: pass
+        # #endregion
+        raise
     finally:
         session.close()
 

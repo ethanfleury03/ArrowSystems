@@ -55,16 +55,13 @@ backup_*/
 *.log
 logs/
 api.log
+frontend/logs/
 
 # Temporary files
 *.tmp
 *.bak
 *.tar.gz
 temp/
-=
-CACHED
-resolve
-transferring
 # Files starting with [ in root directory (escape bracket)
 /\[*
 
@@ -101,6 +98,8 @@ models/
 *.sqlite
 *.sqlite3
 rag_app.db
+dev.db/
+dev.db
 
 compute-key.json
 deploy-key.json
@@ -111,3 +110,11 @@ env_vars.json
 
 # Scraper folder (local development tooling)
 Scraper/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Node.js build artifacts (if any leak to root)
+.next/
+out/
+.turbo/

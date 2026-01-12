@@ -36,17 +36,10 @@ Thumbs.db
 # Logs
 *.log
 logs/
-log/
+frontend/logs/
 
-# Documentation
-docs/
-*.md
-README*
-
-# Docker files
-Dockerfile*
-docker-compose*.yml
-.dockerignore
+# Note: Dockerfile* and docker-compose*.yml are NOT ignored
+# They must remain in build context for remote builds (GCP/Cloud Build)
 
 # Temporary files
 tmp/
@@ -58,11 +51,15 @@ node_modules/
 frontend/
 .next/
 dist/
+*.tsbuildinfo
 
 # Cache directories
 .cache/
 cache/
 .huggingface/
+.pnpm-store/
+.yarn/cache/
+.turbo/
 
 # Backup files
 *.bak
@@ -74,6 +71,10 @@ test/
 tests/
 *_test.py
 test_*.py
+test_docs/
+
+# Scraper tooling (local dev only)
+Scraper/
 
 # ============================================================================
 # CRITICAL: Exclude large directories that cause 4GB+ bloat
