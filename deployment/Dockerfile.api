@@ -154,8 +154,11 @@ RUN chmod +x /docker-entrypoint.sh
 COPY deployment/start-gunicorn.sh /start-gunicorn.sh
 RUN chmod +x /start-gunicorn.sh
 
-# Copy application code
-COPY . .
+# Copy application code (targeted instead of COPY . .)
+# Runtime needs: backend/ (for gunicorn backend.api:app), config.yaml (referenced by backend), pyproject.toml
+COPY backend/ /app/backend/
+COPY config.yaml /app/config.yaml
+COPY pyproject.toml /app/pyproject.toml
 
 # Ensure SQLite database file exists
 RUN touch /app/database.sqlite

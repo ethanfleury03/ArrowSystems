@@ -22,6 +22,9 @@ export function PDFViewer({ filename, initialPage = 1, onClose }: PDFViewerProps
   useEffect(() => {
     // Load PDF using iframe (simple approach)
     // In production, you might want to use react-pdf or pdf.js
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/components/pdf-viewer.tsx:25',message:'PDFViewer useEffect triggered',data:{filename:filename,initialPage:initialPage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
     setLoading(true)
     setError(null)
   }, [filename])
@@ -48,6 +51,10 @@ export function PDFViewer({ filename, initialPage = 1, onClose }: PDFViewerProps
 
   // Use Next.js API route to proxy PDF requests
   const pdfUrl = `/api/documents/${encodeURIComponent(filename)}#page=${currentPage}`
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/components/pdf-viewer.tsx:52',message:'PDF URL constructed',data:{filename:filename,pdfUrl:pdfUrl,currentPage:currentPage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+  // #endregion
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
@@ -122,11 +129,17 @@ export function PDFViewer({ filename, initialPage = 1, onClose }: PDFViewerProps
                 className="w-full h-full border-0"
                 style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}
                 onLoad={() => {
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/components/pdf-viewer.tsx:127',message:'iframe onLoad triggered',data:{filename:filename,pdfUrl:pdfUrl},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+                  // #endregion
                   setLoading(false)
                   // Try to get page count from iframe (may not work with all PDFs)
                   // For now, we'll just show the PDF
                 }}
                 onError={() => {
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/components/pdf-viewer.tsx:133',message:'iframe onError triggered',data:{filename:filename,pdfUrl:pdfUrl},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+                  // #endregion
                   setError("Failed to load PDF. Please check if the file exists.")
                   setLoading(false)
                 }}
