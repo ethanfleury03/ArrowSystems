@@ -41,11 +41,20 @@ export function DocumentsPanel({ documentSources }: DocumentsPanelProps) {
             const hasPages = doc.pages_used && doc.pages_used.length > 0
             const firstPage = hasPages ? doc.pages_used[0] : undefined
 
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/components/documents-panel.tsx:43',message:'document source mapped',data:{doc_id:doc.doc_id,index:index,hasPages:hasPages,firstPage:firstPage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            // #endregion
+
             return (
               <Card
                 key={index}
                 className="group cursor-pointer transition-all hover:border-primary hover:shadow-md"
-                onClick={() => setSelectedDoc({ filename: doc.doc_id, page: firstPage })}
+                onClick={() => {
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/components/documents-panel.tsx:50',message:'card clicked, setting selectedDoc',data:{doc_id:doc.doc_id,firstPage:firstPage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+                  // #endregion
+                  setSelectedDoc({ filename: doc.doc_id, page: firstPage })
+                }}
               >
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-2">
