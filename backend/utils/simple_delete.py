@@ -371,6 +371,183 @@ def _find_nodes_and_refdocs_by_document_id(index, retriever, document_id: int):
     return nodes_to_delete, ref_doc_ids_to_delete
 
 
+def delete_orphan_document(document_id: int) -> dict:
+    """
+    Delete an orphan Document record (no DocumentIngestionMetadata).
+    
+    This function handles deletion of Document records that don't have corresponding
+    DocumentIngestionMetadata records. This can happen when:
+    - Documents were created manually without going through ingestion
+    - Metadata records were deleted but Document records remain
+    - Database inconsistencies
+    
+    This function:
+    1. Deletes chunks from vector index by document_id (if RAG pipeline available)
+    2. Soft-deletes Document row (sets is_active=False) OR hard-deletes if preferred
+    3. Deletes GCS file (best-effort, 404 is OK)
+    4. Does NOT delete DocumentIngestionMetadata (doesn't exist)
+    
+    Args:
+        document_id: The integer ID of the Document record to delete
+    
+    Returns:
+        dict with deletion results:
+        {
+            "document_id": int,
+            "filename": str,
+            "deleted_document": bool,
+            "deleted_gcs": bool,
+            "deleted_index_nodes": int,
+            "deleted_index_ref_docs": int,
+            "is_orphan": True,
+        }
+    """
+    result = {
+        "document_id": document_id,
+        "filename": None,
+        "deleted_document": False,
+        "deleted_gcs": False,
+        "deleted_index_nodes": 0,
+        "deleted_index_ref_docs": 0,
+        "is_orphan": True,
+    }
+    
+    session: Optional[Session] = None
+    try:
+        session = SessionLocal()
+        
+        # Load Document record
+        doc_record = session.query(Document).filter(
+            Document.id == document_id
+        ).first()
+        
+        if not doc_record:
+            logger.warning(f"Document record not found: {document_id}")
+            return result
+        
+        # Verify this is actually an orphan (no metadata record)
+        metadata_exists = session.query(DocumentIngestionMetadata).filter(
+            DocumentIngestionMetadata.filename == doc_record.file_name
+        ).first()
+        
+        if metadata_exists:
+            logger.warning(
+                f"Document {document_id} ({doc_record.file_name}) has metadata record {metadata_exists.id}. "
+                "Use delete_document_metadata_simple instead."
+            )
+            raise ValueError(f"Document {document_id} is not an orphan - has metadata_id {metadata_exists.id}")
+        
+        result["filename"] = doc_record.file_name
+        filename = doc_record.file_name
+        gcs_path = doc_record.gcs_path
+        
+        logger.info(f"Deleting orphan document: {document_id} ({filename})")
+        
+        # Delete chunks from vector index by document_id (best-effort)
+        try:
+            from backend.rag_pipeline import get_rag_pipeline
+            
+            rag_pipeline = get_rag_pipeline()
+            if rag_pipeline and rag_pipeline.is_initialized():
+                index = rag_pipeline.orchestrator.index if (
+                    rag_pipeline.orchestrator and 
+                    hasattr(rag_pipeline.orchestrator, 'index') and
+                    rag_pipeline.orchestrator.index
+                ) else None
+                
+                retriever = rag_pipeline.orchestrator.retriever if (
+                    rag_pipeline.orchestrator and 
+                    hasattr(rag_pipeline.orchestrator, 'retriever')
+                ) else None
+                
+                if index:
+                    # Use existing helper function to find nodes by document_id
+                    nodes_to_delete, ref_doc_ids_to_delete = _find_nodes_and_refdocs_by_document_id(
+                        index, retriever, document_id
+                    )
+                    
+                    # Delete nodes from index
+                    for node in nodes_to_delete:
+                        try:
+                            if hasattr(node, 'node_id'):
+                                index.delete(node.node_id)
+                                result["deleted_index_nodes"] += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to delete node {getattr(node, 'node_id', 'unknown')}: {e}")
+                    
+                    # Delete reference documents
+                    for ref_doc_id in ref_doc_ids_to_delete:
+                        try:
+                            index.delete_ref_doc(ref_doc_id, delete_from_docstore=True)
+                            result["deleted_index_ref_docs"] += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to delete ref_doc {ref_doc_id}: {e}")
+                    
+                    # Persist index if changes were made
+                    if result["deleted_index_nodes"] > 0 or result["deleted_index_ref_docs"] > 0:
+                        from backend.utils.test_mode import get_index_dir
+                        storage_path = get_index_dir()
+                        if storage_path and os.path.exists(storage_path):
+                            try:
+                                logger.info(f"Persisting index after deleting {result['deleted_index_nodes']} nodes and {result['deleted_index_ref_docs']} ref_docs...")
+                                index.storage_context.persist(persist_dir=storage_path)
+                                logger.info("✅ Index persisted with deletions")
+                                
+                                # Reload RAG pipeline
+                                logger.info("Reloading RAG pipeline after chunk deletion...")
+                                rag_pipeline.orchestrator.load_index(storage_dir=storage_path)
+                                logger.info("✅ RAG pipeline reloaded")
+                            except Exception as e:
+                                logger.warning(f"Failed to persist/reload index: {e}")
+                        
+                        logger.info(
+                            f"Deleted {result['deleted_index_nodes']} nodes and {result['deleted_index_ref_docs']} ref_docs "
+                            f"from index for orphan document_id {document_id}"
+                        )
+        except Exception as e:
+            # Never fail the entire deletion if index deletion fails
+            logger.warning(
+                f"Failed to delete chunks from vector index for orphan document (continuing with DB deletion): {e}",
+                exc_info=True
+            )
+        
+        # Soft-delete Document row (set is_active=False)
+        doc_record.is_active = False
+        session.commit()
+        result["deleted_document"] = True
+        logger.info(f"Soft-deleted orphan Document row: {document_id} ({filename})")
+        
+        # Delete GCS file (best-effort, 404 is OK)
+        if gcs_path:
+            try:
+                if delete_object(gcs_path):
+                    result["deleted_gcs"] = True
+                    logger.info(f"Deleted GCS file: {gcs_path}")
+                else:
+                    # delete_object returns False on error, but 404 is handled as success
+                    logger.debug(f"GCS file deletion returned False (may not exist): {gcs_path}")
+                    result["deleted_gcs"] = True  # Consider 404 as success
+            except Exception as e:
+                # Never fail deletion due to GCS errors - log and continue
+                error_str = str(e)
+                if "404" in error_str or "NotFound" in str(type(e).__name__):
+                    logger.debug(f"GCS object not found (already deleted or never existed): {gcs_path}")
+                    result["deleted_gcs"] = True  # Consider 404 as success
+                else:
+                    logger.warning(f"Failed to delete GCS file {gcs_path} (non-blocking): {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error deleting orphan document {document_id}: {e}", exc_info=True)
+        if session:
+            session.rollback()
+        raise
+    finally:
+        if session:
+            session.close()
+
+
 def delete_document_chunks_by_document_id(document_id: int, force: bool = False) -> dict:
     """
     Delete all chunks/nodes for a document by document_id.
