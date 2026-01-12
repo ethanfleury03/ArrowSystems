@@ -55,7 +55,8 @@ export async function GET(
     });
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/app/api/documents/[...path]/route.ts:50',message:'backend response received',data:{filename:filename,status:response.status,contentType:response.headers['content-type'],dataType:typeof response.data,dataLength:response.data?.byteLength},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    const responseData = response.data as ArrayBuffer;
+    fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/app/api/documents/[...path]/route.ts:50',message:'backend response received',data:{filename:filename,status:response.status,contentType:response.headers['content-type'],dataType:typeof response.data,dataLength:responseData?.byteLength},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
     // #endregion
 
     if (response.status !== 200) {
@@ -69,7 +70,8 @@ export async function GET(
     }
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/app/api/documents/[...path]/route.ts:62',message:'returning PDF response',data:{filename:filename,dataLength:response.data?.byteLength},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    const responseDataForLog = response.data as ArrayBuffer;
+    fetch('http://127.0.0.1:7242/ingest/33e5f654-3cb0-435b-825c-00380806eaa2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'frontend/app/api/documents/[...path]/route.ts:62',message:'returning PDF response',data:{filename:filename,dataLength:responseDataForLog?.byteLength},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
     // #endregion
 
     // Return PDF as response
