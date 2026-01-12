@@ -206,6 +206,7 @@ def create_admin_router(
             get_allowed_machine_models,
             get_machine_models_for_selection
         )
+        from ..utils.db import SessionLocal, User
         
         role_upper = (payload.role or "TECHNICIAN").upper()
         
@@ -244,25 +245,41 @@ def create_admin_router(
                     )
         
         existing = await manager.get_user_by_email(payload.email)
-        if existing:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
-
-        created = await manager.create_user(
-            email=payload.email,
-            password=payload.password,
-            role=payload.role,
-            name=payload.name,
-            company_name=payload.company_name,
-            contact_name=payload.contact_name,
-            contact_phone=payload.contact_phone,
-            machine_models=machine_models if role_upper == "CUSTOMER" else None,  # Only set for customers
-        )
         
-        # Generate invite token and send email for new users
+        # If user exists, check if they have a password set
+        # If no password is set, allow re-inviting them
+        if existing:
+            db = SessionLocal()
+            try:
+                user_obj = db.query(User).filter(User.id == int(existing["id"])).first()
+                if user_obj and user_obj.password_hash and user_obj.password_hash.strip():
+                    # User exists and has a password set - they're already registered
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+                # User exists but has no password - allow re-inviting
+                # We'll handle invite generation below
+            finally:
+                db.close()
+        
+        # Only create user if they don't exist
+        if not existing:
+            created = await manager.create_user(
+                email=payload.email,
+                password=payload.password,
+                role=payload.role,
+                name=payload.name,
+                company_name=payload.company_name,
+                contact_name=payload.contact_name,
+                contact_phone=payload.contact_phone,
+                machine_models=machine_models if role_upper == "CUSTOMER" else None,  # Only set for customers
+            )
+        else:
+            # User exists but has no password - use existing user
+            created = existing
+        
+        # Generate invite token and send email for new users or re-invites
         # Only generate invite if password was not provided (invite-based flow)
         if not payload.password or not payload.password.strip():
             import os
-            from ..utils.db import SessionLocal, User
             from ..utils.invite_tokens import create_invite_token
             from ..utils.email_utils import send_invite_email
             
