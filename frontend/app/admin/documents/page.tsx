@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { resolveApiBaseUrl } from "@/config/api";
+import { resolveApiBaseUrl, buildDocumentViewUrl } from "@/config/api";
 import { Upload, FileText, Trash2, Edit, Eye, EyeOff, X, Check, ExternalLink, RefreshCw, AlertTriangle, Database, Cloud, Wrench } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
@@ -1688,8 +1688,8 @@ export default function AdminDocumentsPage() {
                     <Button
                       variant="outline"
                       onClick={() => {
-                        const encodedFilename = encodeURIComponent(selectedDocument.filename);
-                        window.open(`${apiBaseUrl}/documents/${encodedFilename}`, "_blank");
+                        const url = buildDocumentViewUrl({ filename: selectedDocument.filename })
+                        window.open(url, "_blank", "noopener,noreferrer")
                       }}
                     >
                       <ExternalLink className="mr-2 h-4 w-4" />

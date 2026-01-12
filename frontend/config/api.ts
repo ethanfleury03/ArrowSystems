@@ -45,3 +45,43 @@ export const buildApiUrl = (path: string): string => {
   return `${API_BASE_URL}${normalizedPath}`;
 };
 
+/**
+ * Build a URL for viewing/downloading a document.
+ * Returns a same-origin URL that serves application/pdf.
+ * 
+ * @param options - Document identifier options
+ * @param options.filename - Filename (required if document_id not provided)
+ * @param options.document_id - Document ID (optional, preferred if available)
+ * @param options.page - Page number for PDF fragment (optional)
+ * @returns URL string (e.g., "/api/documents/filename.pdf#page=1")
+ */
+export function buildDocumentViewUrl(options: {
+  filename?: string;
+  document_id?: number | string;
+  page?: number;
+}): string {
+  const { filename, document_id, page } = options;
+  
+  // Prefer document_id if available, otherwise use filename
+  // For now, we use filename since the API route expects filename
+  // TODO: If backend adds document_id support, use that instead
+  const identifier = filename || (document_id ? String(document_id) : '');
+  
+  if (!identifier) {
+    throw new Error('Either filename or document_id must be provided');
+  }
+  
+  // Encode the filename for URL safety
+  const encodedFilename = encodeURIComponent(identifier);
+  
+  // Build the URL using the Next.js API route (which proxies to backend)
+  const baseUrl = `${API_BASE_URL}/documents/${encodedFilename}`;
+  
+  // Add page fragment if provided (works with browser PDF viewers)
+  if (page && page > 0) {
+    return `${baseUrl}#page=${page}`;
+  }
+  
+  return baseUrl;
+}
+
