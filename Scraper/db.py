@@ -275,6 +275,30 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             ON ticket_manual_reviews(manual_status)
         """)
         
+        # Create scrape_runs table (for tracking background scrape jobs)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scrape_runs (
+                run_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                stage TEXT CHECK (stage IN ('indexing', 'building_details', 'judging')),
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                error TEXT,
+                summary_json TEXT,
+                created_by TEXT
+            )
+        """)
+        
+        # Create indexes for scrape_runs
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scrape_runs_status 
+            ON scrape_runs(status)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scrape_runs_started_at 
+            ON scrape_runs(started_at DESC)
+        """)
+        
         conn.commit()
     finally:
         conn.close()
@@ -978,6 +1002,273 @@ def get_manual_review(conn: sqlite3.Connection, ticket_id: str) -> Optional[Dict
             "manual_confirmation_quote": row["manual_confirmation_quote"],
             "reviewer": row["reviewer"],
             "reviewed_at": row["reviewed_at"]
+        }
+    return None
+
+
+def ensure_scrape_runs_table(conn: sqlite3.Connection) -> None:
+    """
+    Ensure scrape_runs table exists (idempotent).
+    
+    If table exists with old schema (without 'cancelled' status), recreate it.
+    
+    Args:
+        conn: SQLite connection
+    """
+    cursor = conn.cursor()
+    
+    # Check if table exists
+    cursor.execute("""
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name='scrape_runs'
+    """)
+    table_exists = cursor.fetchone() is not None
+    
+    if table_exists:
+        # Check if the constraint includes 'cancelled'
+        cursor.execute("""
+            SELECT sql FROM sqlite_master 
+            WHERE type='table' AND name='scrape_runs'
+        """)
+        create_sql_row = cursor.fetchone()
+        create_sql = create_sql_row[0] if create_sql_row and create_sql_row[0] else ""
+        
+        # If 'cancelled' is not in the constraint, we need to recreate the table
+        if "'cancelled'" not in create_sql:
+            import logging
+            logger = logging.getLogger("db")
+            logger.info("Migrating scrape_runs table to add 'cancelled' status")
+            
+            # Backup existing data
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scrape_runs_backup AS 
+                SELECT * FROM scrape_runs
+            """)
+            
+            # Drop old table and indexes first
+            cursor.execute("DROP INDEX IF EXISTS idx_scrape_runs_status")
+            cursor.execute("DROP INDEX IF EXISTS idx_scrape_runs_started_at")
+            cursor.execute("DROP TABLE scrape_runs")
+            
+            # Recreate with new schema
+            cursor.execute("""
+                CREATE TABLE scrape_runs (
+                    run_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                    stage TEXT CHECK (stage IN ('indexing', 'building_details', 'judging')),
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    error TEXT,
+                    summary_json TEXT,
+                    created_by TEXT
+                )
+            """)
+            
+            # Restore data (only rows with valid status)
+            cursor.execute("""
+                INSERT INTO scrape_runs 
+                SELECT * FROM scrape_runs_backup
+                WHERE status IN ('pending', 'running', 'completed', 'failed')
+            """)
+            
+            # Drop backup
+            cursor.execute("DROP TABLE scrape_runs_backup")
+            
+            # Recreate indexes
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scrape_runs_status 
+                ON scrape_runs(status)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scrape_runs_started_at 
+                ON scrape_runs(started_at DESC)
+            """)
+            
+            conn.commit()
+            return
+    
+    # Table doesn't exist, create it
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scrape_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+            stage TEXT CHECK (stage IN ('indexing', 'building_details', 'judging')),
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            error TEXT,
+            summary_json TEXT,
+            created_by TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scrape_runs_status 
+        ON scrape_runs(status)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scrape_runs_started_at 
+        ON scrape_runs(started_at DESC)
+    """)
+    conn.commit()
+
+
+def get_active_scrape_run(conn: sqlite3.Connection, max_age_hours: int = 2) -> Optional[Dict[str, Any]]:
+    """
+    Get the active scrape run (status in pending/running), newest first.
+    
+    Automatically marks stale running jobs (older than max_age_hours) as failed.
+    
+    Args:
+        conn: SQLite connection
+        max_age_hours: Maximum age in hours for a running job before marking as stale
+        
+    Returns:
+        Dict with scrape run data or None if no active run
+    """
+    cursor = conn.cursor()
+    
+    # First, check for stale running jobs and mark them as failed
+    from datetime import datetime, timezone, timedelta
+    cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    
+    cursor.execute("""
+        UPDATE scrape_runs
+        SET status = 'failed',
+            error = 'Job marked as stale (exceeded maximum age)',
+            completed_at = ?
+        WHERE status IN ('pending', 'running')
+        AND started_at < ?
+    """, (datetime.now(timezone.utc).isoformat(), cutoff_time))
+    
+    conn.commit()
+    
+    # Now get active runs
+    cursor.execute("""
+        SELECT run_id, status, stage, started_at, completed_at, error, summary_json, created_by
+        FROM scrape_runs
+        WHERE status IN ('pending', 'running')
+        ORDER BY started_at DESC
+        LIMIT 1
+    """)
+    row = cursor.fetchone()
+    if row:
+        return {
+            "run_id": row["run_id"],
+            "status": row["status"],
+            "stage": row["stage"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "error": row["error"],
+            "summary_json": row["summary_json"],
+            "created_by": row["created_by"]
+        }
+    return None
+
+
+def create_scrape_run(conn: sqlite3.Connection, run_id: str, created_by: Optional[str] = None) -> None:
+    """
+    Create a new scrape run record.
+    
+    Args:
+        conn: SQLite connection
+        run_id: Unique run ID (UUID)
+        created_by: Optional admin email/user ID
+    """
+    ensure_scrape_runs_table(conn)
+    started_at = datetime.now(timezone.utc).isoformat()
+    
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO scrape_runs (run_id, status, started_at, created_by)
+        VALUES (?, 'pending', ?, ?)
+    """, (run_id, started_at, created_by))
+    conn.commit()
+
+
+def update_scrape_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    status: Optional[str] = None,
+    stage: Optional[str] = None,
+    error: Optional[str] = None,
+    summary_json: Optional[str] = None,
+    completed_at: Optional[str] = None
+) -> None:
+    """
+    Update a scrape run record.
+    
+    Args:
+        conn: SQLite connection
+        run_id: Run ID to update
+        status: Optional status to update
+        stage: Optional stage to update
+        error: Optional error message
+        summary_json: Optional JSON summary string
+        completed_at: Optional completion timestamp (ISO format)
+    """
+    updates = []
+    params = []
+    
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status)
+    
+    if stage is not None:
+        updates.append("stage = ?")
+        params.append(stage)
+    
+    if error is not None:
+        updates.append("error = ?")
+        params.append(error)
+    
+    if summary_json is not None:
+        updates.append("summary_json = ?")
+        params.append(summary_json)
+    
+    if completed_at is not None:
+        updates.append("completed_at = ?")
+        params.append(completed_at)
+    
+    if not updates:
+        return
+    
+    params.append(run_id)
+    cursor = conn.cursor()
+    cursor.execute(
+        f"UPDATE scrape_runs SET {', '.join(updates)} WHERE run_id = ?",
+        params
+    )
+    conn.commit()
+
+
+def get_latest_scrape_run(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    """
+    Get the latest scrape run (by started_at), regardless of status.
+    
+    Args:
+        conn: SQLite connection
+        
+    Returns:
+        Dict with scrape run data or None if no runs exist
+    """
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT run_id, status, stage, started_at, completed_at, error, summary_json, created_by
+        FROM scrape_runs
+        ORDER BY started_at DESC
+        LIMIT 1
+    """)
+    row = cursor.fetchone()
+    if row:
+        return {
+            "run_id": row["run_id"],
+            "status": row["status"],
+            "stage": row["stage"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "error": row["error"],
+            "summary_json": row["summary_json"],
+            "created_by": row["created_by"]
         }
     return None
 

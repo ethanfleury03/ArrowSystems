@@ -42,10 +42,7 @@ except ImportError:
     BS4_AVAILABLE = False
     print("WARNING: BeautifulSoup4 not installed. Install with: pip install beautifulsoup4")
 
-from db import (
-    get_connection, get_ticket_ids_without_detail,
-    set_ticket_detail, count_detail
-)
+from ticket_store import get_ticket_store
 
 
 def setup_logging() -> logging.Logger:
@@ -616,31 +613,47 @@ def login(driver: Any, base_url: str, max_retries: int = 2) -> None:
     raise Exception("Login failed after all retries")
 
 
-def main():
-    """Main entry point."""
+def run_build_solved_tickets(
+    ticket_ids: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    headless: Optional[bool] = None
+) -> Dict[str, Any]:
+    """
+    Run the build solved tickets stage programmatically.
+    
+    Args:
+        ticket_ids: Optional list of ticket IDs to process. If None, processes all solved tickets without detail.
+        db_path: Optional path to database (defaults to Scraper/data/tickets.db)
+        headless: Optional headless mode (defaults to env var or False)
+        
+    Returns:
+        Dict with summary: total_processed, built, skipped, error_count
+    """
     logger = setup_logging()
     
     # Determine headless mode
-    env_path = Path(__file__).parent / ".env"
-    if DOTENV_AVAILABLE and env_path.exists():
-        load_dotenv(env_path)
-    headless = os.getenv("ZENDESK_HEADLESS", "false").lower() == "true"
+    if headless is None:
+        env_path = Path(__file__).parent / ".env"
+        if DOTENV_AVAILABLE and env_path.exists():
+            load_dotenv(env_path)
+        headless = os.getenv("ZENDESK_HEADLESS", "false").lower() == "true"
     
     base_url = "https://memjet.zendesk.com"
     
-    # Get solved ticket IDs that need detail
-    conn = get_connection()
-    try:
-        ticket_ids = get_ticket_ids_without_detail(conn)
-        total_count = len(ticket_ids)
-        
-        if total_count == 0:
-            logger.info("No solved tickets need detail building. All done!")
-            return
-        
-        logger.info(f"Found {total_count} solved tickets without detail")
-    finally:
-        conn.close()
+    # Initialize ticket store
+    store = get_ticket_store(db_path=db_path)
+    
+    # Get ticket IDs to process
+    if ticket_ids is None:
+        ticket_ids = store.get_ticket_ids_without_detail()
+    
+    total_count = len(ticket_ids)
+    
+    if total_count == 0:
+        logger.info("No solved tickets need detail building. All done!")
+        return {"total_processed": 0, "built": 0, "skipped": 0, "error_count": 0}
+    
+    logger.info(f"Found {total_count} solved tickets to process")
     
     driver = None
     
@@ -654,25 +667,23 @@ def main():
         skipped_count = 0
         error_count = 0
         
-        conn = get_connection()
-        try:
-            for i, ticket_id in enumerate(ticket_ids, 1):
-                logger.info(f"[{i}/{total_count}] Processing ticket {ticket_id}...")
+        for i, ticket_id in enumerate(ticket_ids, 1):
+            logger.info(f"[{i}/{total_count}] Processing ticket {ticket_id}...")
+            
+            try:
+                # Fetch comments
+                comments = fetch_request_comments_via_api(driver, base_url, ticket_id)
                 
-                try:
-                    # Fetch comments
-                    comments = fetch_request_comments_via_api(driver, base_url, ticket_id)
-                    
-                    if not comments:
-                        logger.warning(f"  No comments fetched for {ticket_id}, skipping")
-                        skipped_count += 1
-                        continue
-                    
-                    # Build conversation payload
-                    conversation = build_conversation_payload(driver, base_url, ticket_id, comments)
-                    
-                    # Store in database
-                    set_ticket_detail(conn, ticket_id, conversation)
+                if not comments:
+                    logger.warning(f"  No comments fetched for {ticket_id}, skipping")
+                    skipped_count += 1
+                    continue
+                
+                # Build conversation payload
+                conversation = build_conversation_payload(driver, base_url, ticket_id, comments)
+                
+                # Store in database
+                store.set_ticket_detail(ticket_id, conversation)
                     
                     comments_count = len(conversation.get("messages", []))
                     attachments_count = sum(len(msg.get("attachments", [])) for msg in conversation.get("messages", []))
@@ -682,38 +693,50 @@ def main():
                     
                     # Small delay between tickets
                     time.sleep(0.3)
-                    
+                
                 except Exception as e:
                     logger.error(f"  Error processing {ticket_id}: {e}")
                     error_count += 1
                     continue
         
-        finally:
-            conn.close()
+        summary = {
+            "total_processed": total_count,
+            "built": built_count,
+            "skipped": skipped_count,
+            "error_count": error_count
+        }
         
-        # Print summary
-        final_detail_count = count_detail(get_connection())
+        logger.info(f"BUILD SUMMARY: Processed={total_count}, Built={built_count}, Skipped={skipped_count}, Errors={error_count}")
         
-        print("\n" + "="*60)
-        print("BUILD SUMMARY")
-        print("="*60)
-        print(f"Total Processed: {total_count}")
-        print(f"Built: {built_count}")
-        print(f"Skipped: {skipped_count}")
-        print(f"Errors: {error_count}")
-        print(f"Total Detail Records: {final_detail_count}")
-        print("="*60 + "\n")
+        return summary
         
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
-        print(f"\nERROR: {e}\n")
-        sys.exit(1)
+        raise
     finally:
         if driver:
             try:
                 driver.quit()
             except:
                 pass
+
+
+def main():
+    """Main entry point."""
+    try:
+        summary = run_build_solved_tickets()
+        print("\n" + "="*60)
+        print("BUILD SUMMARY")
+        print("="*60)
+        print(f"Total Processed: {summary['total_processed']}")
+        print(f"Built: {summary['built']}")
+        print(f"Skipped: {summary['skipped']}")
+        print(f"Errors: {summary['error_count']}")
+        print("="*60 + "\n")
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        print(f"\nERROR: {e}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import sys
 import traceback
 
 import jwt
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select, func, desc, and_, or_, case, text, inspect
 from sqlalchemy.orm import Session, load_only
@@ -94,6 +94,16 @@ class MachineCreateRequest(BaseModel):
 class MachineUpdateRequest(BaseModel):
     name: Optional[str] = None
     machine_kind: Optional[str] = None
+
+
+class TicketUpdateRequest(BaseModel):
+    subject: Optional[str] = None
+    status: Optional[str] = None
+    cache_eligible: Optional[bool] = None
+    confidence: Optional[float] = None
+    review_status: Optional[str] = None
+    outcome: Optional[str] = None
+    machine_models: Optional[List[str]] = None
 
 
 def create_admin_router(
@@ -2075,7 +2085,7 @@ def create_admin_router(
         from ..utils.tickets_admin import get_tickets_page
         
         try:
-            items, total = get_tickets_page(
+            items, total, cache_eligible_total = get_tickets_page(
                 page=page,
                 page_size=page_size,
                 q=q,
@@ -2086,7 +2096,8 @@ def create_admin_router(
                 "items": items,
                 "page": page,
                 "page_size": page_size,
-                "total": total
+                "total": total,
+                "cache_eligible_total": cache_eligible_total
             }
         except FileNotFoundError as e:
             logger.warning(f"Tickets DB not available: {e}")
@@ -2099,6 +2110,302 @@ def create_admin_router(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to fetch tickets: {str(e)}"
+            )
+
+    @router.patch("/tickets/{ticket_id}")
+    async def update_ticket(
+        ticket_id: str,
+        payload: TicketUpdateRequest = Body(...),
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Update ticket fields in the SQLite database.
+        
+        Admin-only endpoint. Updates specified fields for a ticket.
+        """
+        from ..utils.tickets_admin import update_ticket as update_ticket_db
+        
+        try:
+            updated_ticket = update_ticket_db(
+                ticket_id=ticket_id,
+                subject=payload.subject,
+                status=payload.status,
+                cache_eligible=payload.cache_eligible,
+                confidence=payload.confidence,
+                review_status=payload.review_status,
+                outcome=payload.outcome,
+                machine_model_names=payload.machine_models,
+            )
+            
+            return updated_ticket
+        except FileNotFoundError as e:
+            logger.warning(f"Tickets DB not available: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
+        except ValueError as e:
+            logger.warning(f"Ticket update failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(e)
+            )
+        except Exception as e:
+            logger.error(f"Error updating ticket: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update ticket: {str(e)}"
+            )
+
+    @router.get("/tickets/{ticket_id}")
+    async def get_ticket_details(
+        ticket_id: str,
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Get full ticket details including conversation.
+        
+        Admin-only endpoint. Returns complete ticket data with conversation.
+        """
+        from ..utils.tickets_admin import get_ticket_details as get_ticket_details_db
+        
+        try:
+            ticket_details = get_ticket_details_db(ticket_id)
+            return ticket_details
+        except FileNotFoundError as e:
+            logger.warning(f"Tickets DB not available: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
+        except ValueError as e:
+            logger.warning(f"Ticket not found: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(e)
+            )
+        except Exception as e:
+            logger.error(f"Error fetching ticket details: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch ticket details: {str(e)}"
+            )
+
+    @router.post("/scrape/run")
+    async def run_scrape(
+        background_tasks: BackgroundTasks,
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Start a background scrape job.
+        
+        Admin-only endpoint. Returns immediately with run_id.
+        Returns 409 if a scrape is already running.
+        """
+        import uuid
+        import sys
+        from pathlib import Path
+        
+        # Add Scraper to path
+        project_root = Path(__file__).parent.parent.parent
+        scraper_path = project_root / "Scraper"
+        if str(scraper_path) not in sys.path:
+            sys.path.insert(0, str(scraper_path))
+        
+        from ..utils.scraper_runner import get_ticket_store
+        
+        try:
+            # Get ticket store
+            store = get_ticket_store()
+            
+            # Ensure scrape_runs table exists
+            store.ensure_scrape_runs_table()
+            
+            # Check for active run (this also cleans up stale jobs older than 2 hours)
+            active_run = store.get_active_scrape_run(max_age_hours=2)
+            if active_run:
+                # Return 409 with details in response body
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=status.HTTP_409_CONFLICT,
+                    content={
+                        "run_id": active_run["run_id"],
+                        "status": active_run["status"],
+                        "stage": active_run["stage"],
+                        "started_at": active_run["started_at"],
+                        "message": "Scrape already running"
+                    }
+                )
+            
+            # Create new run
+            run_id = str(uuid.uuid4())
+            created_by = current_admin.get("email") or current_admin.get("id")
+            
+            store.create_scrape_run(run_id, created_by)
+            
+            # Start background task
+            from ..utils.scraper_runner import run_scrape_pipeline
+            background_tasks.add_task(run_scrape_pipeline, run_id, created_by)
+            
+            logger.info(f"Started scrape run {run_id} by {created_by}")
+            
+            latest_run = store.get_latest_scrape_run()
+            return {
+                "run_id": run_id,
+                "status": "started",
+                "message": "Scraping job started",
+                "started_at": latest_run["started_at"] if latest_run else None
+            }
+                
+        except FileNotFoundError as e:
+            logger.warning(f"Scraper DB not available: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
+        except Exception as e:
+            logger.error(f"Error starting scrape: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to start scrape: {str(e)}"
+            )
+
+    @router.get("/scrape/status")
+    async def get_scrape_status(
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Get the status of the latest scrape run.
+        
+        Admin-only endpoint. Returns latest run or 'not_running' status.
+        """
+        import sys
+        from pathlib import Path
+        
+        # Add Scraper to path
+        project_root = Path(__file__).parent.parent.parent
+        scraper_path = project_root / "Scraper"
+        if str(scraper_path) not in sys.path:
+            sys.path.insert(0, str(scraper_path))
+        
+        from ..utils.scraper_runner import get_ticket_store
+        
+        try:
+            # Get ticket store
+            store = get_ticket_store()
+            
+            # Ensure scrape_runs table exists
+            store.ensure_scrape_runs_table()
+            
+            # Get latest run
+            latest_run = store.get_latest_scrape_run()
+            
+            if not latest_run:
+                return {
+                    "run_id": None,
+                    "status": "not_running",
+                    "stage": None,
+                    "started_at": None,
+                    "completed_at": None,
+                    "error": None,
+                    "summary": None
+                }
+            
+            # Parse summary_json if present
+            summary = None
+            if latest_run.get("summary_json"):
+                try:
+                    summary = json.loads(latest_run["summary_json"])
+                except Exception:
+                    pass
+            
+            return {
+                "run_id": latest_run["run_id"],
+                "status": latest_run["status"],
+                "stage": latest_run["stage"],
+                "started_at": latest_run["started_at"],
+                "completed_at": latest_run["completed_at"],
+                "error": latest_run["error"],
+                "summary": summary
+            }
+                
+        except FileNotFoundError as e:
+            logger.warning(f"Scraper DB not available: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
+        except Exception as e:
+            logger.error(f"Error fetching scrape status: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch scrape status: {str(e)}"
+            )
+
+    @router.post("/scrape/cancel")
+    async def cancel_scrape(
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Cancel the currently running scrape job.
+        
+        Admin-only endpoint. Returns 404 if no active scrape is running.
+        """
+        import sys
+        from pathlib import Path
+        
+        # Add Scraper to path
+        project_root = Path(__file__).parent.parent.parent
+        scraper_path = project_root / "Scraper"
+        if str(scraper_path) not in sys.path:
+            sys.path.insert(0, str(scraper_path))
+        
+        from ..utils.scraper_runner import get_ticket_store
+        
+        try:
+            # Get ticket store
+            store = get_ticket_store()
+            
+            # Ensure scrape_runs table exists
+            store.ensure_scrape_runs_table()
+            
+            # Get active run
+            active_run = store.get_active_scrape_run()
+            if not active_run:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No active scrape run found"
+                )
+            
+            # Update status to cancelled
+            from datetime import datetime, timezone
+            store.update_scrape_run(
+                active_run["run_id"],
+                status="cancelled",
+                completed_at=datetime.now(timezone.utc).isoformat()
+            )
+            
+            logger.info(f"Cancelled scrape run {active_run['run_id']} by {current_admin.get('email')}")
+            
+            return {
+                "run_id": active_run["run_id"],
+                "status": "cancelled",
+                "message": "Scrape run cancelled successfully"
+            }
+                
+        except HTTPException:
+            raise
+        except FileNotFoundError as e:
+            logger.warning(f"Scraper DB not available: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
+        except Exception as e:
+            logger.error(f"Error cancelling scrape: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to cancel scrape: {str(e)}"
             )
 
     return router

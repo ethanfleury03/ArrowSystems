@@ -58,8 +58,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from .rag_pipeline import RAGPipeline, initialize_rag_pipeline, get_rag_pipeline
-from .orchestrator import StructuredResponse, QueryIntent
+# Lazy imports for RAG - only import when actually needed (prevents heavy ML library imports when DISABLE_RAG=true)
+# These are imported inside functions that use them, not at module level
 from .utils.database_manager import DatabaseManager
 from .utils.db import engine, check_database_integrity, DATABASE_URL, SessionLocal, DocumentIngestionMetadata, MachineModel, run_sync
 from .utils.filenames import canonicalize_filename
@@ -135,21 +135,43 @@ def get_rag_disabled_response(path: str = "/query") -> JSONResponse:
     Returns:
         JSONResponse with status 503 and structured error body
     """
+    from .config.env import settings
+    reason = "RAG disabled" if settings.DISABLE_RAG else "RAG pipeline not initialized"
     logger.warning(
         "rag_query_rejected_rag_disabled",
         path=path,
-        reason="RAG pipeline not initialized",
+        reason=reason,
         rag_enabled=False,
+        disable_rag=settings.DISABLE_RAG,
     )
     
+    detail_msg = "RAG disabled (DISABLE_RAG=true)" if settings.DISABLE_RAG else "RAG pipeline not initialized. Please contact the administrator."
     return JSONResponse(
         status_code=503,
         content={
-            "detail": "RAG pipeline not initialized. Please contact the administrator.",
+            "detail": detail_msg,
             "code": "RAG_NOT_INITIALIZED",
             "rag_enabled": False,
         },
     )
+
+
+def require_rag_enabled():
+    """
+    FastAPI dependency that raises HTTPException if RAG is disabled.
+    
+    Usage:
+        @app.post("/query")
+        async def query_endpoint(rag_check: None = Depends(require_rag_enabled)):
+            # RAG is enabled, proceed with query
+    """
+    from .config.env import settings
+    if settings.DISABLE_RAG or rag_state.get("status") == "skipped":
+        raise HTTPException(
+            status_code=503,
+            detail="RAG disabled (DISABLE_RAG=true)"
+        )
+    return None
 
 
 # ============================================================================
@@ -326,6 +348,10 @@ def _db_unavailable_detail() -> str:
     Produce a user-safe error message that distinguishes transient init from hard failure.
     The frontend currently expects a string under the "detail" key.
     """
+    from .config.env import settings
+    if settings.DEV_SKIP_DB or db_state.get("status") == "skipped":
+        return "DB disabled in DEV_FAST mode"
+    
     status_val = db_state.get("status")
     last_err = db_state.get("last_error")
 
@@ -724,6 +750,11 @@ async def start_rag_init_if_needed():
     """
     global rag_pipeline, rag_state, app, db_manager
     
+    # Check if RAG is disabled
+    from .config.env import settings
+    if settings.DISABLE_RAG:
+        return
+    
     # If already initializing or ready, return immediately
     if rag_state["status"] in ("initializing", "ready"):
         return
@@ -747,6 +778,8 @@ async def start_rag_init_if_needed():
             
             # Ensure pipeline instance exists
             if rag_pipeline is None:
+                # Lazy import to prevent heavy ML library imports when RAG is disabled
+                from .rag_pipeline import get_rag_pipeline
                 cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
                 rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
             
@@ -879,381 +912,409 @@ async def startup_event():
 
         log_checkpoint("startup_event: db init start")
         # Database initialization - retryable + non-fatal (service can still serve RAG-only endpoints)
-        try:
-            logger.info(f"Database URL configured: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'database'}")
-            
-            # Run database migrations
-            if settings.is_dev:
-                # Development: auto-run migrations
-                # NOTE: Migrations only run if there are pending changes. Once applied, 
-                # this is just a quick check (milliseconds). The slow part is only when
-                # actual schema changes need to be applied (first time or after new migrations).
-                logger.info("running_migrations", environment="dev")
-                success, message = run_migrations()
-                if not success:
-                    logger.error("migration_failed", message=message)
-                    # Don't raise - log error but allow app to start
-                    print(f"[STARTUP] ⚠️ Database migration failed: {message}", flush=True)
-                else:
-                    logger.info("migrations_completed", message=message)
-            else:
-                # Production: check for pending migrations and fail fast
-                if check_pending_migrations():
-                    status = check_migration_status()
-                    logger.error(
-                        "pending_migrations_detected",
-                        current_revision=status.get("current_revision"),
-                        head_revision=status.get("head_revision"),
-                    )
-                    # Don't raise - log error but allow app to start
-                    print(f"[STARTUP] ⚠️ Pending migrations detected. Current: {status.get('current_revision') or 'none'}, Expected: {status.get('head_revision') or 'none'}", flush=True)
-                else:
-                    logger.info("migration_check_passed", message="Database is up to date")
-            
-            log_checkpoint("startup_event: db manager init start")
-            # Initialize database manager with retries (prevents permanent "db_manager=None" after transient failures)
-            db_ready = await ensure_db_manager_initialized(max_attempts=5, initial_delay_s=0.5, max_delay_s=5.0)
-            if not db_ready:
-                print(f"[STARTUP] ⚠️ Database initialization failed: {db_state.get('last_error')}", flush=True)
-                log_checkpoint("startup_event: db manager init failed (non-fatal)")
-            else:
-                logger.info("database_initialized", database="postgres")
-                log_checkpoint("startup_event: db manager init done")
-                log_resource_checkpoint("db_init_complete", logger)
-
-                # Seed default users (non-critical - continue even if this fails)
-                try:
-                    await db_manager.seed_default_users()
-                    logger.info("default_users_seeded", database="postgres")
-                except Exception as seed_error:
-                    logger.warning("seed_default_users_failed", error=str(seed_error), exc_info=True)
-                    # Continue startup even if seeding fails - users can be created manually
-            
-            log_checkpoint("startup_event: gcs smoke check start")
-            # GCS connectivity smoke check (non-fatal, but logs errors)
+        # Skip in fast dev mode
+        if settings.DEV_SKIP_DB:
+            logger.info("database_init_skipped", reason="DEV_SKIP_DB=true")
+            print("[STARTUP] ⏭️  Database initialization skipped (DEV_SKIP_DB=true)", flush=True)
+            db_manager = None
+            saved_response_manager = None
+            db_state["status"] = "skipped"
+            log_checkpoint("startup_event: db init skipped (fast dev mode)")
+        else:
             try:
-                from .utils.gcs_client import get_gcs_client, _is_cloud_run
-                from .config.env import settings
+                if DATABASE_URL:
+                    logger.info(f"Database URL configured: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'database'}")
+                else:
+                    logger.info("Database URL not configured (DEV_SKIP_DB=true)")
                 
-                if settings.DOCS_GCS_BUCKET:
-                    gcs_client = get_gcs_client()
-                    if gcs_client:
-                        # Try to access the bucket (lightweight check)
-                        bucket = gcs_client.bucket(settings.DOCS_GCS_BUCKET)
-                        try:
-                            # This is a lightweight operation that just checks permissions
-                            bucket.reload()
-                            logger.info(
-                                {
-                                    "event": "gcs_smoke_check_passed",
-                                    "bucket": settings.DOCS_GCS_BUCKET,
-                                    "environment": "cloud_run" if _is_cloud_run() else "local_dev",
-                                    "message": "GCS bucket access verified successfully",
-                                }
-                            )
-                        except Exception as bucket_error:
-                            error_msg = str(bucket_error)
-                            is_cloud_run = _is_cloud_run()
-                            if "403" in error_msg or "Forbidden" in error_msg or "PermissionDenied" in error_msg:
-                                # bucket.reload() requires storage.buckets.get, which is OPTIONAL for object uploads.
-                                # Do not mislead operators into granting broader permissions just because this check failed.
-                                if "storage.buckets.get" in error_msg or "buckets.get" in error_msg:
-                                    logger.warning(
+                # Run database migrations
+                if settings.is_dev:
+                    # Development: auto-run migrations
+                    # NOTE: Migrations only run if there are pending changes. Once applied, 
+                    # this is just a quick check (milliseconds). The slow part is only when
+                    # actual schema changes need to be applied (first time or after new migrations).
+                    logger.info("running_migrations", environment="dev")
+                    success, message = run_migrations()
+                    if not success:
+                        logger.error("migration_failed", message=message)
+                        # Don't raise - log error but allow app to start
+                        print(f"[STARTUP] ⚠️ Database migration failed: {message}", flush=True)
+                    else:
+                        logger.info("migrations_completed", message=message)
+                else:
+                    # Production: check for pending migrations and fail fast
+                    if check_pending_migrations():
+                        status = check_migration_status()
+                        logger.error(
+                            "pending_migrations_detected",
+                            current_revision=status.get("current_revision"),
+                            head_revision=status.get("head_revision"),
+                        )
+                        # Don't raise - log error but allow app to start
+                        print(f"[STARTUP] ⚠️ Pending migrations detected. Current: {status.get('current_revision') or 'none'}, Expected: {status.get('head_revision') or 'none'}", flush=True)
+                    else:
+                        logger.info("migration_check_passed", message="Database is up to date")
+                
+                log_checkpoint("startup_event: db manager init start")
+                # Initialize database manager with retries (prevents permanent "db_manager=None" after transient failures)
+                db_ready = await ensure_db_manager_initialized(max_attempts=5, initial_delay_s=0.5, max_delay_s=5.0)
+                if not db_ready:
+                    print(f"[STARTUP] ⚠️ Database initialization failed: {db_state.get('last_error')}", flush=True)
+                    log_checkpoint("startup_event: db manager init failed (non-fatal)")
+                else:
+                    logger.info("database_initialized", database="postgres")
+                    log_checkpoint("startup_event: db manager init done")
+                    log_resource_checkpoint("db_init_complete", logger)
+
+                    # Seed default users (non-critical - continue even if this fails)
+                    try:
+                        await db_manager.seed_default_users()
+                        logger.info("default_users_seeded", database="postgres")
+                    except Exception as seed_error:
+                        logger.warning("seed_default_users_failed", error=str(seed_error), exc_info=True)
+                        # Continue startup even if seeding fails - users can be created manually
+                
+                log_checkpoint("startup_event: gcs smoke check start")
+                # GCS connectivity smoke check (non-fatal, but logs errors)
+                # Skip in fast dev mode
+                if settings.DEV_SKIP_GCS:
+                    logger.info("gcs_smoke_check_skipped", reason="DEV_SKIP_GCS=true")
+                    print("[STARTUP] ⏭️  GCS smoke check skipped (DEV_SKIP_GCS=true)", flush=True)
+                    log_checkpoint("startup_event: gcs smoke check skipped (fast dev mode)")
+                else:
+                    try:
+                        from .utils.gcs_client import get_gcs_client, _is_cloud_run
+                        from .config.env import settings
+                        
+                        if settings.DOCS_GCS_BUCKET:
+                            gcs_client = get_gcs_client()
+                            if gcs_client:
+                                # Try to access the bucket (lightweight check)
+                                bucket = gcs_client.bucket(settings.DOCS_GCS_BUCKET)
+                                try:
+                                    # This is a lightweight operation that just checks permissions
+                                    bucket.reload()
+                                    logger.info(
                                         {
-                                            "event": "gcs_smoke_check_failed",
+                                            "event": "gcs_smoke_check_passed",
                                             "bucket": settings.DOCS_GCS_BUCKET,
-                                            "error": "Missing storage.buckets.get (optional)",
-                                            "environment": "cloud_run" if is_cloud_run else "local_dev",
-                                            "message": "Bucket metadata access (storage.buckets.get) is not granted. "
-                                                       "This is optional and does NOT block object uploads with roles/storage.objectAdmin. "
-                                                       "Use /admin/gcs/smoke-upload to validate object upload instead.",
+                                            "environment": "cloud_run" if _is_cloud_run() else "local_dev",
+                                            "message": "GCS bucket access verified successfully",
                                         }
                                     )
-                                else:
-                                    logger.error(
-                                        {
-                                            "event": "gcs_smoke_check_failed",
-                                            "bucket": settings.DOCS_GCS_BUCKET,
-                                            "error": "Permission denied",
-                                            "environment": "cloud_run" if is_cloud_run else "local_dev",
-                                            "message": "GCS bucket metadata access denied during startup smoke check. "
-                                                       "This may indicate missing permissions or wrong bucket name. "
-                                                       "Use /admin/gcs/smoke-upload to validate object upload path.",
-                                        }
-                                    )
-                            elif "404" in error_msg or "NotFound" in error_msg:
-                                logger.error(
-                                    {
-                                        "event": "gcs_smoke_check_failed",
-                                        "bucket": settings.DOCS_GCS_BUCKET,
-                                        "error": "Bucket not found",
-                                        "message": f"GCS bucket '{settings.DOCS_GCS_BUCKET}' not found. Verify the bucket name and that it exists in your GCP project.",
-                                    }
-                                )
+                                except Exception as bucket_error:
+                                    error_msg = str(bucket_error)
+                                    is_cloud_run = _is_cloud_run()
+                                    if "403" in error_msg or "Forbidden" in error_msg or "PermissionDenied" in error_msg:
+                                        # bucket.reload() requires storage.buckets.get, which is OPTIONAL for object uploads.
+                                        # Do not mislead operators into granting broader permissions just because this check failed.
+                                        if "storage.buckets.get" in error_msg or "buckets.get" in error_msg:
+                                            logger.warning(
+                                                {
+                                                    "event": "gcs_smoke_check_failed",
+                                                    "bucket": settings.DOCS_GCS_BUCKET,
+                                                    "error": "Missing storage.buckets.get (optional)",
+                                                    "environment": "cloud_run" if is_cloud_run else "local_dev",
+                                                    "message": "Bucket metadata access (storage.buckets.get) is not granted. "
+                                                               "This is optional and does NOT block object uploads with roles/storage.objectAdmin. "
+                                                               "Use /admin/gcs/smoke-upload to validate object upload instead.",
+                                                }
+                                            )
+                                        else:
+                                            logger.error(
+                                                {
+                                                    "event": "gcs_smoke_check_failed",
+                                                    "bucket": settings.DOCS_GCS_BUCKET,
+                                                    "error": "Permission denied",
+                                                    "environment": "cloud_run" if is_cloud_run else "local_dev",
+                                                    "message": "GCS bucket metadata access denied during startup smoke check. "
+                                                               "This may indicate missing permissions or wrong bucket name. "
+                                                               "Use /admin/gcs/smoke-upload to validate object upload path.",
+                                                }
+                                            )
+                                    elif "404" in error_msg or "NotFound" in error_msg:
+                                        logger.error(
+                                            {
+                                                "event": "gcs_smoke_check_failed",
+                                                "bucket": settings.DOCS_GCS_BUCKET,
+                                                "error": "Bucket not found",
+                                                "message": f"GCS bucket '{settings.DOCS_GCS_BUCKET}' not found. Verify the bucket name and that it exists in your GCP project.",
+                                            }
+                                        )
+                                    else:
+                                        logger.warning(
+                                            {
+                                                "event": "gcs_smoke_check_failed",
+                                                "bucket": settings.DOCS_GCS_BUCKET,
+                                                "error": error_msg,
+                                                "message": "GCS bucket access check failed (non-fatal). Uploads may fail.",
+                                            }
+                                        )
                             else:
                                 logger.warning(
                                     {
-                                        "event": "gcs_smoke_check_failed",
+                                        "event": "gcs_smoke_check_skipped",
                                         "bucket": settings.DOCS_GCS_BUCKET,
-                                        "error": error_msg,
-                                        "message": "GCS bucket access check failed (non-fatal). Uploads may fail.",
+                                        "message": "GCS client not available. Uploads will fail.",
                                     }
                                 )
-                    else:
+                    except Exception as gcs_check_error:
+                        # Non-fatal - log but don't block startup
                         logger.warning(
                             {
-                                "event": "gcs_smoke_check_skipped",
-                                "bucket": settings.DOCS_GCS_BUCKET,
-                                "message": "GCS client not available. Uploads will fail.",
-                            }
+                                "event": "gcs_smoke_check_error",
+                                "error": str(gcs_check_error),
+                                "message": "GCS smoke check encountered an error (non-fatal). Uploads may fail.",
+                            },
+                            exc_info=True
                         )
-            except Exception as gcs_check_error:
-                # Non-fatal - log but don't block startup
-                logger.warning(
-                    {
-                        "event": "gcs_smoke_check_error",
-                        "error": str(gcs_check_error),
-                        "message": "GCS smoke check encountered an error (non-fatal). Uploads may fail.",
-                    },
-                    exc_info=True
-                )
-            
-            log_checkpoint("startup_event: db connection check start")
-            # Run database connection check (non-fatal)
-            if db_manager is not None:
-                try:
-                    is_healthy, integrity_message = check_database_integrity()
-                    if not is_healthy:
-                        logger.error("database_connection_check_failed", message=integrity_message)
-                        print(f"[STARTUP] ⚠️ Database connection check failed: {integrity_message}", flush=True)
-                    else:
-                        logger.info("database_connection_check_passed", message=integrity_message)
-                except Exception as db_check_error:
-                    logger.warning("database_connection_check_exception", error=str(db_check_error), exc_info=True)
-                    print(f"[STARTUP] ⚠️ Database connection check exception: {db_check_error}", flush=True)
-        except Exception as db_error:
-            # Catch any other database-related errors
-            logger.error("database_startup_error", error=str(db_error), error_type=type(db_error).__name__, exc_info=True)
-            print(f"[STARTUP] ⚠️ Database startup error: {type(db_error).__name__}: {db_error}", flush=True)
-            # Mark DB state as failed, but allow later retries via ensure_db_manager_initialized()
-            db_state["status"] = "error"
-            db_state["last_error"] = f"{type(db_error).__name__}: {str(db_error)}"
-            db_manager = None
-            saved_response_manager = None
+                
+                log_checkpoint("startup_event: db connection check start")
+                # Run database connection check (non-fatal)
+                if db_manager is not None:
+                    try:
+                        is_healthy, integrity_message = check_database_integrity()
+                        if not is_healthy:
+                            logger.error("database_connection_check_failed", message=integrity_message)
+                            print(f"[STARTUP] ⚠️ Database connection check failed: {integrity_message}", flush=True)
+                        else:
+                            logger.info("database_connection_check_passed", message=integrity_message)
+                    except Exception as db_check_error:
+                        logger.warning("database_connection_check_exception", error=str(db_check_error), exc_info=True)
+                        print(f"[STARTUP] ⚠️ Database connection check exception: {db_check_error}", flush=True)
+            except Exception as db_error:
+                # Catch any other database-related errors
+                logger.error("database_startup_error", error=str(db_error), error_type=type(db_error).__name__, exc_info=True)
+                print(f"[STARTUP] ⚠️ Database startup error: {type(db_error).__name__}: {db_error}", flush=True)
+                # Mark DB state as failed, but allow later retries via ensure_db_manager_initialized()
+                db_state["status"] = "error"
+                db_state["last_error"] = f"{type(db_error).__name__}: {str(db_error)}"
+                db_manager = None
+                saved_response_manager = None
         
         log_checkpoint("startup_event: db init done")
         
         # RAG index loading - configurable loading behavior during startup
-        # Environment variables control loading behavior:
-        # - RAG_EAGER_LOAD_ON_STARTUP="1": Blocking load with timeout (old behavior)
-        # - RAG_BACKGROUND_LOAD_ON_STARTUP="1": Non-blocking background load (default, fast startup)
-        # - Both "0": No startup load, lazy init on first /query
-        log_checkpoint("startup_event: rag index load start")
-        log_resource_checkpoint("rag_init_start", logger)
-        startup_begin_time = time.time()
-        try:
-            from backend.rag.index_manager import get_index_load_state
-            load_state = get_index_load_state()
-            
-            # Compute effective load mode
-            mode, eager_raw, background_raw = _get_rag_load_mode()
-            
-            # Get storage path for logging
-            from backend.utils.storage_path import resolve_storage_path
-            from backend.utils.test_mode import is_test_mode, get_index_dir
-            from backend.config.env import settings
-            
-            if is_test_mode():
-                storage_path = get_index_dir()
-            else:
-                storage_path_obj = resolve_storage_path()
-                if storage_path_obj is None:
-                    storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+        # Skip when DISABLE_RAG is true
+        if settings.DISABLE_RAG:
+            logger.info("rag_init_skipped", reason="DISABLE_RAG=true")
+            print("[STARTUP] RAG disabled (DISABLE_RAG=true)", flush=True)
+            app.state.rag_enabled = False
+            app.state.rag_storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+            rag_state["status"] = "skipped"
+            rag_state["last_error"] = None
+            log_checkpoint("startup_event: rag index load skipped (fast dev mode)")
+        else:
+            # Environment variables control loading behavior:
+            # - RAG_EAGER_LOAD_ON_STARTUP="1": Blocking load with timeout (old behavior)
+            # - RAG_BACKGROUND_LOAD_ON_STARTUP="1": Non-blocking background load (default, fast startup)
+            # - Both "0": No startup load, lazy init on first /query
+            log_checkpoint("startup_event: rag index load start")
+            log_resource_checkpoint("rag_init_start", logger)
+            startup_begin_time = time.time()
+            try:
+                from backend.rag.index_manager import get_index_load_state
+                load_state = get_index_load_state()
+                
+                # Compute effective load mode
+                mode, eager_raw, background_raw = _get_rag_load_mode()
+                
+                # Get storage path for logging
+                from backend.utils.storage_path import resolve_storage_path
+                from backend.utils.test_mode import is_test_mode, get_index_dir
+                from backend.config.env import settings
+                
+                if is_test_mode():
+                    storage_path = get_index_dir()
                 else:
-                    storage_path = str(storage_path_obj.resolve())
-            
-            bucket_name = getattr(settings, "RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
-            index_prefix = getattr(settings, "RAG_INDEX_GCS_PREFIX", "latest_model/")
-            
-            # CRITICAL: Log mode early as plain text (textPayload) for gcloud searches
-            logger.info(f"[RAG] load_mode={mode} eager={eager_raw} background={background_raw} local_dir={storage_path} gcs={bucket_name}/{index_prefix}")
-            print(f"[RAG] load_mode={mode} eager={eager_raw} background={background_raw} local_dir={storage_path} gcs={bucket_name}/{index_prefix}", flush=True)
-            
-            if mode == "eager":
-                # Eager blocking load - waits for completion before startup finishes
-                # CRITICAL: This is a TRUE blocking await - startup will not complete until load finishes or times out
-                # FastAPI startup event blocks worker readiness, so /readyz will not be reachable until this completes
-                eager_timeout = int(os.getenv("RAG_EAGER_STARTUP_TIMEOUT_SEC", os.getenv("RAG_MAX_LOAD_TIME_SEC", "600")))
-                
-                logger.info(f"[RAG] eager load begin (timeout={eager_timeout}s)")
-                print(f"[RAG] eager load begin (timeout={eager_timeout}s)", flush=True)
-                log_resource_checkpoint("rag_eager_load_start", logger)
-                
-                eager_load_start_time = time.time()
-                try:
-                    # CRITICAL: Blocking await - NO background task, NO create_task
-                    # This ensures startup truly blocks until load completes
-                    await asyncio.wait_for(load_state.ensure_loaded(), timeout=eager_timeout)
-                    
-                    # Verify state is ready after load
-                    final_state = load_state.get_state()
-                    eager_load_duration = time.time() - eager_load_start_time
-                    
-                    if final_state["status"] == "ready":
-                        logger.info(f"[RAG] eager load completed; READY (duration={eager_load_duration:.2f}s)")
-                        print(f"[RAG] eager load completed; READY (duration={eager_load_duration:.2f}s)", flush=True)
-                        log_resource_checkpoint("rag_eager_load_success", logger)
-                        app.state.rag_enabled = True
-                        rag_state["status"] = "ready"
-                        rag_state["last_error"] = None
+                    storage_path_obj = resolve_storage_path()
+                    if storage_path_obj is None:
+                        storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
                     else:
-                        # Load completed but state is not ready (failed)
-                        error_msg = final_state.get("error") or "Index load completed but state is not ready"
+                        storage_path = str(storage_path_obj.resolve())
+                
+                bucket_name = getattr(settings, "RAG_INDEX_GCS_BUCKET", "arrow-rag-support-prod-rag")
+                index_prefix = getattr(settings, "RAG_INDEX_GCS_PREFIX", "latest_model/")
+                
+                # CRITICAL: Log mode early as plain text (textPayload) for gcloud searches
+                logger.info(f"[RAG] load_mode={mode} eager={eager_raw} background={background_raw} local_dir={storage_path} gcs={bucket_name}/{index_prefix}")
+                print(f"[RAG] load_mode={mode} eager={eager_raw} background={background_raw} local_dir={storage_path} gcs={bucket_name}/{index_prefix}", flush=True)
+                
+                if mode == "eager":
+                    # Eager blocking load - waits for completion before startup finishes
+                    # CRITICAL: This is a TRUE blocking await - startup will not complete until load finishes or times out
+                    # FastAPI startup event blocks worker readiness, so /readyz will not be reachable until this completes
+                    eager_timeout = int(os.getenv("RAG_EAGER_STARTUP_TIMEOUT_SEC", os.getenv("RAG_MAX_LOAD_TIME_SEC", "600")))
+                    
+                    logger.info(f"[RAG] eager load begin (timeout={eager_timeout}s)")
+                    print(f"[RAG] eager load begin (timeout={eager_timeout}s)", flush=True)
+                    log_resource_checkpoint("rag_eager_load_start", logger)
+                    
+                    eager_load_start_time = time.time()
+                    try:
+                        # CRITICAL: Blocking await - NO background task, NO create_task
+                        # This ensures startup truly blocks until load completes
+                        await asyncio.wait_for(load_state.ensure_loaded(), timeout=eager_timeout)
+                        
+                        # Verify state is ready after load
+                        final_state = load_state.get_state()
+                        eager_load_duration = time.time() - eager_load_start_time
+                        
+                        if final_state["status"] == "ready":
+                            logger.info(f"[RAG] eager load completed; READY (duration={eager_load_duration:.2f}s)")
+                            print(f"[RAG] eager load completed; READY (duration={eager_load_duration:.2f}s)", flush=True)
+                            log_resource_checkpoint("rag_eager_load_success", logger)
+                            app.state.rag_enabled = True
+                            rag_state["status"] = "ready"
+                            rag_state["last_error"] = None
+                        else:
+                            # Load completed but state is not ready (failed)
+                            error_msg = final_state.get("error") or "Index load completed but state is not ready"
+                            import traceback
+                            logger.error(
+                                f"[RAG] eager load failed; status={final_state['status']} error={error_msg}",
+                                duration_seconds=eager_load_duration,
+                                final_status=final_state["status"],
+                                error=error_msg,
+                                exc_info=True
+                            )
+                            print(f"[RAG] ❌ eager load failed; status={final_state['status']} error={error_msg}", flush=True)
+                            log_resource_checkpoint("rag_eager_load_failed", logger)
+                            app.state.rag_enabled = False
+                            app.state.rag_last_error = error_msg
+                            rag_state["status"] = "error"
+                            rag_state["last_error"] = error_msg
+                            
+                    except asyncio.TimeoutError:
+                        # Timeout occurred - load did not complete within timeout
+                        eager_load_duration = time.time() - eager_load_start_time
+                        error_msg = f"Eager load timed out after {eager_load_duration:.0f}s (max: {eager_timeout}s)"
                         import traceback
                         logger.error(
-                            f"[RAG] eager load failed; status={final_state['status']} error={error_msg}",
-                            duration_seconds=eager_load_duration,
-                            final_status=final_state["status"],
-                            error=error_msg,
+                            f"[RAG] eager load timeout; {error_msg}",
+                            timeout_seconds=eager_timeout,
+                            elapsed_seconds=eager_load_duration,
+                            current_status=load_state.get_state().get("status"),
                             exc_info=True
                         )
-                        print(f"[RAG] ❌ eager load failed; status={final_state['status']} error={error_msg}", flush=True)
+                        print(f"[RAG] ❌ eager load timeout; {error_msg}", flush=True)
                         log_resource_checkpoint("rag_eager_load_failed", logger)
                         app.state.rag_enabled = False
                         app.state.rag_last_error = error_msg
                         rag_state["status"] = "error"
                         rag_state["last_error"] = error_msg
                         
-                except asyncio.TimeoutError:
-                    # Timeout occurred - load did not complete within timeout
-                    eager_load_duration = time.time() - eager_load_start_time
-                    error_msg = f"Eager load timed out after {eager_load_duration:.0f}s (max: {eager_timeout}s)"
-                    import traceback
-                    logger.error(
-                        f"[RAG] eager load timeout; {error_msg}",
-                        timeout_seconds=eager_timeout,
-                        elapsed_seconds=eager_load_duration,
-                        current_status=load_state.get_state().get("status"),
-                        exc_info=True
-                    )
-                    print(f"[RAG] ❌ eager load timeout; {error_msg}", flush=True)
-                    log_resource_checkpoint("rag_eager_load_failed", logger)
-                    app.state.rag_enabled = False
-                    app.state.rag_last_error = error_msg
-                    rag_state["status"] = "error"
-                    rag_state["last_error"] = error_msg
+                    except Exception as e:
+                        # Any exception during load - log full traceback
+                        eager_load_duration = time.time() - eager_load_start_time
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        import traceback
+                        traceback_str = traceback.format_exc()
+                        logger.error(
+                            f"[RAG] eager load exception; {error_msg}",
+                            duration_seconds=eager_load_duration,
+                            error=error_msg,
+                            traceback=traceback_str,
+                            exc_info=True
+                        )
+                        print(f"[RAG] ❌ eager load exception; {error_msg}\n{traceback_str}", flush=True)
+                        log_resource_checkpoint("rag_eager_load_failed", logger)
+                        app.state.rag_enabled = False
+                        app.state.rag_last_error = error_msg
+                        rag_state["status"] = "error"
+                        rag_state["last_error"] = error_msg
+                elif mode == "background":
+                    # Non-blocking background load (default, fast startup)
+                    # Start load in background WITHOUT awaiting - allows startup to complete immediately
+                    logger.info(f"[RAG] background load scheduled (non-blocking)")
+                    print(f"[RAG] background load scheduled (non-blocking)", flush=True)
+                    log_resource_checkpoint("rag_background_load_started", logger)
                     
-                except Exception as e:
-                    # Any exception during load - log full traceback
-                    eager_load_duration = time.time() - eager_load_start_time
-                    error_msg = f"{type(e).__name__}: {str(e)}"
-                    import traceback
-                    traceback_str = traceback.format_exc()
-                    logger.error(
-                        f"[RAG] eager load exception; {error_msg}",
-                        duration_seconds=eager_load_duration,
-                        error=error_msg,
-                        traceback=traceback_str,
-                        exc_info=True
-                    )
-                    print(f"[RAG] ❌ eager load exception; {error_msg}\n{traceback_str}", flush=True)
-                    log_resource_checkpoint("rag_eager_load_failed", logger)
-                    app.state.rag_enabled = False
-                    app.state.rag_last_error = error_msg
-                    rag_state["status"] = "error"
-                    rag_state["last_error"] = error_msg
-            elif mode == "background":
-                # Non-blocking background load (default, fast startup)
-                # Start load in background WITHOUT awaiting - allows startup to complete immediately
-                logger.info(f"[RAG] background load scheduled (non-blocking)")
-                print(f"[RAG] background load scheduled (non-blocking)", flush=True)
-                log_resource_checkpoint("rag_background_load_started", logger)
-                
-                # Spawn background task - do NOT await
-                async def _background_load_with_logging():
-                    """Background task that loads index and logs completion."""
-                    load_start_time = time.time()
-                    try:
-                        # Resource checkpoint at task start
-                        log_resource_checkpoint("rag_bg_task_start", logger)
-                        
-                        await load_state.ensure_loaded()
-                        load_duration = time.time() - load_start_time
-                        final_state = load_state.get_state()
-                        if final_state["status"] == "ready":
-                            # Resource checkpoint on success
-                            log_resource_checkpoint("rag_bg_task_success", logger)
-                            logger.info(
-                                "rag_background_load_complete",
-                                duration_seconds=load_duration,
-                                trigger="startup",
-                                message=f"Background RAG index load completed successfully in {load_duration:.2f}s"
-                            )
-                            app.state.rag_enabled = True
-                            rag_state["status"] = "ready"
-                            rag_state["last_error"] = None
-                        else:
-                            error_msg = final_state.get("error") or "Index load completed but state is not ready"
+                    # Spawn background task - do NOT await
+                    async def _background_load_with_logging():
+                        """Background task that loads index and logs completion."""
+                        load_start_time = time.time()
+                        try:
+                            # Resource checkpoint at task start
+                            log_resource_checkpoint("rag_bg_task_start", logger)
+                            
+                            await load_state.ensure_loaded()
+                            load_duration = time.time() - load_start_time
+                            final_state = load_state.get_state()
+                            if final_state["status"] == "ready":
+                                # Resource checkpoint on success
+                                log_resource_checkpoint("rag_bg_task_success", logger)
+                                logger.info(
+                                    "rag_background_load_complete",
+                                    duration_seconds=load_duration,
+                                    trigger="startup",
+                                    message=f"Background RAG index load completed successfully in {load_duration:.2f}s"
+                                )
+                                app.state.rag_enabled = True
+                                rag_state["status"] = "ready"
+                                rag_state["last_error"] = None
+                            else:
+                                error_msg = final_state.get("error") or "Index load completed but state is not ready"
+                                logger.error(
+                                    "rag_background_load_not_ready",
+                                    duration_seconds=load_duration,
+                                    final_status=final_state["status"],
+                                    error=error_msg,
+                                    trigger="startup",
+                                    message=f"Background load completed but status is {final_state['status']}: {error_msg}"
+                                )
+                                app.state.rag_enabled = False
+                                app.state.rag_last_error = error_msg
+                                rag_state["status"] = "error"
+                                rag_state["last_error"] = error_msg
+                        except Exception as e:
+                            load_duration = time.time() - load_start_time
+                            error_msg = f"{type(e).__name__}: {str(e)}"
+                            # Resource checkpoint on failure
+                            log_resource_checkpoint("rag_bg_task_failed", logger)
                             logger.error(
-                                "rag_background_load_not_ready",
+                                "rag_background_load_exception",
                                 duration_seconds=load_duration,
-                                final_status=final_state["status"],
                                 error=error_msg,
                                 trigger="startup",
-                                message=f"Background load completed but status is {final_state['status']}: {error_msg}"
+                                exc_info=True,
+                                message=f"Background RAG index load failed after {load_duration:.2f}s: {error_msg}"
                             )
                             app.state.rag_enabled = False
                             app.state.rag_last_error = error_msg
                             rag_state["status"] = "error"
                             rag_state["last_error"] = error_msg
-                    except Exception as e:
-                        load_duration = time.time() - load_start_time
-                        error_msg = f"{type(e).__name__}: {str(e)}"
-                        # Resource checkpoint on failure
-                        log_resource_checkpoint("rag_bg_task_failed", logger)
-                        logger.error(
-                            "rag_background_load_exception",
-                            duration_seconds=load_duration,
-                            error=error_msg,
-                            trigger="startup",
-                            exc_info=True,
-                            message=f"Background RAG index load failed after {load_duration:.2f}s: {error_msg}"
-                        )
-                        app.state.rag_enabled = False
-                        app.state.rag_last_error = error_msg
-                        rag_state["status"] = "error"
-                        rag_state["last_error"] = error_msg
-                
-                # Start background task (non-blocking)
-                asyncio.create_task(_background_load_with_logging())
-            else:
-                # No startup load - lazy init on first /query
-                logger.info(f"[RAG] lazy load mode - will initialize on first /query")
-                print(f"[RAG] lazy load mode - will initialize on first /query", flush=True)
-            
-            # Store storage path for reference (used by query handler)
-            app.state.rag_storage_path = storage_path
-            
-            # Accurate startup checkpoint: background task scheduled (not done) - only for background mode
-            if mode == "background":
-                log_checkpoint("startup_event: rag background load scheduled")
-            log_resource_checkpoint("startup_complete", logger)
-                
-        except Exception as e:
-            # Log the error but DO NOT raise - allow app to start
-            logger.error("rag_startup_failed", 
+                    
+                    # Start background task (non-blocking)
+                    asyncio.create_task(_background_load_with_logging())
+                else:
+                    # No startup load - lazy init on first /query
+                    logger.info(f"[RAG] lazy load mode - will initialize on first /query")
+                    print(f"[RAG] lazy load mode - will initialize on first /query", flush=True)
+                    
+                    # Store storage path for reference (used by query handler)
+                    app.state.rag_storage_path = storage_path
+                    
+                    # Accurate startup checkpoint: background task scheduled (not done) - only for background mode
+                    if mode == "background":
+                        log_checkpoint("startup_event: rag background load scheduled")
+                    log_resource_checkpoint("startup_complete", logger)
+                        
+            except Exception as e:
+                # Log the error but DO NOT raise - allow app to start
+                logger.error("rag_startup_failed", 
                         error=str(e), 
                         error_type=type(e).__name__,
                         exc_info=True,
                         message=f"Failed during RAG setup: {type(e).__name__}: {str(e)}. "
                                "Server will start normally, but RAG will be disabled.")
-            print(f"[RAG] ❌ RAG setup failed: {type(e).__name__}: {str(e)}", flush=True)
-            error_msg = f"{type(e).__name__}: {str(e)}"
-            app.state.rag_storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
-            app.state.rag_last_error = error_msg
-            app.state.rag_enabled = False
-            rag_state["status"] = "error"
-            rag_state["last_error"] = error_msg
+                print(f"[RAG] ❌ RAG setup failed: {type(e).__name__}: {str(e)}", flush=True)
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                app.state.rag_storage_path = getattr(settings, "RAG_INDEX_LOCAL_DIR", "/tmp/latest_model")
+                app.state.rag_last_error = error_msg
+                app.state.rag_enabled = False
+                rag_state["status"] = "error"
+                rag_state["last_error"] = error_msg
         
         # Set RAG enabled flag on app state
         if not hasattr(app.state, 'rag_enabled'):
@@ -1768,9 +1829,12 @@ async def rag_mode():
     - env: dict of relevant environment variables
     - state: current index load state (from /api/index_status)
     """
+    from .config.env import settings
+    if settings.DISABLE_RAG:
+        raise HTTPException(status_code=503, detail="RAG disabled (DISABLE_RAG=true)")
+    
     try:
         from backend.rag.index_state import get_index_state
-        from backend.config.env import settings
         
         mode, eager_raw, background_raw = _get_rag_load_mode()
         
@@ -1857,19 +1921,27 @@ async def readyz_check():
     hostname = os.getenv("HOSTNAME", "unknown")
     
     try:
-        from backend.rag.index_manager import get_index_load_state
-        from backend.rag_pipeline import get_rag_pipeline
+        from backend.config.env import settings
         
-        load_state = get_index_load_state()
-        state = load_state.get_state()
-        rag_status = state.get("status", "unknown")
-        
-        # Get pipeline state
-        try:
-            pipeline = get_rag_pipeline()
-            pipeline_initialized = pipeline.is_initialized() if pipeline else False
-        except Exception:
+        # Check if RAG is disabled
+        if settings.DISABLE_RAG:
             pipeline_initialized = False
+            rag_status = "skipped"
+        else:
+            # Lazy import to prevent heavy ML library imports when RAG is disabled
+            from backend.rag.index_manager import get_index_load_state
+            from backend.rag_pipeline import get_rag_pipeline
+            
+            load_state = get_index_load_state()
+            state = load_state.get_state()
+            rag_status = state.get("status", "unknown")
+            
+            # Get pipeline state
+            try:
+                pipeline = get_rag_pipeline()
+                pipeline_initialized = pipeline.is_initialized() if pipeline else False
+            except Exception:
+                pipeline_initialized = False
         
         # Get index_state phase
         try:
@@ -1974,6 +2046,10 @@ async def rag_status_public():
     Returns current status immediately without waiting for initialization.
     Triggers background initialization if not already started.
     """
+    from .config.env import settings
+    if settings.DISABLE_RAG:
+        raise HTTPException(status_code=503, detail="RAG disabled (DISABLE_RAG=true)")
+    
     import os
     
     global rag_pipeline, app, rag_state
@@ -2080,6 +2156,10 @@ async def rag_self_test():
         - num_results: Number of results returned (if successful)
         - detail: Error message (if failed)
     """
+    from .config.env import settings
+    if settings.DISABLE_RAG:
+        raise HTTPException(status_code=503, detail="RAG disabled (DISABLE_RAG=true)")
+    
     global rag_pipeline
     
     # Get storage path from app state
@@ -2087,6 +2167,8 @@ async def rag_self_test():
     
     # Ensure pipeline instance exists
     if rag_pipeline is None:
+        # Lazy import to prevent heavy ML library imports when RAG is disabled
+        from .rag_pipeline import get_rag_pipeline
         cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
         rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
     
@@ -2410,6 +2492,10 @@ async def rag_warmup(request: Request):
         - rag_enabled: True if RAG is ready
         - debug_status: Full pipeline debug status
     """
+    from .config.env import settings
+    if settings.DISABLE_RAG:
+        raise HTTPException(status_code=503, detail="RAG disabled (DISABLE_RAG=true)")
+    
     global rag_pipeline
     
     # Check warm-up token for security
@@ -2452,6 +2538,8 @@ async def rag_warmup(request: Request):
     
     # Ensure pipeline instance exists
     if rag_pipeline is None:
+        # Lazy import to prevent heavy ML library imports when RAG is disabled
+        from .rag_pipeline import get_rag_pipeline
         cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
         rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager)
     
@@ -2935,6 +3023,14 @@ async def query_knowledge_base(request: Request):
     """
     global rag_pipeline, db_manager, saved_response_manager
     
+    # Check if RAG is disabled (shared guard)
+    from .config.env import settings
+    if settings.DISABLE_RAG or rag_state.get("status") == "skipped":
+        raise HTTPException(
+            status_code=503,
+            detail="RAG disabled (DISABLE_RAG=true)"
+        )
+    
     # Check index readiness first (Cloud Run-safe deterministic loading)
     try:
         from backend.rag.index_manager import get_index_load_state
@@ -3005,6 +3101,8 @@ async def query_knowledge_base(request: Request):
         
         # Ensure pipeline instance exists and is initialized
         if rag_pipeline is None:
+            # Lazy import to prevent heavy ML library imports when RAG is disabled
+            from .rag_pipeline import get_rag_pipeline
             cache_dir = os.getenv('HF_HOME', '/app/.cache/huggingface')
             rag_pipeline = get_rag_pipeline(cache_dir=cache_dir, db_manager=db_manager, storage_dir=storage_path)
         
@@ -3493,6 +3591,8 @@ async def submit_feedback(http_request: Request, request: FeedbackRequest) -> Fe
     if pipeline and pipeline.is_initialized():
         try:
             if request.is_helpful:
+                # Lazy import to prevent heavy ML library imports when RAG is disabled
+                from .orchestrator import QueryIntent
                 intent = QueryIntent(
                     intent_type=request.intent_type or "general",
                     confidence=request.intent_confidence or (request.confidence or 0.0),
@@ -3508,6 +3608,8 @@ async def submit_feedback(http_request: Request, request: FeedbackRequest) -> Fe
                     }
                     for source in request.sources
                 ]
+                # Lazy import to prevent heavy ML library imports when RAG is disabled
+                from .orchestrator import StructuredResponse
                 response_obj = StructuredResponse(
                     query=request.query,
                     answer=request.answer,

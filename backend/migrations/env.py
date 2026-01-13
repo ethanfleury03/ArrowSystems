@@ -20,9 +20,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # Import our database setup
 from backend.utils.db import get_engine, Base, DATABASE_URL
 from backend.config.env import settings
+import logging
+import os
+from urllib.parse import urlparse
 
 # Import all models so Alembic can detect them
-from backend.utils.db import User, QueryHistory, Feedback, SavedResponse, AuditLog
+from backend.utils.db import (
+    User, QueryHistory, Feedback, SavedResponse, AuditLog,
+    MachineModel, Document, GlossaryTerm,
+    TicketIndex, TicketDetail, TicketSummary, TicketJudgement,
+    TicketTriage, TicketManualReview, TicketMachineModelMatch,
+    TicketMachineModelAssignment, ScrapeRun
+)
+
+# Set up logger for Alembic
+logger = logging.getLogger("alembic.env")
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -35,6 +47,30 @@ if config.config_file_name is not None:
 
 # Set the SQLAlchemy URL from our database configuration
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
+
+# Log DATABASE_URL source and connection info (safely, without password)
+try:
+    parsed = urlparse(DATABASE_URL)
+    # Determine source
+    source = "env" if os.getenv("DATABASE_URL") else "settings"
+    
+    # Build safe connection string (mask password)
+    if parsed.password:
+        safe_url = f"{parsed.scheme}://{parsed.username}:***@{parsed.hostname}"
+        if parsed.port:
+            safe_url += f":{parsed.port}"
+        safe_url += parsed.path
+    else:
+        safe_url = DATABASE_URL.split("@")[1] if "@" in DATABASE_URL else DATABASE_URL
+    
+    # Extract connection details
+    host = parsed.hostname or "unknown"
+    db = parsed.path.lstrip("/") if parsed.path else "unknown"
+    user = parsed.username or "unknown"
+    
+    logger.info(f"[ALEMBIC] DATABASE_URL source={source} host={host} db={db} user={user}")
+except Exception as e:
+    logger.warning(f"[ALEMBIC] Could not parse DATABASE_URL for logging: {e}")
 
 # add your model's MetaData object here
 # for 'autogenerate' support

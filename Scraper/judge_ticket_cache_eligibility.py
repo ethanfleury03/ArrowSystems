@@ -49,7 +49,7 @@ except ImportError:
     sys.exit(1)
 
 import config
-import db
+from ticket_store import get_ticket_store, TicketStore
 
 # Prompt version for reproducibility
 PROMPT_VERSION = "cache_elig_v2"
@@ -2304,7 +2304,7 @@ def process_ticket_deterministic_first(
     client: Anthropic,
     ticket_id: str,
     conversation: Dict[str, Any],
-    conn,
+    store: TicketStore,
     args,
     default_model: str,
     require_requester_confirmation: bool = True
@@ -2345,7 +2345,7 @@ def process_ticket_deterministic_first(
         }
         
         if not args.dry_run and not args.deterministic_report:
-            db.upsert_ticket_judgement(conn, judgement)
+            store.upsert_ticket_judgement(judgement)
         
         return {
             "ticket_id": ticket_id,
@@ -2398,7 +2398,7 @@ def process_ticket_deterministic_first(
         }
         
         if not args.dry_run and not args.deterministic_report:
-            db.upsert_ticket_judgement(conn, judgement)
+            store.upsert_ticket_judgement(judgement)
         
         return {
             "ticket_id": ticket_id,
@@ -2434,7 +2434,7 @@ def process_ticket_deterministic_first(
         }
         
         if not args.dry_run and not args.deterministic_report:
-            db.upsert_ticket_judgement(conn, judgement)
+            store.upsert_ticket_judgement(judgement)
         
         stage_name = "deterministic_report" if args.deterministic_report else "deterministic_only"
         return {
@@ -2485,7 +2485,7 @@ def process_ticket_deterministic_first(
     
     if not args.dry_run and not args.deterministic_report:
         db_judgement = {k: v for k, v in judgement.items() if not k.startswith("_")}
-        db.upsert_ticket_judgement(conn, db_judgement)
+        store.upsert_ticket_judgement(db_judgement)
     
     return {
         "ticket_id": ticket_id,
@@ -3142,6 +3142,132 @@ def relabel_from_db(conn, args) -> None:
     
     if args.dry_run:
         print("\n[DRY RUN] No changes were made to the database.")
+
+
+def run_judge_cache_eligibility(
+    ticket_ids: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    force: bool = False,
+    require_requester_confirmation: bool = True
+) -> Dict[str, Any]:
+    """
+    Run the judge cache eligibility stage programmatically.
+    
+    Args:
+        ticket_ids: Optional list of ticket IDs to process. If None, processes all tickets needing judgement.
+        db_path: Optional path to database (defaults to Scraper/data/tickets.db)
+        force: If True, re-judge even if already judged
+        require_requester_confirmation: Require requester confirmation for hard-allow
+        
+    Returns:
+        Dict with summary: processed, cache_eligible_count, errors, hard_blocked_count, hard_allowed_count, sonnet_called_count
+    """
+    import logging
+    logger = logging.getLogger("judge_ticket_cache_eligibility")
+    
+    # Get API key and model from config
+    try:
+        api_key = config.get_anthropic_api_key()
+        default_model = config.get_anthropic_model()
+    except ValueError as e:
+        raise RuntimeError(f"Configuration error: {e}")
+    
+    # Initialize ticket store
+    store = get_ticket_store(db_path=db_path)
+    
+    # Initialize Anthropic client
+    client = Anthropic(api_key=api_key)
+    
+    # Get ticket IDs to process
+    if ticket_ids is None:
+        if force:
+            ticket_ids = store.get_solved_ticket_ids()
+        else:
+            ticket_ids = store.get_ticket_ids_needing_judgement(only_solved=True)
+    
+    if not ticket_ids:
+        logger.info("No tickets to process")
+        return {
+            "processed": 0,
+            "cache_eligible_count": 0,
+            "errors": 0,
+            "hard_blocked_count": 0,
+            "hard_allowed_count": 0,
+            "sonnet_called_count": 0
+        }
+    
+    logger.info(f"Processing {len(ticket_ids)} tickets...")
+    
+    # Create a minimal args object for process_ticket_deterministic_first
+    class Args:
+        def __init__(self):
+            self.deterministic_only = False
+            self.deterministic_report = False
+            self.dry_run = False
+            self.print = False
+    
+    args = Args()
+    
+    processed = 0
+    cache_eligible_count = 0
+    errors = 0
+    hard_blocked_count = 0
+    hard_allowed_count = 0
+    sonnet_called_count = 0
+    
+    for i, ticket_id in enumerate(ticket_ids, 1):
+        try:
+            conversation = store.get_ticket_detail_json(ticket_id)
+            if not conversation:
+                logger.warning(f"  [{i}/{len(ticket_ids)}] {ticket_id} SKIP: No conversation detail")
+                continue
+            
+            # Check if already judged (unless force)
+            if not force:
+                # Check if judgement exists by trying to get ticket_ids_needing_judgement
+                # If ticket_id is not in that list, it's already judged
+                needing_judgement = store.get_ticket_ids_needing_judgement(only_solved=True, limit=None)
+                if ticket_id not in needing_judgement:
+                    logger.debug(f"  [{i}/{len(ticket_ids)}] {ticket_id} SKIP: Already judged")
+                    continue
+            
+            # Process ticket
+            result = process_ticket_deterministic_first(
+                client, ticket_id, conversation, store, args, default_model, require_requester_confirmation
+            )
+                
+                # Update statistics
+                if result.get("blocked"):
+                    hard_blocked_count += 1
+                elif result.get("allowed"):
+                    hard_allowed_count += 1
+                elif result.get("stage") == "sonnet":
+                    sonnet_called_count += 1
+                
+                if result.get("cache_eligible") == 1:
+                    cache_eligible_count += 1
+                
+                processed += 1
+                
+                if (i % 10) == 0:
+                    logger.info(f"  Processed {i}/{len(ticket_ids)} tickets...")
+                
+            except Exception as e:
+                errors += 1
+                logger.error(f"  [{i}/{len(ticket_ids)}] {ticket_id} ERROR: {e}", exc_info=True)
+    
+    summary = {
+        "processed": processed,
+        "cache_eligible_count": cache_eligible_count,
+        "errors": errors,
+        "hard_blocked_count": hard_blocked_count,
+        "hard_allowed_count": hard_allowed_count,
+        "sonnet_called_count": sonnet_called_count
+    }
+    
+    logger.info(f"JUDGEMENT SUMMARY: Processed={processed}, CacheEligible={cache_eligible_count}, Errors={errors}")
+    
+    return summary
 
 
 def main():

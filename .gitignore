@@ -23,7 +23,8 @@ env/
 .venv
 
 # IDE
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 .idea/
 *.swp
 *.swo
@@ -35,6 +36,9 @@ env/
 # Environment variables
 .env
 .env.local
+backend/.env
+backend/.env.*
+!backend/.env.example
 
 # OS
 .DS_Store
