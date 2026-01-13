@@ -19,6 +19,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ticket_store import get_ticket_store
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
+
 
 # Copy extraction functions from verify_raw_response_schema.py to avoid cross-repo imports
 def extract_problem(raw: Dict[str, Any]) -> Optional[str]:
@@ -194,7 +198,7 @@ def export_cache_artifacts(
     Export cache-eligible tickets as JSONL artifacts.
     
     Args:
-        db_path: Path to tickets.db SQLite database
+        db_path: Path to tickets.db SQLite database (ignored if using Postgres)
         output_path: Path to output JSONL file
         ticket_id: Optional specific ticket ID to export
         limit: Optional limit on number of tickets to export
@@ -203,10 +207,6 @@ def export_cache_artifacts(
     Returns:
         Dict with counts and status
     """
-    db_path = Path(db_path)
-    if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
-    
     output_path = Path(output_path)
     if output_path.exists() and not force:
         raise FileExistsError(f"Output file exists: {output_path}. Use --force to overwrite.")
@@ -214,26 +214,63 @@ def export_cache_artifacts(
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Connect to database
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    # Determine backend and execute query
+    backend = os.getenv("TICKETS_STORAGE_BACKEND", "sqlite").lower()
     
-    # Build query
-    if ticket_id:
-        query = EFFECTIVE_CACHE_ELIGIBLE_SQL.replace(
-            "ORDER BY j.ticket_id",
-            "AND j.ticket_id = ? ORDER BY j.ticket_id"
-        )
-        cursor.execute(query, (ticket_id,))
+    if backend == "postgres":
+        # Use Postgres via SQLAlchemy
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            raise ValueError("DATABASE_URL environment variable is required for Postgres backend")
+        
+        engine = create_engine(database_url, poolclass=NullPool, future=True)
+        
+        # Build query (Postgres uses :param syntax)
+        if ticket_id:
+            query = EFFECTIVE_CACHE_ELIGIBLE_SQL.replace(
+                "ORDER BY j.ticket_id",
+                "AND j.ticket_id = :ticket_id ORDER BY j.ticket_id"
+            )
+            if limit:
+                query += f" LIMIT {limit}"
+            with engine.connect() as conn:
+                result = conn.execute(text(query), {"ticket_id": ticket_id})
+                rows = [dict(row._mapping) for row in result.fetchall()]
+        else:
+            query = EFFECTIVE_CACHE_ELIGIBLE_SQL
+            if limit:
+                query += f" LIMIT {limit}"
+            with engine.connect() as conn:
+                result = conn.execute(text(query))
+                rows = [dict(row._mapping) for row in result.fetchall()]
     else:
-        query = EFFECTIVE_CACHE_ELIGIBLE_SQL
-        if limit:
-            query += f" LIMIT {limit}"
-        cursor.execute(query)
-    
-    rows = cursor.fetchall()
-    conn.close()
+        # Use SQLite
+        db_path = Path(db_path)
+        if not db_path.exists():
+            raise FileNotFoundError(f"Database not found: {db_path}")
+        
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Build query
+        if ticket_id:
+            query = EFFECTIVE_CACHE_ELIGIBLE_SQL.replace(
+                "ORDER BY j.ticket_id",
+                "AND j.ticket_id = ? ORDER BY j.ticket_id"
+            )
+            cursor.execute(query, (ticket_id,))
+        else:
+            query = EFFECTIVE_CACHE_ELIGIBLE_SQL
+            if limit:
+                query += f" LIMIT {limit}"
+            cursor.execute(query)
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Convert sqlite3.Row to dict for consistency
+        rows = [dict(row) for row in rows]
     
     print(f"Found {len(rows)} cache-eligible tickets")
     
@@ -247,13 +284,13 @@ def export_cache_artifacts(
             ticket_id_str = row['ticket_id']
             
             try:
-                # Parse raw_response_json
-                raw_json_str = row['raw_response_json']
-                if not raw_json_str:
-                    raise ValueError("raw_response_json is empty")
-                
-                raw_json = json.loads(raw_json_str)
-                if not isinstance(raw_json, dict):
+                # Parse raw_response_json (may be dict from Postgres JSONB or string from SQLite)
+                raw_json = row['raw_response_json']
+                if isinstance(raw_json, str):
+                    if not raw_json:
+                        raise ValueError("raw_response_json is empty")
+                    raw_json = json.loads(raw_json)
+                elif not isinstance(raw_json, dict):
                     raise ValueError(f"raw_response_json is not a dict, got: {type(raw_json)}")
                 
                 # Build artifact

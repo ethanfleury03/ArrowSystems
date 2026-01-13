@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+from urllib.parse import urlparse
 
 from sqlalchemy import (
     Boolean,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    PrimaryKeyConstraint,
     create_engine,
     event,
     func,
@@ -105,6 +107,24 @@ def get_engine() -> Engine:
     Get database engine configured for PostgreSQL.
     """
     database_url = _get_database_url()
+    
+    # Extract connection info for logging (mask password)
+    parsed = urlparse(database_url)
+    dialect = parsed.scheme.replace("postgresql", "postgresql").replace("postgres", "postgresql")
+    host = parsed.hostname or "unknown"
+    port = parsed.port or 5432
+    db_name = parsed.path.lstrip("/") if parsed.path else "unknown"
+    user = parsed.username or "unknown"
+    
+    # Log database connection info once at startup
+    logger.info(
+        f"Database engine initialized: dialect={dialect}, host={host}, port={port}, "
+        f"database={db_name}, user={user}, sqlite_fallback=False"
+    )
+    print(
+        f"[DB_INIT] dialect={dialect} host={host} port={port} database={db_name} user={user} sqlite_fallback=False",
+        flush=True
+    )
     
     # PostgreSQL connection configuration
     engine = create_engine(
@@ -372,6 +392,210 @@ class GlossaryTerm(Base):
 
     __table_args__ = (
         Index('ix_glossary_terms_term', 'term'),
+    )
+
+
+# ============================================================================
+# Ticket Scraper Tables (migrated from SQLite)
+# ============================================================================
+
+class TicketIndex(Base):
+    """
+    Stage 1: Cheap indexing of all tickets.
+    Mirrors Scraper/db.py tickets_index table.
+    """
+    __tablename__ = "tickets_index"
+
+    ticket_id = Column(String(255), primary_key=True)
+    status = Column(String(50), nullable=True)
+    subject = Column(Text, nullable=True)
+    requester_id = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    is_solved = Column(Boolean, nullable=False, default=False)
+    indexed_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_tickets_index_is_solved', 'is_solved'),
+        Index('idx_tickets_index_status', 'status'),
+    )
+
+
+class TicketDetail(Base):
+    """
+    Stage 2: Detailed conversation JSON for solved tickets.
+    Mirrors Scraper/db.py tickets_detail table.
+    """
+    __tablename__ = "tickets_detail"
+
+    ticket_id = Column(String(255), ForeignKey("tickets_index.ticket_id", ondelete="CASCADE"), primary_key=True)
+    conversation_json = Column(JSON, nullable=False)  # JSONB in Postgres, stored as JSON
+    built_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TicketSummary(Base):
+    """
+    Stage 3: Structured problem/solution extraction.
+    Mirrors Scraper/db.py ticket_summaries table.
+    """
+    __tablename__ = "ticket_summaries"
+
+    ticket_id = Column(String(255), ForeignKey("tickets_detail.ticket_id", ondelete="CASCADE"), primary_key=True)
+    subject = Column(Text, nullable=True)
+    status = Column(String(50), nullable=True)
+    problem_text = Column(Text, nullable=True)
+    solution_text = Column(Text, nullable=True)
+    key_quotes = Column(Text, nullable=True)
+    resolution_confirmed = Column(Boolean, nullable=False, default=False)
+    message_count = Column(Integer, nullable=True)
+    attachments_count = Column(Integer, nullable=True)
+    onsite_required = Column(Boolean, nullable=False, default=False)
+    resolution_mode = Column(String(50), nullable=False, default="unknown")
+    resolution_mode_confidence = Column(Float, nullable=False, default=0.0)
+    onsite_signals = Column(Text, nullable=True)
+    embedding_text = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    built_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_ticket_summaries_resolution_confirmed', 'resolution_confirmed'),
+        Index('idx_ticket_summaries_status', 'status'),
+    )
+
+
+class TicketJudgement(Base):
+    """
+    LLM-based cache eligibility classification.
+    Mirrors Scraper/db.py ticket_judgements table.
+    """
+    __tablename__ = "ticket_judgements"
+
+    ticket_id = Column(String(255), ForeignKey("tickets_detail.ticket_id", ondelete="CASCADE"), primary_key=True)
+    cache_eligible = Column(Boolean, nullable=False)
+    confidence = Column(Float, nullable=False)
+    problem = Column(Text, nullable=True)
+    resolution_steps_json = Column(JSON, nullable=True)  # JSONB in Postgres
+    confirmation = Column(Text, nullable=True)
+    evidence_json = Column(JSON, nullable=True)  # JSONB in Postgres
+    blockers_json = Column(JSON, nullable=True)  # JSONB in Postgres
+    model = Column(String(255), nullable=False)
+    prompt_version = Column(String(255), nullable=False)
+    judged_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    raw_response_json = Column(JSON, nullable=False)  # JSONB in Postgres
+    review_status = Column(String(50), nullable=True)
+    review_reason = Column(Text, nullable=True)
+    review_reasons_json = Column(JSON, nullable=True)  # JSONB in Postgres
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index('idx_ticket_judgements_cache_eligible', 'cache_eligible'),
+        Index('idx_ticket_judgements_review_status', 'review_status'),
+    )
+
+
+class TicketTriage(Base):
+    """
+    Cheap model triage stage.
+    Mirrors Scraper/db.py ticket_triage table.
+    """
+    __tablename__ = "ticket_triage"
+
+    ticket_id = Column(String(255), ForeignKey("tickets_detail.ticket_id", ondelete="CASCADE"), primary_key=True)
+    triage_label = Column(String(50), nullable=False)
+    triage_confidence = Column(Float, nullable=False)
+    triage_reason = Column(Text, nullable=True)
+    triaged_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    triage_model = Column(String(255), nullable=False)
+    triage_prompt_version = Column(String(255), nullable=False)
+    triage_raw_response_json = Column(JSON, nullable=False)  # JSONB in Postgres
+
+    __table_args__ = (
+        Index('idx_ticket_triage_label', 'triage_label'),
+    )
+
+
+class TicketManualReview(Base):
+    """
+    Manual override layer.
+    Mirrors Scraper/db.py ticket_manual_reviews table.
+    """
+    __tablename__ = "ticket_manual_reviews"
+
+    ticket_id = Column(String(255), ForeignKey("ticket_judgements.ticket_id", ondelete="CASCADE"), primary_key=True)
+    manual_status = Column(String(50), nullable=False)
+    manual_reason = Column(Text, nullable=True)
+    manual_confirmation_quote = Column(Text, nullable=True)
+    reviewer = Column(String(255), nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("manual_status IN ('approved', 'rejected')", name='check_manual_status'),
+        Index('idx_ticket_manual_reviews_status', 'manual_status'),
+    )
+
+
+class TicketMachineModelMatch(Base):
+    """
+    Machine model matches (one row per match).
+    Mirrors Scraper/scripts/backfill_ticket_machine_models.py ticket_machine_model_matches table.
+    """
+    __tablename__ = "ticket_machine_model_matches"
+
+    ticket_id = Column(String(255), nullable=False)
+    machine_model_id = Column(Integer, nullable=False)
+    machine_model_name = Column(String(255), nullable=False)
+    match_source = Column(String(50), nullable=False)
+    score = Column(Integer, nullable=False)
+    evidence_snippet = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        PrimaryKeyConstraint('ticket_id', 'machine_model_id', 'match_source'),
+        Index('idx_ticket_machine_model_matches_ticket_id', 'ticket_id'),
+    )
+
+
+class TicketMachineModelAssignment(Base):
+    """
+    Machine model assignment summary (one row per ticket).
+    Mirrors Scraper/scripts/backfill_ticket_machine_models.py ticket_machine_model_assignment table.
+    """
+    __tablename__ = "ticket_machine_model_assignment"
+
+    ticket_id = Column(String(255), primary_key=True)
+    machine_model_ids = Column(JSON, nullable=False)  # JSONB in Postgres, array of integers
+    status = Column(String(50), nullable=False)
+    confidence = Column(Float, nullable=False)
+    method = Column(String(255), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_ticket_machine_model_assignment_status', 'status'),
+    )
+
+
+class ScrapeRun(Base):
+    """
+    Background scrape job tracking.
+    Mirrors Scraper/db.py scrape_runs table.
+    """
+    __tablename__ = "scrape_runs"
+
+    run_id = Column(String(255), primary_key=True)
+    status = Column(String(50), nullable=False)
+    stage = Column(String(50), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    error = Column(Text, nullable=True)
+    summary_json = Column(JSON, nullable=True)  # JSONB in Postgres
+    created_by = Column(String(255), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'running', 'completed', 'failed', 'cancelled')", name='check_scrape_status'),
+        CheckConstraint("stage IN ('indexing', 'building_details', 'judging') OR stage IS NULL", name='check_scrape_stage'),
+        Index('idx_scrape_runs_status', 'status'),
+        Index('idx_scrape_runs_started_at', 'started_at'),
     )
 
 

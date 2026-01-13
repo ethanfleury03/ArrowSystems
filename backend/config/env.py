@@ -62,6 +62,9 @@ class Settings:
         # Use standard logger format since structlog may not be configured yet
         logger.info(f"Runtime environment detected: {self.ENV} (is_prod={self.is_prod}, is_dev={self.is_dev}, env_var={os.getenv('ENV')})")
         
+        # Fast Dev Mode Configuration (load early to check DEV_SKIP_DB before secrets)
+        self._load_fast_dev_config()
+        
         # Secret Configuration - REQUIRED in production
         self._load_secrets()
         
@@ -88,6 +91,48 @@ class Settings:
         
         # Metadata Snapshot Configuration (optional - for ingestion without DB)
         self._load_metadata_snapshot_config()
+    
+    def _load_fast_dev_config(self) -> None:
+        """
+        Load fast dev mode configuration flags.
+        
+        These flags allow skipping heavy operations (RAG, DB, GCS) for fast local development.
+        Defaults to False (disabled) to preserve production behavior.
+        
+        Environment variables:
+        - DISABLE_RAG: Disable RAG completely (no imports, no initialization, no model downloads)
+        - DEV_FAST: If true, enables all skip flags (DEV_SKIP_DB, DEV_SKIP_GCS)
+        - DEV_SKIP_DB: Skip database migrations and initialization
+        - DEV_SKIP_GCS: Skip GCS smoke checks
+        """
+        # DISABLE_RAG flag (primary RAG disable flag)
+        disable_rag_str = os.getenv("DISABLE_RAG", "false").lower().strip()
+        self.DISABLE_RAG = disable_rag_str in {"true", "1", "yes", "on"}
+        
+        # DEV_FAST enables all skip flags (except RAG, which uses DISABLE_RAG)
+        dev_fast_str = os.getenv("DEV_FAST", "false").lower().strip()
+        dev_fast = dev_fast_str in {"true", "1", "yes", "on"}
+        
+        # Individual skip flags (can be set independently)
+        skip_db_str = os.getenv("DEV_SKIP_DB", "false").lower().strip()
+        skip_gcs_str = os.getenv("DEV_SKIP_GCS", "false").lower().strip()
+        
+        # If DEV_FAST is true, enable skip flags (but RAG uses DISABLE_RAG)
+        self.DEV_FAST = dev_fast
+        self.DEV_SKIP_DB = dev_fast or (skip_db_str in {"true", "1", "yes", "on"})
+        self.DEV_SKIP_GCS = dev_fast or (skip_gcs_str in {"true", "1", "yes", "on"})
+        
+        # Legacy DEV_SKIP_RAG for backward compatibility (maps to DISABLE_RAG)
+        legacy_skip_rag_str = os.getenv("DEV_SKIP_RAG", "false").lower().strip()
+        legacy_skip_rag = legacy_skip_rag_str in {"true", "1", "yes", "on"}
+        if legacy_skip_rag:
+            self.DISABLE_RAG = True
+        
+        if self.DISABLE_RAG or self.DEV_FAST or self.DEV_SKIP_DB or self.DEV_SKIP_GCS:
+            logger.info(
+                f"Fast dev mode enabled: DISABLE_RAG={self.DISABLE_RAG}, "
+                f"DEV_FAST={self.DEV_FAST}, SKIP_DB={self.DEV_SKIP_DB}, SKIP_GCS={self.DEV_SKIP_GCS}"
+            )
     
     def _load_metadata_snapshot_config(self) -> None:
         """
@@ -244,7 +289,7 @@ class Settings:
     
     def _load_secrets(self) -> None:
         """Load required secrets - REQUIRED in production, optional in dev."""
-        # DATABASE_URL - required in all environments
+        # DATABASE_URL - required in all environments unless DEV_SKIP_DB is true
         if self.is_prod:
             try:
                 self.DATABASE_URL = os.environ["DATABASE_URL"]
@@ -256,12 +301,12 @@ class Settings:
         else:
             # Development: allow fallback via os.getenv() for local .env file support
             database_url = os.getenv("DATABASE_URL")
-            if not database_url:
+            if not database_url and not self.DEV_SKIP_DB:
                 raise RuntimeError(
                     "DATABASE_URL environment variable is required in all environments. "
-                    "Set it in your .env file for local development."
+                    "Set it in your .env file for local development, or set DEV_SKIP_DB=true to skip DB initialization."
                 )
-            self.DATABASE_URL = database_url
+            self.DATABASE_URL = database_url or ""  # Empty string if skipped
         
         # FRONTEND_SESSION_SECRET - required in production
         if self.is_prod:

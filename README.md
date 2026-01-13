@@ -35,6 +35,7 @@ Enterprise-grade **Retrieval-Augmented Generation (RAG)** orchestrator with **Hy
 
 Complete documentation has been organized in the `docs/` folder:
 
+- **[Local Development Setup](docs/dev.md)** - Setting up local dev environment with Cloud SQL Proxy
 - **[User Guide](docs/UI_README.md)** - How to use the web interface
 - **[Deployment Guide](docs/DEPLOYMENT_GUIDE.md)** - How to deploy and configure
 - **[Implementation Details](docs/IMPLEMENTATION_SUMMARY.md)** - Technical architecture
@@ -94,11 +95,20 @@ Then open http://localhost:3000 and login with:
 # Install dependencies
 pip install -r backend/requirements.txt
 
+# Set up local environment (REQUIRED for local development)
+# Copy backend/.env.example to backend/.env and configure DATABASE_URL
+cp backend/.env.example backend/.env
+# Edit backend/.env and set your PostgreSQL DATABASE_URL
+# Example: DATABASE_URL=postgresql://postgres:postgres@localhost:5432/arrow_dev
+
 # Start backend API
 python -m backend.api --host 0.0.0.0 --port 8000
 
 # Or use the startup script
 ./scripts/start_api.sh
+
+# Or use the VS Code/Cursor dev task (loads .env automatically)
+# Press Ctrl+Shift+P -> "Tasks: Run Task" -> "Dev: Backend (FastAPI)"
 ```
 
 **Frontend (Next.js):**
@@ -107,6 +117,16 @@ cd frontend
 npm install
 npm run dev
 ```
+
+**Using VS Code/Cursor Tasks (Recommended for Local Development):**
+1. Ensure `backend/.env` exists (copy from `backend/.env.example`)
+2. Configure `DATABASE_URL` in `backend/.env` (PostgreSQL required - SQLite not supported)
+3. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac)
+4. Select "Tasks: Run Task"
+5. Choose:
+   - `Dev: Backend (FastAPI)` - Backend only
+   - `Dev: Frontend (Next.js)` - Frontend only  
+   - `Dev: All (No Docker)` - Both servers in parallel
 
 Then open http://localhost:3000
 

@@ -35,50 +35,60 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
   const { toast } = useToast();
 
   // Cache admin check in sessionStorage to avoid re-checking on every navigation
-  const [isAdmin, setIsAdmin] = useState<boolean | null>(() => {
-    // Try to get cached admin status from sessionStorage
-    if (typeof window !== 'undefined') {
-      const cached = sessionStorage.getItem('admin_check');
-      if (cached === 'true') return true;
-      if (cached === 'false') return false;
-    }
-    return null;
-  });
+  // Always start with null to ensure server/client hydration match
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [userProfile, setUserProfile] = useState<{ email?: string | null; name?: string | null; role?: string | null } | null>(null);
+  const [isMounted, setIsMounted] = useState(false);
+
+  // Set mounted state after hydration
+  useEffect(() => {
+    setIsMounted(true);
+    // Check sessionStorage after mount to avoid hydration mismatch
+    // Only trust 'true' cache, always re-check if 'false' or missing
+    if (typeof window !== 'undefined') {
+      const cached = sessionStorage.getItem('admin_check');
+      if (cached === 'true') {
+        setIsAdmin(true);
+        return; // Skip API check if cached as admin
+      }
+      // Don't cache 'false' - always re-check to allow retry
+    }
+  }, [router]);
 
   // Validate token and ensure admin access (only once per session)
   useEffect(() => {
-    // If already checked and cached, skip the check
-    if (isAdmin !== null && typeof window !== 'undefined' && sessionStorage.getItem('admin_check')) {
+    // Wait for mount before checking
+    if (!isMounted) return;
+    
+    // If already checked and cached as admin, skip the check
+    if (isAdmin === true && typeof window !== 'undefined' && sessionStorage.getItem('admin_check') === 'true') {
       return;
     }
 
-    let isMounted = true;
+    let isMountedRef = true;
+    let hasRedirected = false;
 
     const checkAdminAccess = async () => {
       try {
         // Call /api/auth/me to get user from cookie-based JWT
         const user = await getCurrentUser();
 
-        if (!isMounted) return;
+        if (!isMountedRef || hasRedirected) return;
 
         // Verify user has ADMIN role
         if (user.role !== "ADMIN") {
-          if (typeof window !== 'undefined') {
-            sessionStorage.setItem('admin_check', 'false');
-          }
-          toast({
-            title: "Access denied",
-            description: "Administrator permissions are required.",
-            variant: "destructive",
-          });
+          // Don't cache 'false' - allow retry on next visit
+          hasRedirected = true;
           setIsAdmin(false);
-          router.replace("/");
+          // Use window.location to prevent loop
+          window.location.href = "/";
           return;
         }
 
         // User is admin, set state and cache
+        if (!isMountedRef || hasRedirected) return;
+        
         if (typeof window !== 'undefined') {
           sessionStorage.setItem('admin_check', 'true');
         }
@@ -89,28 +99,23 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
           role: user.role,
         });
       } catch (error) {
-        if (!isMounted) return;
+        if (!isMountedRef || hasRedirected) return;
 
-        if (typeof window !== 'undefined') {
-          sessionStorage.setItem('admin_check', 'false');
-        }
+        // Don't cache 'false' - allow retry on next visit
+        hasRedirected = true;
         console.error("Admin access check failed:", error);
-        toast({
-          title: "Access denied",
-          description: "Administrator permissions are required.",
-          variant: "destructive",
-        });
         setIsAdmin(false);
-        router.replace("/");
+        // Use window.location to prevent loop
+        window.location.href = "/";
       }
     };
 
     checkAdminAccess();
 
     return () => {
-      isMounted = false;
+      isMountedRef = false;
     };
-  }, [router, toast, isAdmin]);
+  }, [router, toast, isAdmin, isMounted]);
 
   const displayName = useMemo(() => {
     if (userProfile?.name && userProfile.name.trim().length > 0) {
@@ -149,6 +154,7 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
     }
   };
 
+  // Show loading state during initial check (consistent server/client render)
   if (isAdmin === null) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-muted/40">
@@ -157,6 +163,7 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
     );
   }
 
+  // If not admin, show nothing (will redirect)
   if (!isAdmin) {
     return null;
   }

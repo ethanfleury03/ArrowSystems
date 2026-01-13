@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 try:
     from selenium import webdriver
@@ -33,10 +33,7 @@ except ImportError:
     DOTENV_AVAILABLE = False
     print("WARNING: python-dotenv not installed. Install with: pip install python-dotenv")
 
-from db import (
-    get_connection, init_db, upsert_ticket_index,
-    count_index, count_solved, count_open
-)
+from ticket_store import get_ticket_store
 
 
 def setup_logging() -> logging.Logger:
@@ -79,7 +76,8 @@ def get_driver(headless: bool = False) -> Any:
     chrome_options = Options()
     
     if headless:
-        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--headless=new')  # Use new headless mode
+        chrome_options.add_argument('--disable-gpu')
     
     chrome_options.add_argument('--window-size=1600,1000')
     chrome_options.add_argument('--no-sandbox')
@@ -88,11 +86,27 @@ def get_driver(headless: bool = False) -> Any:
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
+    # Additional options for better compatibility and Cloudflare bypass
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-software-rasterizer')
+    # Set a realistic user agent to avoid Cloudflare detection
+    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    
     logger = logging.getLogger("index_requests")
     logger.info(f"Creating Chrome driver (headless={headless})")
     
     driver = webdriver.Chrome(options=chrome_options)
-    driver.set_window_size(1600, 1000)
+    if not headless:
+        driver.set_window_size(1600, 1000)
+    
+    # Execute script to remove webdriver property (helps bypass Cloudflare)
+    driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+        'source': '''
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            })
+        '''
+    })
     
     return driver
 
@@ -205,12 +219,60 @@ def login(driver: Any, base_url: str, max_retries: int = 2) -> None:
             logger.info("Not logged in, performing login...")
             login_url = f"{base_url}/access/login"
             driver.get(login_url)
-            time.sleep(2)
             
-            wait = WebDriverWait(driver, 15)
+            # Wait for Cloudflare challenge to complete (if present)
+            wait = WebDriverWait(driver, 30)  # Increased timeout for Cloudflare
+            logger.info("Waiting for page to load (may include Cloudflare challenge)...")
             
-            # Enter email
-            email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']")))
+            # Wait for page to be ready
+            wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+            
+            # Check if we're on a Cloudflare challenge page and wait for it
+            max_cloudflare_wait = 25  # seconds (Cloudflare can take 10-20 seconds)
+            cloudflare_wait_start = time.time()
+            while ("Just a moment" in driver.title or 
+                   "Checking your browser" in driver.page_source[:1000] or
+                   "challenge-platform" in driver.page_source[:1000] or
+                   "cf-browser-verification" in driver.page_source[:1000]):
+                elapsed = time.time() - cloudflare_wait_start
+                if elapsed > max_cloudflare_wait:
+                    logger.warning(f"Cloudflare challenge taking too long ({elapsed:.1f}s), continuing anyway...")
+                    break
+                logger.info(f"Cloudflare challenge detected (waited {elapsed:.1f}s), waiting...")
+                time.sleep(2)
+                # Don't refresh - just wait for Cloudflare to complete automatically
+                wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+            
+            # Additional wait for dynamic content after Cloudflare
+            time.sleep(3)
+            
+            # Try multiple selectors for email field
+            email_field = None
+            selectors = [
+                "input[type='email']",
+                "input[name='email']",
+                "input[id*='email']",
+                "input[placeholder*='email' i]",
+                "#email",
+                "input.email"
+            ]
+            
+            for selector in selectors:
+                try:
+                    email_field = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+                    logger.info(f"Found email field using selector: {selector}")
+                    break
+                except Exception:
+                    continue
+            
+            if not email_field:
+                # Log page source for debugging
+                page_source_snippet = driver.page_source[:1000] if len(driver.page_source) > 1000 else driver.page_source
+                logger.error(f"Could not find email field. Page title: {driver.title}, URL: {driver.current_url}")
+                logger.debug(f"Page source snippet: {page_source_snippet}")
+                raise Exception("Could not locate email input field on login page (may be blocked by Cloudflare)")
             logger.info("Entering email...")
             email_field.clear()
             email_field.send_keys(email)
@@ -335,21 +397,32 @@ def list_requests_via_search_api(driver: Any, base_url: str) -> list[Dict[str, A
     return all_requests
 
 
-def main():
-    """Main entry point."""
+def run_index_requests(db_path: Optional[str] = None, headless: Optional[bool] = None) -> Dict[str, Any]:
+    """
+    Run the index requests stage programmatically.
+    
+    Args:
+        db_path: Optional path to database (defaults to Scraper/data/tickets.db)
+        headless: Optional headless mode (defaults to env var or False)
+        
+    Returns:
+        Dict with summary: indexed, total_count, solved_count, open_count
+    """
     logger = setup_logging()
     
     # Determine headless mode
-    env_path = Path(__file__).parent / ".env"
-    if DOTENV_AVAILABLE and env_path.exists():
-        load_dotenv(env_path)
-    headless = os.getenv("ZENDESK_HEADLESS", "false").lower() == "true"
+    if headless is None:
+        env_path = Path(__file__).parent / ".env"
+        if DOTENV_AVAILABLE and env_path.exists():
+            load_dotenv(env_path)
+        headless = os.getenv("ZENDESK_HEADLESS", "false").lower() == "true"
     
     base_url = "https://memjet.zendesk.com"
     
-    # Initialize database
-    logger.info("Initializing database...")
-    init_db()
+    # Initialize ticket store
+    logger.info("Initializing ticket store...")
+    store = get_ticket_store(db_path=db_path)
+    store.ensure_scrape_runs_table()  # Ensure scrape_runs table exists
     
     driver = None
     
@@ -366,72 +439,85 @@ def main():
         
         if not requests_list:
             logger.warning("No requests fetched")
-            return
+            return {"indexed": 0, "total_count": 0, "solved_count": 0, "open_count": 0}
         
         # Index requests into database
         logger.info(f"Indexing {len(requests_list)} requests into database...")
-        conn = get_connection()
         
-        try:
-            indexed = 0
-            for req in requests_list:
-                ticket_id = str(req.get("id", ""))
-                if not ticket_id:
-                    continue
-                
-                raw_status = req.get("status", "")
-                subject = req.get("subject", "")
-                requester_id = req.get("requester_id")
-                created_at = req.get("created_at", "")
-                updated_at = req.get("updated_at", "")
-                
-                # Normalize status: "closed" -> "solved" for consistency
-                status = "solved" if raw_status == "closed" else raw_status
-                
-                # Compute is_solved
-                is_solved = 1 if status in ("solved", "closed") else 0
-                
-                row = {
-                    "ticket_id": ticket_id,
-                    "status": status,
-                    "subject": subject,
-                    "requester_id": str(requester_id) if requester_id else None,
-                    "created_at": created_at,
-                    "updated_at": updated_at,
-                    "is_solved": is_solved
-                }
-                
-                upsert_ticket_index(conn, row)
-                indexed += 1
+        indexed = 0
+        for req in requests_list:
+            ticket_id = str(req.get("id", ""))
+            if not ticket_id:
+                continue
             
-            logger.info(f"Indexed {indexed} requests")
+            raw_status = req.get("status", "")
+            subject = req.get("subject", "")
+            requester_id = req.get("requester_id")
+            created_at = req.get("created_at", "")
+            updated_at = req.get("updated_at", "")
             
-            # Print summary
-            total_count = count_index(conn)
-            solved_count = count_solved(conn)
-            open_count = count_open(conn)
+            # Normalize status: "closed" -> "solved" for consistency
+            status = "solved" if raw_status == "closed" else raw_status
             
-            print("\n" + "="*60)
-            print("INDEXING SUMMARY")
-            print("="*60)
-            print(f"Total Indexed: {total_count}")
-            print(f"Solved: {solved_count}")
-            print(f"Open: {open_count}")
-            print("="*60 + "\n")
+            # Compute is_solved
+            is_solved = 1 if status in ("solved", "closed") else 0
             
-        finally:
-            conn.close()
+            row = {
+                "ticket_id": ticket_id,
+                "status": status,
+                "subject": subject,
+                "requester_id": str(requester_id) if requester_id else None,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "is_solved": is_solved
+            }
+            
+            store.upsert_ticket_index(row)
+            indexed += 1
+        
+        logger.info(f"Indexed {indexed} requests")
+        
+        # Get summary
+        total_count = store.count_index()
+        solved_count = store.count_solved()
+        open_count = store.count_open()
+        
+        summary = {
+            "indexed": indexed,
+            "total_count": total_count,
+            "solved_count": solved_count,
+            "open_count": open_count
+        }
+        
+        logger.info(f"INDEXING SUMMARY: Total={total_count}, Solved={solved_count}, Open={open_count}")
+        
+        return summary
         
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
-        print(f"\nERROR: {e}\n")
-        sys.exit(1)
+        raise
     finally:
         if driver:
             try:
                 driver.quit()
             except:
                 pass
+
+
+def main():
+    """Main entry point."""
+    try:
+        summary = run_index_requests()
+        print("\n" + "="*60)
+        print("INDEXING SUMMARY")
+        print("="*60)
+        print(f"Total Indexed: {summary['total_count']}")
+        print(f"Solved: {summary['solved_count']}")
+        print(f"Open: {summary['open_count']}")
+        print("="*60 + "\n")
+    except Exception as e:
+        print(f"\nERROR: {e}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
