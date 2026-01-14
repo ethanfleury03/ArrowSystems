@@ -368,6 +368,20 @@ class IndexLoadState:
                     )
                     log_resource_checkpoint("rag_gcs_download_complete")
                     
+                    # Step 1b: Try to download optional ticket cache index (non-blocking)
+                    try:
+                        from backend.rag.ticket_index_downloader import download_ticket_index_from_gcs
+                        ticket_download_ok = await asyncio.to_thread(download_ticket_index_from_gcs)
+                        if ticket_download_ok:
+                            logger.info("[TICKET] Ticket index downloaded successfully")
+                        else:
+                            logger.debug("[TICKET] Ticket index not available or download skipped")
+                    except Exception as e:
+                        logger.warning(
+                            "[TICKET] Ticket index download failed - continuing without it",
+                            error=str(e)
+                        )
+                    
                     # Validate downloaded files have non-trivial size
                     for f in required:
                         file_path = os.path.join(storage_path, f)

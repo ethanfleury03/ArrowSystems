@@ -316,6 +316,10 @@ async def ensure_rag_index_downloaded() -> bool:
             rag_download_state["status"] = "ready"
             rag_download_state["last_error"] = None
             app.state.rag_last_error = None
+            
+            # Note: Ticket index download is handled by index_manager.py during main index load
+            # Do NOT trigger download from API routes to avoid duplicate downloads
+            
             return True
         except Exception as e:
             err = f"{type(e).__name__}: {str(e)}"
@@ -2105,6 +2109,42 @@ async def rag_status_public():
         flush=True,
     )
     
+    # Get ticket index state (non-blocking, never crashes)
+    ticket_index_prefix = "ticket_cache/latest_model/"
+    ticket_index_present = False
+    ticket_index_loaded = False
+    ticket_index_local_dir = None
+    ticket_index_last_error = None
+    
+    try:
+        from backend.rag.ticket_index_downloader import (
+            get_ticket_index_local_dir,
+            get_last_ticket_download_error,
+            TICKET_INDEX_GCS_PREFIX
+        )
+        from backend.config.env import settings
+        
+        # Check if ticket index exists in GCS (non-blocking)
+        try:
+            from backend.rag.ticket_index_downloader import check_ticket_index_exists
+            bucket_name = settings.RAG_INDEX_GCS_BUCKET
+            ticket_index_present = check_ticket_index_exists(bucket_name, TICKET_INDEX_GCS_PREFIX)
+        except Exception as check_error:
+            logger.debug("[TICKET] Could not check ticket index existence", error=str(check_error))
+            ticket_index_present = False
+        
+        # Check if ticket index is loaded locally
+        ticket_dir = get_ticket_index_local_dir()
+        if ticket_dir:
+            ticket_index_loaded = True
+            ticket_index_local_dir = str(ticket_dir)
+        
+        ticket_index_last_error = get_last_ticket_download_error()
+    except Exception as e:
+        # Never crash /rag/status - just log warning
+        logger.debug("[TICKET] Could not get ticket index state", error=str(e))
+        ticket_index_last_error = str(e)
+    
     return {
         "status": status,  # "initializing" | "ready" | "error"
         "rag_enabled": rag_enabled,
@@ -2118,6 +2158,12 @@ async def rag_status_public():
         "initializing": initializing,
         "last_error": last_error or getattr(app.state, "rag_last_error", None),
         "details": details,
+        # Ticket index state
+        "ticket_index_prefix": ticket_index_prefix,
+        "ticket_index_present": ticket_index_present,
+        "ticket_index_loaded": ticket_index_loaded,
+        "ticket_index_local_dir": ticket_index_local_dir,
+        "ticket_index_last_error": ticket_index_last_error,
     }
 
 
@@ -3520,6 +3566,7 @@ async def query_knowledge_base(request: Request):
             response_time_ms=response_time_ms,
             session_id=session_id,
             conversation_id=conversation_id,
+            cache_hit=getattr(response, 'cache_hit', False),  # Pass through cache_hit flag
             matched_machine_name=response.matched_machine_name,
             is_saved=is_saved,
             # Language metadata

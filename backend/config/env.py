@@ -91,6 +91,9 @@ class Settings:
         
         # Metadata Snapshot Configuration (optional - for ingestion without DB)
         self._load_metadata_snapshot_config()
+        
+        # Ticket Cache Configuration
+        self._load_ticket_cache_config()
     
     def _load_fast_dev_config(self) -> None:
         """
@@ -421,6 +424,23 @@ class Settings:
         
         # Query endpoint: moderate limit to prevent abuse
         self.RATE_LIMIT_QUERY = os.getenv("RATE_LIMIT_QUERY", "10/minute")
+    
+    def _load_ticket_cache_config(self) -> None:
+        """Load ticket cache lookup configuration."""
+        # Ticket cache enabled flag (default: true in prod, can be false in dev)
+        ticket_cache_enabled_str = os.getenv("TICKET_CACHE_ENABLED", "true" if self.is_prod else "true").lower()
+        self.TICKET_CACHE_ENABLED = ticket_cache_enabled_str in {"true", "1", "yes", "on"}
+        
+        # Ticket cache similarity threshold (default: 0.75)
+        ticket_cache_threshold_str = os.getenv("TICKET_CACHE_THRESHOLD", "0.75")
+        try:
+            self.TICKET_CACHE_THRESHOLD = float(ticket_cache_threshold_str)
+            if not (0.0 <= self.TICKET_CACHE_THRESHOLD <= 1.0):
+                logger.warning(f"TICKET_CACHE_THRESHOLD must be between 0.0 and 1.0, got {self.TICKET_CACHE_THRESHOLD}, defaulting to 0.75")
+                self.TICKET_CACHE_THRESHOLD = 0.75
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid TICKET_CACHE_THRESHOLD value: {ticket_cache_threshold_str}, defaulting to 0.75")
+            self.TICKET_CACHE_THRESHOLD = 0.75
 
 
 # Global settings instance
