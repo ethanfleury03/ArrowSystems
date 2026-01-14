@@ -394,6 +394,7 @@ class StructuredResponse:
     token_output: Optional[int] = None  # Output tokens used
     token_total: Optional[int] = None  # Total tokens used
     cost_usd: Optional[float] = None  # Estimated cost in USD
+    cache_hit: bool = False  # Whether this response came from a cache (user-validated or ticket cache)
 
 
 class MachineNameMatcher:
@@ -3570,6 +3571,10 @@ class RAGOrchestrator:
         self.glossary_index = None
         self.db_manager = db_manager  # 🗄️ PostgreSQL manager for validated Q&A fast-path
         
+        # Ticket cache index (optional, loaded separately)
+        self.ticket_index = None
+        self.ticket_retriever = None
+        
         # Components
         self.query_rewriter = QueryRewriter()  # Rule-based fallback
         
@@ -3605,6 +3610,70 @@ class RAGOrchestrator:
         # User-validated cache (only stores answers marked helpful)
         self.cache = QueryCache(max_size=1000)
         self.semantic_cache = None  # Initialized after models are ready
+    
+    def _normalize_machine_model(self, model: str) -> str:
+        """
+        Normalize machine model name for comparison.
+        
+        Removes non-alphanumeric characters and converts to lowercase.
+        Example: "DuraFlex" -> "duraflex", "Dura-Flex" -> "duraflex"
+        
+        Args:
+            model: Machine model name to normalize
+            
+        Returns:
+            Normalized string (lowercase, alphanumeric only)
+        """
+        import re
+        # Remove non-alphanumeric characters and convert to lowercase
+        return re.sub(r'[^a-z0-9]', '', model.lower())
+    
+    def _should_retrieve_ticket_cache(self, user_machine_models: Optional[List[str]]) -> bool:
+        """
+        Check if ticket cache retrieval should be performed.
+        
+        Gate: Only retrieve if user_machine_models contains the target model.
+        Most tickets are for one model (DuraFlex by default).
+        Uses normalized comparison to handle case/spacing differences.
+        
+        Args:
+            user_machine_models: List of machine model names from user
+            
+        Returns:
+            True if ticket cache retrieval should be performed, False otherwise
+        """
+        # Target models for ticket cache (most tickets are for these models)
+        TICKET_CACHE_TARGET_MODELS = ["DuraFlex"]
+        
+        # Safe default: if machine info missing, skip ticket retrieval
+        if not user_machine_models:
+            return False
+        
+        # Normalize target models
+        normalized_targets = {self._normalize_machine_model(m) for m in TICKET_CACHE_TARGET_MODELS}
+        
+        # Normalize user machine models
+        normalized_user_models = {self._normalize_machine_model(m) for m in user_machine_models if m}
+        
+        # Check if any normalized target matches any normalized user model
+        should_retrieve = bool(normalized_targets & normalized_user_models)
+        
+        if should_retrieve:
+            logger.debug(
+                "[TICKET] Machine model gate passed",
+                target_models=TICKET_CACHE_TARGET_MODELS,
+                user_models=user_machine_models,
+                normalized_targets=list(normalized_targets),
+                normalized_user=list(normalized_user_models)
+            )
+        else:
+            logger.debug(
+                "[TICKET] Machine model gate not passed - skipping ticket cache retrieval",
+                target_models=TICKET_CACHE_TARGET_MODELS,
+                user_models=user_machine_models
+            )
+        
+        return should_retrieve
     
     def _ensure_intent_classifier(self):
         """Lazy initialization of intent classifier if not already initialized."""
@@ -3730,6 +3799,74 @@ class RAGOrchestrator:
         
         return processed.strip()
 
+    def _load_ticket_index(self):
+        """
+        Load optional ticket cache index if it exists.
+        
+        This is non-blocking - if the index doesn't exist or fails to load,
+        the system continues normally without ticket cache retrieval.
+        """
+        try:
+            from backend.rag.ticket_index_downloader import get_ticket_index_local_dir
+            from llama_index.core import StorageContext, load_index_from_storage
+            
+            ticket_dir = get_ticket_index_local_dir()
+            if not ticket_dir:
+                logger.debug("[TICKET] Ticket index not found locally - skipping ticket cache retrieval")
+                self.ticket_index = None
+                self.ticket_retriever = None
+                return
+            
+            logger.info("[TICKET] Loading ticket cache index", local_dir=str(ticket_dir))
+            
+            # Ensure embedding model is set (reuse main index embedding model)
+            # Import Settings lazily to avoid circular imports
+            try:
+                from llama_index.core import Settings
+                if self.embed_model:
+                    Settings.embed_model = self.embed_model
+                else:
+                    logger.warning("[TICKET] Embedding model not initialized - ticket index may not load correctly")
+                
+                # Set LLM to None to avoid accidental LLM init during load
+                Settings.llm = None
+            except ImportError:
+                logger.debug("[TICKET] Could not import Settings - continuing without explicit config")
+            
+            # Load ticket index
+            storage_context = StorageContext.from_defaults(persist_dir=str(ticket_dir))
+            self.ticket_index = load_index_from_storage(storage_context)
+            
+            # Create retriever for ticket index
+            if self.ticket_index:
+                self.ticket_retriever = self.ticket_index.as_retriever(similarity_top_k=3)
+                
+                # Count ticket nodes
+                try:
+                    docstore = self.ticket_index.storage_context.docstore
+                    ticket_node_count = len(docstore.docs.keys()) if docstore else 0
+                    logger.info(
+                        "[TICKET] Ticket index loaded successfully",
+                        local_dir=str(ticket_dir),
+                        node_count=ticket_node_count
+                    )
+                except Exception as e:
+                    logger.debug(f"[TICKET] Could not count ticket nodes: {e}")
+                    logger.info("[TICKET] Ticket index loaded successfully", local_dir=str(ticket_dir))
+            else:
+                logger.warning("[TICKET] Ticket index load returned None")
+                self.ticket_index = None
+                self.ticket_retriever = None
+                
+        except Exception as e:
+            logger.warning(
+                "[TICKET] Failed to load ticket index - continuing without it",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            self.ticket_index = None
+            self.ticket_retriever = None
+    
     def _load_glossary_index(self):
         """
         Load glossary index from database (Phase 1) or fallback to file.
@@ -4387,6 +4524,17 @@ class RAGOrchestrator:
                            message="load_index_from_storage returned None - index may be corrupted or incompatible")
                 self.index = None
                 self.retriever = None
+            else:
+                # Try to load optional ticket cache index (non-blocking)
+                try:
+                    self._load_ticket_index()
+                except Exception as e:
+                    logger.warning(
+                        "[TICKET] Failed to load ticket index - continuing without it",
+                        error=str(e)
+                    )
+                    self.ticket_index = None
+                    self.ticket_retriever = None
                 raise ValueError("Index load returned None - index may be corrupted or incompatible")
             
             logger.info("orchestrator_index_loaded", 
@@ -4447,6 +4595,17 @@ class RAGOrchestrator:
             logger.info("index_and_retriever_initialized", 
                        storage_dir=storage_dir,
                        message="✅ Index and retriever initialized successfully")
+            
+            # Try to load optional ticket cache index (non-blocking)
+            try:
+                self._load_ticket_index()
+            except Exception as e:
+                logger.warning(
+                    "[TICKET] Failed to load ticket index - continuing without it",
+                    error=str(e)
+                )
+                self.ticket_index = None
+                self.ticket_retriever = None
         except Exception as load_error:
             # Log comprehensive error information
             error_type = type(load_error).__name__
@@ -4640,6 +4799,62 @@ class RAGOrchestrator:
                     )
             except Exception as e:
                 logger.debug(f"Validated Q&A lookup skipped: {e}")
+        
+        # ------------------------------------------------------------------
+        # 🎫 Ticket Cache Lookup: Check for similar solved tickets
+        #    Only if ticket cache is enabled and we have machine model IDs
+        # ------------------------------------------------------------------
+        if settings.TICKET_CACHE_ENABLED and self.retriever:
+            try:
+                # Resolve machine_model_ids from user_machine_models if needed
+                machine_model_ids = None
+                if user_machine_models:
+                    # Extract machine_model_ids from metadata_filters if already resolved
+                    if metadata_filters and 'machine_model_ids' in metadata_filters:
+                        machine_model_ids = metadata_filters['machine_model_ids']
+                    else:
+                        # Try to resolve names to IDs (similar to api.py logic)
+                        try:
+                            from .utils.db import MachineModel, SessionLocal
+                            from sqlalchemy import func
+                            
+                            names = [m for m in user_machine_models if isinstance(m, str) and m and m not in {"GENERAL", "Any"}]
+                            if names:
+                                with SessionLocal() as session:
+                                    normalized = [" ".join(n.upper().split()) for n in names]
+                                    rows = session.query(MachineModel).filter(func.upper(MachineModel.name).in_(normalized)).all()
+                                    machine_model_ids = [int(r.id) for r in rows if getattr(r, "id", None) is not None]
+                        except Exception as resolve_error:
+                            logger.debug(f"Failed to resolve machine_model_ids for ticket cache: {resolve_error}")
+                            machine_model_ids = None
+                
+                # Lookup ticket cache hit
+                ticket_cache_result = self._lookup_ticket_cache_hit(
+                    query_text=query,
+                    machine_model_ids=machine_model_ids,
+                    similarity_threshold=settings.TICKET_CACHE_THRESHOLD,
+                    top_k_candidates=5
+                )
+                
+                if ticket_cache_result:
+                    logger.info(f"🎫 Served from ticket cache! ticket_id={ticket_cache_result['ticket_id']}, score={ticket_cache_result['similarity_score']:.3f}")
+                    
+                    # Classify intent for metadata (fast)
+                    intent = self._ensure_intent_classifier().classify(query)
+                    
+                    # Build StructuredResponse
+                    return StructuredResponse(
+                        query=query,
+                        answer=ticket_cache_result['answer_text'],
+                        reasoning=f"✅ Served from ticket cache (similarity: {ticket_cache_result['similarity_score']:.3f})",
+                        sources=ticket_cache_result['sources'],
+                        confidence=ticket_cache_result['confidence'],
+                        intent=intent,
+                        matched_machine_name=matched_machine_name,
+                        cache_hit=True  # Mark as cache hit
+                    )
+            except Exception as e:
+                logger.debug(f"Ticket cache lookup skipped: {e}")
         
         # Step 1: Classify intent
         intent = self._ensure_intent_classifier().classify(query)
@@ -4972,10 +5187,105 @@ class RAGOrchestrator:
                     message="Skipped fallbacks 2-4 in production for performance reasons (only first fallback attempted)"
                 )
         
-        # Step 3: Build retrieval context
+        # Step 3: Retrieve from ticket cache index if available and machine gate passes
+        ticket_nodes = []
+        if self.ticket_retriever and self._should_retrieve_ticket_cache(user_machine_models):
+            try:
+                # Retrieve top 3 ticket nodes
+                ticket_candidates = self.ticket_retriever.retrieve(query)
+                
+                # Filter by similarity threshold (use TICKET_CACHE_THRESHOLD if available, else 0.75)
+                threshold = getattr(settings, 'TICKET_CACHE_THRESHOLD', 0.75)
+                
+                # Import NodeWithScore for proper handling
+                try:
+                    from llama_index.core.schema import NodeWithScore
+                except ImportError:
+                    from llama_index.schema import NodeWithScore  # older versions
+                
+                # Extract scores for instrumentation (log once per process or sample)
+                candidate_scores = [getattr(c, 'score', 0.0) for c in ticket_candidates]
+                
+                # Log score range for validation (sampled: log every 10th query to avoid spam)
+                # Use hash of query to ensure consistent sampling per query
+                query_hash = int(hashlib.md5(query.encode()).hexdigest(), 16)
+                should_log_scores = (query_hash % 10 == 0)  # Log ~10% of queries
+                
+                if should_log_scores and candidate_scores:
+                    min_score = min(candidate_scores)
+                    max_score = max(candidate_scores)
+                    logger.info(
+                        "[TICKET] Ticket retrieval score range (sampled)",
+                        min_score=min_score,
+                        max_score=max_score,
+                        scores=candidate_scores,
+                        threshold=threshold,
+                        candidates_count=len(ticket_candidates),
+                        query_preview=query[:100]
+                    )
+                
+                for candidate in ticket_candidates:
+                    # Extract score (candidate should be NodeWithScore)
+                    score = getattr(candidate, 'score', 0.0)
+                    
+                    # Only include if above threshold
+                    if score >= threshold:
+                        # Ensure metadata has content_type="ticket_cache"
+                        node = candidate.node if isinstance(candidate, NodeWithScore) and hasattr(candidate, 'node') else candidate
+                        if hasattr(node, 'metadata'):
+                            if node.metadata is None:
+                                node.metadata = {}
+                            node.metadata['content_type'] = 'ticket_cache'
+                        else:
+                            # Create metadata dict if it doesn't exist
+                            node.metadata = {'content_type': 'ticket_cache'}
+                        
+                        ticket_nodes.append(candidate)
+                
+                if ticket_nodes:
+                    logger.info(
+                        "[TICKET] Retrieved ticket cache nodes",
+                        count=len(ticket_nodes),
+                        query=query[:100]
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[TICKET] Ticket cache retrieval failed - continuing without ticket nodes",
+                    error=str(e),
+                    error_type=type(e).__name__
+                )
+        
+        # Merge ticket nodes into main nodes (append after main nodes)
+        if ticket_nodes:
+            # Import NodeWithScore for merge logic
+            try:
+                from llama_index.core.schema import NodeWithScore
+            except ImportError:
+                from llama_index.schema import NodeWithScore  # older versions
+            
+            # Avoid duplicates by node_id
+            existing_node_ids = {n.node_id if hasattr(n, 'node_id') else str(id(n)) for n in unique_nodes}
+            for ticket_node in ticket_nodes:
+                # Extract node_id from NodeWithScore or plain node
+                if isinstance(ticket_node, NodeWithScore) and hasattr(ticket_node, 'node'):
+                    node_id = ticket_node.node.node_id if hasattr(ticket_node.node, 'node_id') else str(id(ticket_node.node))
+                else:
+                    node_id = ticket_node.node_id if hasattr(ticket_node, 'node_id') else str(id(ticket_node))
+                
+                if node_id not in existing_node_ids:
+                    unique_nodes.append(ticket_node)
+                    existing_node_ids.add(node_id)
+            
+            logger.info(
+                "[TICKET] Merged ticket cache nodes into retrieval results",
+                ticket_count=len(ticket_nodes),
+                total_count=len(unique_nodes)
+            )
+        
+        # Step 4: Build retrieval context
         context = self._build_retrieval_context(unique_nodes)
         
-        # Step 4: Generate structured response (with chat history if provided)
+        # Step 5: Generate structured response (with chat history if provided)
         # Use original query for LLM response (so it responds in user's language)
         query_for_llm = query_original if query_original else query
         
@@ -5009,6 +5319,225 @@ class RAGOrchestrator:
         logger.info(f"✅ Response generated (confidence: {response.confidence:.2%})")
         
         return response
+    
+    def _lookup_ticket_cache_hit(
+        self,
+        query_text: str,
+        machine_model_ids: Optional[List[int]] = None,
+        similarity_threshold: float = 0.75,
+        top_k_candidates: int = 5
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Lookup ticket cache hit from vector index.
+        
+        Args:
+            query_text: User query text
+            machine_model_ids: List of machine model IDs (integers) for filtering
+            similarity_threshold: Minimum similarity score to consider a hit (default: 0.75)
+            top_k_candidates: Number of candidates to retrieve before filtering (default: 5)
+            
+        Returns:
+            Dict with ticket_id, answer text, confidence score, and sources, or None if no hit
+        """
+        if not settings.TICKET_CACHE_ENABLED:
+            return None
+        
+        if not self.retriever or not self.index:
+            logger.debug("Ticket cache lookup skipped: retriever or index not initialized")
+            return None
+        
+        try:
+            # Query vector index with content_type="ticket_cache" filter
+            # Use dense_search directly with metadata filtering
+            retriever = self.index.as_retriever(similarity_top_k=top_k_candidates * 2)  # Get more to filter
+            
+            # Retrieve candidates (LlamaIndex doesn't support metadata filters in retriever.retrieve directly)
+            # So we retrieve and filter manually
+            candidates = retriever.retrieve(query_text)
+            
+            # Filter to ticket_cache nodes only
+            ticket_nodes = []
+            for node in candidates:
+                # Extract metadata safely
+                metadata = {}
+                if hasattr(node, 'node') and hasattr(node.node, 'metadata'):
+                    metadata = node.node.metadata or {}
+                elif hasattr(node, 'metadata'):
+                    metadata = node.metadata or {}
+                
+                # Check content_type
+                if metadata.get('content_type') == 'ticket_cache':
+                    ticket_nodes.append(node)
+            
+            if not ticket_nodes:
+                logger.debug(f"No ticket_cache nodes found for query: {query_text[:100]}")
+                return None
+            
+            # Apply machine model filtering if provided
+            if machine_model_ids:
+                filtered_nodes = []
+                for node in ticket_nodes:
+                    metadata = {}
+                    if hasattr(node, 'node') and hasattr(node.node, 'metadata'):
+                        metadata = node.node.metadata or {}
+                    elif hasattr(node, 'metadata'):
+                        metadata = node.metadata or {}
+                    
+                    node_machine_ids = metadata.get('machine_model_ids', [])
+                    if not isinstance(node_machine_ids, list):
+                        node_machine_ids = []
+                    
+                    # Coerce to int for safe comparison (metadata may have strings from JSON)
+                    try:
+                        node_machine_ids_int = [int(x) for x in node_machine_ids if x is not None]
+                        machine_model_ids_int = [int(x) for x in machine_model_ids if x is not None]
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"Failed to coerce machine_model_ids to int: {e}")
+                        node_machine_ids_int = []
+                        machine_model_ids_int = []
+                    
+                    # Check for overlap (any match) - empty list means no machine filter (allow all)
+                    if not node_machine_ids_int or set(machine_model_ids_int) & set(node_machine_ids_int):
+                        filtered_nodes.append(node)
+                
+                ticket_nodes = filtered_nodes
+            
+            if not ticket_nodes:
+                logger.debug(f"No ticket_cache nodes match machine_model_ids: {machine_model_ids}")
+                return None
+            
+            # Sort by score and take top candidate
+            ticket_nodes.sort(key=lambda n: n.score if hasattr(n, 'score') else 0.0, reverse=True)
+            best_node = ticket_nodes[0]
+            
+            # Check similarity threshold
+            best_score = best_node.score if hasattr(best_node, 'score') else 0.0
+            if best_score < similarity_threshold:
+                logger.debug(f"Best ticket cache candidate score {best_score:.3f} below threshold {similarity_threshold}")
+                return None
+            
+            # Extract ticket_id from metadata
+            metadata = {}
+            if hasattr(best_node, 'node') and hasattr(best_node.node, 'metadata'):
+                metadata = best_node.node.metadata or {}
+            elif hasattr(best_node, 'metadata'):
+                metadata = best_node.metadata or {}
+            
+            ticket_id = metadata.get('ticket_id')
+            if not ticket_id:
+                # Try to extract from document_id or id
+                doc_id = metadata.get('document_id', '')
+                if doc_id.startswith('ticket:'):
+                    ticket_id = doc_id.replace('ticket:', '')
+                else:
+                    logger.warning(f"Could not extract ticket_id from metadata: {metadata}")
+                    return None
+            
+            # Validate eligibility against PostgreSQL
+            if not self._is_ticket_cache_eligible(ticket_id):
+                logger.debug(f"Ticket {ticket_id} is not eligible (validation failed)")
+                return None
+            
+            # Extract answer text from node
+            node_text = ""
+            if hasattr(best_node, 'node') and hasattr(best_node.node, 'text'):
+                node_text = best_node.node.text
+            elif hasattr(best_node, 'text'):
+                node_text = best_node.text
+            
+            if not node_text:
+                logger.warning(f"Ticket cache node has no text content for ticket_id: {ticket_id}")
+                return None
+            
+            # Build answer text (format as ticket solution)
+            answer_text = f"Based on a similar resolved ticket (#{ticket_id}):\n\n{node_text}"
+            
+            # Build sources entry
+            sources = [{
+                'id': f'ticket:{ticket_id}',
+                'name': f'Ticket #{ticket_id}',
+                'pages': 'N/A',
+                'content_type': 'ticket_cache'
+            }]
+            
+            logger.info(f"✅ Ticket cache hit: ticket_id={ticket_id}, score={best_score:.3f}")
+            
+            return {
+                'ticket_id': ticket_id,
+                'answer_text': answer_text,
+                'confidence': float(best_score),
+                'sources': sources,
+                'similarity_score': float(best_score)
+            }
+            
+        except Exception as e:
+            logger.warning(f"Ticket cache lookup failed: {e}", exc_info=True)
+            return None
+    
+    def _is_ticket_cache_eligible(self, ticket_id: str) -> bool:
+        """
+        Validate ticket eligibility against PostgreSQL using canonical predicate.
+        
+        Uses the same logic as Scraper/export_cache_artifacts.py EFFECTIVE_CACHE_ELIGIBLE_SQL.
+        
+        Args:
+            ticket_id: Ticket ID to validate
+            
+        Returns:
+            True if ticket is eligible, False otherwise
+        """
+        try:
+            from .utils.db import TicketJudgement, TicketManualReview, SessionLocal
+            
+            with SessionLocal() as session:
+                # Query ticket_judgements
+                judgement = session.query(TicketJudgement).filter(
+                    TicketJudgement.ticket_id == ticket_id
+                ).first()
+                
+                if not judgement:
+                    logger.debug(f"Ticket {ticket_id} has no judgement record")
+                    return False
+                
+                # Query manual review (if exists)
+                manual_review = session.query(TicketManualReview).filter(
+                    TicketManualReview.ticket_id == ticket_id
+                ).first()
+                
+                # Apply canonical eligibility predicate matching Scraper/export_cache_artifacts.py EFFECTIVE_CACHE_ELIGIBLE_SQL
+                # SQL: WHERE (
+                #     (j.review_status = 'approved' OR (j.review_status IS NULL AND j.cache_eligible = 1))
+                #     OR (m.manual_status = 'approved')
+                # )
+                # AND (m.manual_status IS NULL OR m.manual_status != 'rejected')
+                # AND j.cache_eligible = 1
+                
+                # Step 1: Check cache_eligible = 1 (required by final AND clause)
+                if not judgement.cache_eligible:
+                    return False
+                
+                # Step 2: Check NOT manually rejected (matches: m.manual_status IS NULL OR m.manual_status != 'rejected')
+                if manual_review and manual_review.manual_status == 'rejected':
+                    return False
+                
+                # Step 3: Check approval conditions (matches WHERE clause)
+                # Condition A: review_status = 'approved' OR (review_status IS NULL AND cache_eligible = 1)
+                condition_a = (
+                    judgement.review_status == 'approved' or
+                    (judgement.review_status is None and judgement.cache_eligible)
+                )
+                
+                # Condition B: manual_status = 'approved'
+                condition_b = manual_review and manual_review.manual_status == 'approved'
+                
+                # Ticket is eligible if (A OR B) AND cache_eligible=true AND not rejected
+                # (cache_eligible and rejection already checked above)
+                return condition_a or condition_b
+                
+        except Exception as e:
+            logger.warning(f"Ticket eligibility validation failed for {ticket_id}: {e}", exc_info=True)
+            # Fail closed: if we can't validate, don't allow
+            return False
     
     def _apply_dynamic_windowing(
         self,

@@ -110,19 +110,32 @@ def get_engine() -> Engine:
     
     # Extract connection info for logging (mask password)
     parsed = urlparse(database_url)
-    dialect = parsed.scheme.replace("postgresql", "postgresql").replace("postgres", "postgresql")
+    # Parse scheme to extract dialect and driver separately
+    scheme = parsed.scheme
+    if "+" in scheme:
+        dialect = scheme.split("+", 1)[0]
+        driver = scheme.split("+", 1)[1]
+    else:
+        dialect = scheme
+        driver = None
+    
+    # Normalize dialect names
+    if dialect in ("postgres", "postgresql"):
+        dialect = "postgresql"
+    
     host = parsed.hostname or "unknown"
     port = parsed.port or 5432
     db_name = parsed.path.lstrip("/") if parsed.path else "unknown"
     user = parsed.username or "unknown"
     
     # Log database connection info once at startup
+    driver_str = f" driver={driver}" if driver else ""
     logger.info(
-        f"Database engine initialized: dialect={dialect}, host={host}, port={port}, "
+        f"Database engine initialized: dialect={dialect}{driver_str}, host={host}, port={port}, "
         f"database={db_name}, user={user}, sqlite_fallback=False"
     )
     print(
-        f"[DB_INIT] dialect={dialect} host={host} port={port} database={db_name} user={user} sqlite_fallback=False",
+        f"[DB_INIT] dialect={dialect}{driver_str} host={host} port={port} database={db_name} user={user} sqlite_fallback=False",
         flush=True
     )
     
