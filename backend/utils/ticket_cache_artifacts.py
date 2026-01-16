@@ -91,14 +91,18 @@ def extract_confirmation(raw: Dict[str, Any]) -> tuple[Optional[bool], Optional[
 def build_ticket_cache_artifact(
     ticket_id: str,
     raw_response_json: Dict[str, Any],
+    conversation_json: Optional[Dict[str, Any]] = None,
     extra_meta: Optional[Dict[str, Any]] = None
 ) -> TicketCacheArtifact:
     """
     Build a TicketCacheArtifact from raw ticket judgment data.
     
+    Enhanced version with PII redaction and optional conversation extraction.
+    
     Args:
         ticket_id: Zendesk ticket ID (string)
         raw_response_json: Raw JSON from ticket_judgements.raw_response_json
+        conversation_json: Optional conversation JSON from tickets_detail.conversation_json
         extra_meta: Optional additional metadata (e.g., machine_model_ids)
         
     Returns:
@@ -107,6 +111,34 @@ def build_ticket_cache_artifact(
     Raises:
         ValueError: If required fields are missing or invalid
     """
+    # Import redaction helpers (lazy import)
+    try:
+        from backend.rag.ticket_redaction import (
+            redact_pii,
+            extract_technician_notes,
+            extract_symptoms,
+            extract_parts_used
+        )
+    except ImportError:
+        # Fallback: minimal redaction if module not available
+        def redact_pii(text: str) -> str:
+            import re
+            if not text:
+                return text
+            result = text
+            result = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]', result)
+            result = re.sub(r'\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b', '[PHONE]', result)
+            return result
+        
+        def extract_technician_notes(conversation_json: Optional[dict], max_length: int = 1500) -> Optional[str]:
+            return None
+        
+        def extract_symptoms(conversation_json: Optional[dict], raw_response_json: Optional[dict], max_length: int = 1000) -> Optional[str]:
+            return None
+        
+        def extract_parts_used(conversation_json: Optional[dict], max_length: int = 500) -> Optional[str]:
+            return None
+    
     if extra_meta is None:
         extra_meta = {}
     
@@ -120,32 +152,53 @@ def build_ticket_cache_artifact(
     rationale = raw_response_json.get("rationale", "")
     blockers = raw_response_json.get("blockers", [])
     
-    # Build deterministic text template
+    # Extract root cause if available
+    root_cause = None
+    if isinstance(raw_response_json.get("root_cause"), str):
+        root_cause = raw_response_json.get("root_cause").strip()
+    elif isinstance(raw_response_json.get("root_cause"), dict):
+        root_cause = raw_response_json.get("root_cause", {}).get("text", "").strip()
+    
+    # Extract optional sections from conversation_json
+    symptoms = extract_symptoms(conversation_json, raw_response_json)
+    technician_notes = extract_technician_notes(conversation_json)
+    parts_used = extract_parts_used(conversation_json)
+    
+    # Build enhanced text template (sections only included if non-empty)
     text_parts = []
     
     if problem:
         text_parts.append(f"Problem: {problem}")
+    
+    if symptoms:
+        text_parts.append(f"\nError/Symptoms: {symptoms}")
+    
+    if root_cause:
+        text_parts.append(f"\nRoot Cause: {root_cause}")
     
     if steps:
         text_parts.append("\nResolution Steps:")
         for i, step in enumerate(steps, 1):
             text_parts.append(f"{i}. {step}")
     
+    if parts_used:
+        text_parts.append(f"\nParts Used: {parts_used}")
+    
+    if technician_notes:
+        text_parts.append(f"\nTechnician Notes: {technician_notes}")
+    
     if outcome and outcome != "unclear":
         text_parts.append(f"\nOutcome: {outcome}")
-    
-    if rationale:
-        text_parts.append(f"\nRationale: {rationale}")
-    
-    if blockers:
-        blockers_str = ", ".join(str(b) for b in blockers if b)
-        if blockers_str:
-            text_parts.append(f"\nBlockers: {blockers_str}")
     
     # Ensure we have some text
     text = "\n".join(text_parts) if text_parts else f"Ticket {ticket_id}: No problem or resolution steps available."
     
+    # Apply PII redaction BEFORE returning
+    text = redact_pii(text)
+    
     # Build metadata dict
+    from datetime import datetime, timezone
+    
     metadata = {
         "document_id": f"ticket:{ticket_id}",
         "file_name": f"ticket_{ticket_id}.md",
@@ -163,15 +216,24 @@ def build_ticket_cache_artifact(
         "machine_model_names": extra_meta.get("machine_model_names", []),
         "machine_models": extra_meta.get("machine_model_names", []),
         "machine_model": extra_meta.get("machine_model_names", []),
+        # New metadata fields
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "judgement_version": raw_response_json.get("prompt_version") or extra_meta.get("prompt_version") or None,
     }
+    
+    # Add optional metadata from extra_meta
+    for key in ("created_at", "updated_at", "resolution_mode", "onsite_required"):
+        if key in extra_meta:
+            metadata[key] = extra_meta[key]
     
     # Add confirmation evidence if available
     if confirmation_evidence:
         metadata["confirmation_evidence"] = confirmation_evidence
     
-    # Add any additional metadata from extra_meta
+    # Add any other additional metadata from extra_meta (excluding already handled keys)
+    excluded_keys = {"machine_model_ids", "machine_model_names", "machine_model", "machine_models", "prompt_version", "created_at", "updated_at", "resolution_mode", "onsite_required"}
     for key in extra_meta:
-        if key not in ("machine_model_ids", "machine_model_names", "machine_model", "machine_models"):
+        if key not in excluded_keys:
             metadata[key] = extra_meta[key]
     
     artifact = TicketCacheArtifact(

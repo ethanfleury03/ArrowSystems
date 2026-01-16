@@ -2408,5 +2408,146 @@ def create_admin_router(
                 detail=f"Failed to cancel scrape: {str(e)}"
             )
 
+    # ============================================================================
+    # Ticket Index Reindex Endpoints
+    # ============================================================================
+    
+    class TicketIndexStatusResponse(BaseModel):
+        manifest: Optional[Dict[str, Any]] = None
+        needs_reindex: bool
+        reason: Optional[str] = None
+        index_exists: bool
+        db_stats: Dict[str, Any]
+        active_execution: Optional[Dict[str, Any]] = None
+    
+    @router.get("/ticket-index/status", response_model=TicketIndexStatusResponse)
+    async def get_ticket_index_status(
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Get ticket index status and whether reindex is needed.
+        
+        Admin-only endpoint.
+        """
+        from backend.config.env import settings
+        from backend.rag.ticket_index_manifest import (
+            read_manifest,
+            get_db_ticket_stats,
+            needs_reindex
+        )
+        from backend.rag.ticket_index_downloader import check_ticket_index_exists
+        
+        bucket_name = settings.RAG_BUCKET
+        index_prefix = settings.TICKET_PREFIX
+        manifest_path = settings.TICKET_MANIFEST_PATH
+        
+        try:
+            # Read manifest
+            manifest = read_manifest(bucket_name, manifest_path)
+            manifest_dict = manifest.to_dict() if manifest else None
+            
+            # Check if index exists
+            index_exists = check_ticket_index_exists(bucket_name, index_prefix)
+            
+            # Get DB stats
+            db_stats = get_db_ticket_stats()
+            
+            # Check if reindex is needed
+            needs_rebuild, reason = needs_reindex(bucket_name, index_prefix, manifest_path)
+            
+            # Try to get active execution info (best-effort)
+            # Cloud Run Jobs API doesn't have a simple "get latest execution" endpoint
+            # This would require listing executions, which we skip for now
+            active_execution = None
+            
+            return TicketIndexStatusResponse(
+                manifest=manifest_dict,
+                needs_reindex=needs_rebuild,
+                reason=reason,
+                index_exists=index_exists,
+                db_stats=db_stats,
+                active_execution=active_execution,
+            )
+            
+        except Exception as e:
+            logger.error(f"Error fetching ticket index status: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch ticket index status: {str(e)}"
+            )
+    
+    class TicketIndexReindexResponse(BaseModel):
+        status: str  # "triggered" or "up_to_date"
+        execution_name: Optional[str] = None
+        message: str
+    
+    @router.post("/ticket-index/reindex", response_model=TicketIndexReindexResponse)
+    async def trigger_ticket_index_reindex(
+        current_admin: Dict[str, str] = Depends(get_current_admin),
+    ):
+        """
+        Trigger ticket cache reindex Cloud Run Job.
+        
+        Checks if reindex is needed first. If not needed, returns "up_to_date".
+        If needed, triggers Cloud Run Job and returns execution name.
+        
+        Admin-only endpoint.
+        """
+        from backend.config.env import settings
+        from backend.rag.ticket_index_manifest import needs_reindex
+        from backend.gcp.run_jobs import run_ticket_reindex_job
+        
+        bucket_name = settings.RAG_BUCKET
+        index_prefix = settings.TICKET_PREFIX
+        manifest_path = settings.TICKET_MANIFEST_PATH
+        
+        try:
+            # Check if reindex is needed
+            needs_rebuild, reason = needs_reindex(bucket_name, index_prefix, manifest_path)
+            
+            if not needs_rebuild:
+                logger.info(
+                    "[TICKET_REINDEX] Reindex not needed",
+                    admin_email=current_admin.get("email"),
+                    reason=reason or "up_to_date"
+                )
+                return TicketIndexReindexResponse(
+                    status="up_to_date",
+                    message="Ticket index is up to date. No reindex needed."
+                )
+            
+            # Trigger Cloud Run Job
+            logger.info(
+                "[TICKET_REINDEX] Triggering reindex job",
+                admin_email=current_admin.get("email"),
+                reason=reason
+            )
+            
+            execution_name = run_ticket_reindex_job()
+            
+            logger.info(
+                "[TICKET_REINDEX] Job triggered",
+                execution_name=execution_name,
+                admin_email=current_admin.get("email")
+            )
+            
+            return TicketIndexReindexResponse(
+                status="triggered",
+                execution_name=execution_name,
+                message=f"Reindex job triggered: {execution_name}"
+            )
+            
+        except Exception as e:
+            logger.error(
+                "[TICKET_REINDEX] Failed to trigger job",
+                error=str(e),
+                admin_email=current_admin.get("email"),
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to trigger reindex job: {str(e)}"
+            )
+
     return router
 
