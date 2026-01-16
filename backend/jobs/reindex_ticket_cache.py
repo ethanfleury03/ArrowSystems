@@ -21,7 +21,8 @@ import os
 import sys
 import tempfile
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -142,6 +143,56 @@ def release_gcs_lock(bucket_name: str, lock_path: str) -> bool:
         return False
 
 
+def to_jsonable(value: Any) -> Any:
+    """
+    Recursively convert a value to JSON-serializable types.
+    
+    Handles:
+    - datetime/date -> ISO string
+    - Decimal -> float
+    - set/tuple -> list
+    - Pydantic models -> dict via model_dump() or dict()
+    - dict/list -> recursively convert values
+    - Unknown types -> str() as fallback
+    
+    Args:
+        value: Value to convert
+        
+    Returns:
+        JSON-serializable value
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    
+    if isinstance(value, Decimal):
+        return float(value)
+    
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    
+    if isinstance(value, (list, tuple, set)):
+        return [to_jsonable(v) for v in value]
+    
+    # Pydantic v2
+    if hasattr(value, "model_dump"):
+        return to_jsonable(value.model_dump())
+    
+    # Pydantic v1
+    if hasattr(value, "dict"):
+        return to_jsonable(value.dict())
+    
+    # Fallback: convert to string
+    logger.debug(
+        "[TICKET_REINDEX] Converting non-JSON type to string",
+        type=type(value).__name__,
+        value=str(value)[:100]
+    )
+    return str(value)
+
+
 def export_ticket_artifacts_from_postgres(output_path: Path) -> Dict[str, Any]:
     """
     Export ticket cache artifacts from Postgres to JSONL.
@@ -232,15 +283,47 @@ def export_ticket_artifacts_from_postgres(output_path: Path) -> Dict[str, Any]:
                     extra_meta=extra_meta
                 )
                 
-                # Write JSONL line
-                f.write(json.dumps(artifact, ensure_ascii=False) + '\n')
-                artifacts.append(artifact)
+                # Convert artifact to dict and ensure JSON-serializable
+                # Use model_dump() for Pydantic v2, or dict() for v1
+                if hasattr(artifact, "model_dump"):
+                    artifact_dict = artifact.model_dump()
+                elif hasattr(artifact, "dict"):
+                    artifact_dict = artifact.dict()
+                else:
+                    # Fallback: manual conversion
+                    artifact_dict = {
+                        "id": artifact.id,
+                        "text": artifact.text,
+                        "metadata": artifact.metadata
+                    }
+                
+                # Ensure metadata is fully JSON-serializable
+                artifact_dict["metadata"] = to_jsonable(artifact_dict.get("metadata", {}))
+                
+                # Write JSONL line as plain dict
+                f.write(json.dumps(artifact_dict, ensure_ascii=False) + '\n')
+                artifacts.append(artifact_dict)
+                
+                # Log progress every 10 tickets
+                if len(artifacts) % 10 == 0:
+                    logger.info(
+                        "[TICKET_REINDEX] Export progress",
+                        exported=len(artifacts),
+                        total=len(rows)
+                    )
                 
             except Exception as e:
                 failed += 1
                 error_msg = f"Failed to process ticket {ticket_id_str}: {e}"
+                error_type = type(e).__name__
                 errors.append(error_msg)
-                logger.warning("[TICKET_REINDEX] " + error_msg)
+                logger.warning(
+                    "[TICKET_REINDEX] Export failed for ticket",
+                    ticket_id=ticket_id_str,
+                    error_type=error_type,
+                    error=str(e),
+                    exc_info=True
+                )
     
     logger.info(
         "[TICKET_REINDEX] Export complete",
