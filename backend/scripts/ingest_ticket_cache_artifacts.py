@@ -32,6 +32,99 @@ from backend.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def ensure_ticket_embed_model():
+    """
+    Ensure a non-OpenAI embed model is configured before creating VectorStoreIndex.
+    
+    IMPORTANT: Do NOT read Settings.embed_model directly as it triggers lazy resolution
+    that tries to import OpenAI embeddings. Instead, check Settings._embed_model (private field).
+    """
+    # Check private field to avoid triggering lazy resolution
+    if getattr(Settings, "_embed_model", None) is not None:
+        logger.debug(
+            "[TICKET_REINDEX] Embed model already configured",
+            embed_model=type(Settings._embed_model).__name__
+        )
+        return
+    
+    # Preferred: reuse backend's embed model factory
+    try:
+        from backend.utils.embedding_utils import build_offline_embedding
+        
+        # Use same model as production: BAAI/bge-large-en-v1.5 (1024 dim)
+        model_name = os.getenv("TICKET_EMBED_MODEL_NAME", "BAAI/bge-large-en-v1.5")
+        
+        # Determine cache directory (same logic as production)
+        cache_dir = (
+            os.getenv("HF_HOME") or
+            os.getenv("SENTENCE_TRANSFORMERS_HOME") or
+            "/app/.cache/huggingface"
+        )
+        
+        # Build offline embedding model (no OpenAI required)
+        embed_model = build_offline_embedding(
+            model_name=model_name,
+            cache_dir=cache_dir,
+            device="cpu"  # Cloud Run Jobs run on CPU
+        )
+        
+        # Set embed model (this is safe - assignment doesn't trigger resolution)
+        Settings.embed_model = embed_model
+        
+        logger.info(
+            "[TICKET_REINDEX] Using embed model (repo factory)",
+            embed_model=type(Settings._embed_model).__name__,
+            model_name=model_name,
+            cache_dir=cache_dir
+        )
+        return
+        
+    except Exception as e:
+        logger.warning(
+            "[TICKET_REINDEX] Repo embed model factory not available, trying HF fallback",
+            error=str(e),
+            error_type=type(e).__name__
+        )
+    
+    # Fallback: HuggingFaceEmbedding directly (only if module is available)
+    try:
+        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+        
+        model_name = os.getenv("TICKET_EMBED_MODEL_NAME", "BAAI/bge-large-en-v1.5")
+        
+        # Determine cache directory
+        cache_dir = (
+            os.getenv("HF_HOME") or
+            os.getenv("SENTENCE_TRANSFORMERS_HOME") or
+            "/app/.cache/huggingface"
+        )
+        
+        Settings.embed_model = HuggingFaceEmbedding(
+            model_name=model_name,
+            cache_folder=cache_dir
+        )
+        
+        logger.info(
+            "[TICKET_REINDEX] Using embed model (HF)",
+            model_name=model_name,
+            embed_model=type(Settings._embed_model).__name__,
+            cache_dir=cache_dir
+        )
+        return
+        
+    except ImportError as e:
+        raise RuntimeError(
+            "Ticket reindex requires a non-OpenAI embed model, but no embedder is configured and "
+            "llama_index.embeddings.huggingface is unavailable. Either wire this to the backend's embed "
+            "model factory or add llama-index-embeddings-huggingface to dependencies. "
+            f"ImportError: {e}"
+        ) from e
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to initialize HuggingFaceEmbedding: {type(e).__name__}: {str(e)}"
+        ) from e
+
+
 def load_artifacts_from_jsonl(jsonl_path: str, limit: int = None) -> list[TicketCacheArtifact]:
     """
     Load TicketCacheArtifact objects from JSONL file.
@@ -182,48 +275,10 @@ def ingest_artifacts(
     Returns:
         Dict with counts and status
     """
-    # CRITICAL: Set embed model BEFORE any VectorStoreIndex operations
+    # CRITICAL: Ensure embed model is set BEFORE any VectorStoreIndex operations
     # This prevents LlamaIndex from trying to use OpenAI embeddings (which aren't available)
-    if not Settings.embed_model:
-        try:
-            from backend.utils.embedding_utils import build_offline_embedding
-            
-            # Use same model as production: BAAI/bge-large-en-v1.5 (1024 dim)
-            model_name = os.getenv("TICKET_EMBED_MODEL_NAME", "BAAI/bge-large-en-v1.5")
-            
-            # Determine cache directory (same logic as production)
-            cache_dir = (
-                os.getenv("HF_HOME") or
-                os.getenv("SENTENCE_TRANSFORMERS_HOME") or
-                "/app/.cache/huggingface"
-            )
-            
-            # Build offline embedding model (no OpenAI required)
-            Settings.embed_model = build_offline_embedding(
-                model_name=model_name,
-                cache_dir=cache_dir,
-                device="cpu"  # Cloud Run Jobs run on CPU
-            )
-            
-            logger.info(
-                "[TICKET_REINDEX] Using embed model",
-                embed_model=type(Settings.embed_model).__name__,
-                model_name=model_name,
-                cache_dir=cache_dir
-            )
-        except Exception as e:
-            error_msg = (
-                f"Failed to initialize embedding model. "
-                f"Required env vars: HF_HOME or SENTENCE_TRANSFORMERS_HOME (defaults to /app/.cache/huggingface). "
-                f"Error: {type(e).__name__}: {str(e)}"
-            )
-            logger.error("[TICKET_REINDEX] " + error_msg, exc_info=True)
-            raise RuntimeError(error_msg) from e
-    else:
-        logger.info(
-            "[TICKET_REINDEX] Using existing embed model",
-            embed_model=type(Settings.embed_model).__name__
-        )
+    # IMPORTANT: Do NOT read Settings.embed_model here - use ensure_ticket_embed_model() instead
+    ensure_ticket_embed_model()
     
     # Set LLM to None to avoid OpenAI initialization
     Settings.llm = None
