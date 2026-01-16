@@ -4025,6 +4025,14 @@ class RAGOrchestrator:
             pid = os.getpid()
             hostname = os.getenv("HOSTNAME", "unknown")
             revision = os.getenv("K_REVISION", "unknown")
+            # Check if reranker is disabled via config
+            disable_reranker = os.getenv("RAG_DISABLE_RERANKER", "0").lower() in {"1", "true", "yes", "on"}
+            if disable_reranker:
+                logger.info("[RAG] reranker_disabled_by_config", message="Reranker disabled via RAG_DISABLE_RERANKER env var")
+                print(f"[RAG] reranker_disabled_by_config", flush=True)
+                self.reranker = None
+                return
+            
             reranker_start = time.time()
             
             logger.info("[RAG] reranker_model_load_begin", message="Loading re-ranker model...")
@@ -4064,13 +4072,26 @@ class RAGOrchestrator:
                     break
             
             if not model_files_found:
-                logger.warning(
-                    "[RAG] reranker_cache_missing",
-                    cache_dir=self.cache_dir,
-                    cache_base=cache_base,
-                    message="Reranker model files not found in cache. Model may need to be pre-downloaded in Dockerfile."
-                )
-                print(f"[RAG] reranker_cache_missing: cache_dir={self.cache_dir}, cache_base={cache_base}", flush=True)
+                # If offline mode and files missing, disable reranker gracefully
+                hf_hub_offline = os.getenv("HF_HUB_OFFLINE", "0") == "1"
+                if hf_hub_offline:
+                    logger.warning(
+                        "[RAG] reranker_cache_missing_offline",
+                        cache_dir=self.cache_dir,
+                        cache_base=cache_base,
+                        message="Re-ranker model files not found in cache and HF_HUB_OFFLINE=1. Disabling reranker."
+                    )
+                    print(f"[RAG] reranker_disabled_offline_missing", flush=True)
+                    self.reranker = None
+                    return
+                else:
+                    logger.warning(
+                        "[RAG] reranker_cache_missing",
+                        cache_dir=self.cache_dir,
+                        cache_base=cache_base,
+                        message="Reranker model files not found in cache. Model may need to be pre-downloaded in Dockerfile."
+                    )
+                    print(f"[RAG] reranker_cache_missing: cache_dir={self.cache_dir}, cache_base={cache_base}", flush=True)
             
             # CRITICAL: Ensure offline mode is enforced before loading CrossEncoder
             # CrossEncoder from sentence-transformers may not respect HF_HUB_OFFLINE by default
@@ -4150,6 +4171,141 @@ class RAGOrchestrator:
         Settings.embed_model = self.embed_model
         logger.info("models_initialized")
         log_resource_checkpoint("orchestrator_models_ready", logger)
+    
+    def _debug_dump_index_dir(self, storage_dir: str) -> Dict[str, Any]:
+        """
+        Debug helper to dump index directory contents and metadata.
+        
+        Args:
+            storage_dir: Directory to inspect
+            
+        Returns:
+            Dict with debug information
+        """
+        debug_info = {
+            "storage_dir": storage_dir,
+            "directory_exists": os.path.exists(storage_dir),
+        }
+        
+        if not os.path.exists(storage_dir):
+            return debug_info
+        
+        # List files and sizes
+        try:
+            files = []
+            total_size = 0
+            for item in os.listdir(storage_dir):
+                item_path = os.path.join(storage_dir, item)
+                if os.path.isfile(item_path):
+                    size = os.path.getsize(item_path)
+                    files.append({"name": item, "size_bytes": size, "size_mb": round(size / (1024 * 1024), 2)})
+                    total_size += size
+            debug_info["files"] = files
+            debug_info["file_count"] = len(files)
+            debug_info["total_size_bytes"] = total_size
+            debug_info["total_size_mb"] = round(total_size / (1024 * 1024), 2)
+        except Exception as e:
+            debug_info["file_list_error"] = str(e)
+        
+        # Parse index_store.json if available
+        index_store_path = os.path.join(storage_dir, "index_store.json")
+        if os.path.exists(index_store_path):
+            try:
+                with open(index_store_path, 'r', encoding='utf-8') as f:
+                    index_store_data = json.load(f)
+                    if isinstance(index_store_data, dict):
+                        debug_info["index_store_keys"] = list(index_store_data.keys())
+                        # Look for index_ids
+                        if "index_ids" in index_store_data:
+                            index_ids = index_store_data["index_ids"]
+                            debug_info["index_ids"] = index_ids if isinstance(index_ids, list) else [index_ids]
+                            debug_info["index_ids_count"] = len(debug_info["index_ids"])
+                        elif "index_id" in index_store_data:
+                            debug_info["index_id"] = index_store_data["index_id"]
+                    else:
+                        debug_info["index_store_type"] = type(index_store_data).__name__
+            except Exception as e:
+                debug_info["index_store_parse_error"] = str(e)
+        
+        # Parse index_manifest.json if available
+        manifest_path = os.path.join(storage_dir, "index_manifest.json")
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, 'r', encoding='utf-8') as f:
+                    manifest_data = json.load(f)
+                    if isinstance(manifest_data, dict):
+                        # Extract safe fields (no secrets)
+                        safe_fields = ["embedding_model", "embedding_dim", "llm_model", "created_at"]
+                        debug_info["manifest"] = {k: manifest_data.get(k) for k in safe_fields if k in manifest_data}
+            except Exception as e:
+                debug_info["manifest_parse_error"] = str(e)
+        
+        return debug_info
+    
+    def _validate_index(self, index) -> Dict[str, Any]:
+        """
+        Validate loaded index has expected structure and content.
+        
+        Args:
+            index: Loaded VectorStoreIndex
+            
+        Returns:
+            Dict with validation results
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        if index is None:
+            raise ValueError("Index is None")
+        
+        validation_result = {}
+        
+        # Check docstore exists and has docs
+        if not hasattr(index, 'storage_context') or not index.storage_context:
+            raise ValueError("Index missing storage_context")
+        
+        docstore = index.storage_context.docstore
+        if not docstore:
+            raise ValueError("Index missing docstore")
+        
+        doc_count = 0
+        if hasattr(docstore, 'docs'):
+            doc_count = len(docstore.docs)
+        elif hasattr(docstore, 'get_all_document_hashes'):
+            doc_count = len(docstore.get_all_document_hashes())
+        
+        if doc_count == 0:
+            raise ValueError(f"Index docstore is empty (0 documents)")
+        
+        validation_result["doc_count"] = doc_count
+        
+        # Check vector store dimension matches embed model
+        vector_store = index.storage_context.vector_store
+        if vector_store and self.embed_model:
+            # Try to get dimension from vector store
+            vector_dim = None
+            if hasattr(vector_store, 'embed_dim'):
+                vector_dim = vector_store.embed_dim
+            elif hasattr(vector_store, '_embed_dim'):
+                vector_dim = vector_store._embed_dim
+            
+            # Get expected dimension from embed model
+            expected_dim = None
+            if hasattr(self.embed_model, 'embed_dim'):
+                expected_dim = self.embed_model.embed_dim
+            elif hasattr(self.embed_model, '_embed_dim'):
+                expected_dim = self.embed_model._embed_dim
+            
+            if vector_dim and expected_dim:
+                if vector_dim != expected_dim:
+                    raise ValueError(
+                        f"Vector store dimension mismatch: expected {expected_dim} (from embed model), "
+                        f"got {vector_dim} (from vector store)"
+                    )
+                validation_result["vector_dim"] = vector_dim
+                validation_result["embed_dim"] = expected_dim
+        
+        return validation_result
     
     def load_index(self, storage_dir="latest_model"):
         """
@@ -4517,31 +4673,103 @@ class RAGOrchestrator:
             
             self.index = load_result[0]
             
+            # CRITICAL: Debug dump before validation
+            try:
+                debug_info = self._debug_dump_index_dir(storage_dir)
+                logger.info(
+                    "[RAG] index_load_debug_dump",
+                    **debug_info,
+                    message="Index directory debug info"
+                )
+            except Exception as debug_err:
+                logger.warning(
+                    "[RAG] index_load_debug_dump_failed",
+                    error=str(debug_err),
+                    message="Could not gather debug info"
+                )
+            
             # Verify index was actually loaded (not None)
             if self.index is None:
-                logger.error("orchestrator_index_load_returned_none",
-                           storage_dir=storage_dir,
-                           message="load_index_from_storage returned None - index may be corrupted or incompatible")
-                self.index = None
-                self.retriever = None
-            else:
-                # Try to load optional ticket cache index (non-blocking)
+                # Try alternative loader: multiple indices case
                 try:
-                    self._load_ticket_index()
-                except Exception as e:
-                    logger.warning(
-                        "[TICKET] Failed to load ticket index - continuing without it",
-                        error=str(e)
+                    from llama_index.core import load_indices_from_storage
+                    logger.info(
+                        "[RAG] index_load_trying_multi",
+                        storage_dir=storage_dir,
+                        message="Single index load returned None, trying load_indices_from_storage"
                     )
-                    self.ticket_index = None
-                    self.ticket_retriever = None
-                raise ValueError("Index load returned None - index may be corrupted or incompatible")
+                    indices_dict = load_indices_from_storage(storage_context)
+                    if indices_dict:
+                        # Use first index (or look for default)
+                        if "default" in indices_dict:
+                            self.index = indices_dict["default"]
+                            logger.info(
+                                "[RAG] index_load_multi_found_default",
+                                index_ids=list(indices_dict.keys()),
+                                message="Loaded index via multi path (default)"
+                            )
+                        else:
+                            # Use first available index
+                            first_id = list(indices_dict.keys())[0]
+                            self.index = indices_dict[first_id]
+                            logger.info(
+                                "[RAG] index_load_multi_using_first",
+                                index_ids=list(indices_dict.keys()),
+                                selected_id=first_id,
+                                message=f"Loaded index via multi path (using first: {first_id})"
+                            )
+                except Exception as multi_err:
+                    logger.error(
+                        "[RAG] index_load_multi_failed",
+                        error=str(multi_err),
+                        error_type=type(multi_err).__name__,
+                        exc_info=True,
+                        message="Multi-index load also failed"
+                    )
             
-            logger.info("orchestrator_index_loaded", 
-                       storage_dir=storage_dir,
-                       index_type=type(self.index).__name__,
-                       index_id="default",  # Default index_id used
-                       message="Index loaded successfully from storage")
+            # Verify index was loaded (after trying alternatives)
+            if self.index is None:
+                error_msg = (
+                    f"Index load returned None - index may be corrupted or incompatible. "
+                    f"Storage directory: {storage_dir}. "
+                    f"Tried both load_index_from_storage and load_indices_from_storage."
+                )
+                logger.error(
+                    "[RAG] index_load_returned_none",
+                    storage_dir=storage_dir,
+                    message=error_msg
+                )
+                raise ValueError(error_msg)
+            
+            # Strict validation after load
+            try:
+                validation_result = self._validate_index(self.index)
+                logger.info(
+                    "[RAG] index_validation_ok",
+                    **validation_result,
+                    message="Index validation passed"
+                )
+            except Exception as validation_err:
+                error_msg = (
+                    f"Index validation failed: {type(validation_err).__name__}: {str(validation_err)}. "
+                    f"Storage directory: {storage_dir}."
+                )
+                logger.error(
+                    "[RAG] index_validation_failed",
+                    storage_dir=storage_dir,
+                    error=str(validation_err),
+                    error_type=type(validation_err).__name__,
+                    exc_info=True,
+                    message=error_msg
+                )
+                raise RuntimeError(error_msg) from validation_err
+            
+            logger.info(
+                "[RAG] index_loaded_successfully",
+                storage_dir=storage_dir,
+                index_type=type(self.index).__name__,
+                message="Index loaded successfully from storage"
+            )
             
             # Log sample metadata keys for compatibility checking
             try:
@@ -4607,9 +4835,27 @@ class RAGOrchestrator:
                 self.ticket_index = None
                 self.ticket_retriever = None
         except Exception as load_error:
-            # Log comprehensive error information
+            # NEVER swallow exceptions - log with full context then re-raise
             error_type = type(load_error).__name__
             error_message = str(load_error)
+            
+            # Gather debug info before logging
+            debug_info = {}
+            try:
+                debug_info = self._debug_dump_index_dir(storage_dir)
+            except Exception:
+                pass  # Non-fatal - continue with error logging
+            
+            # Log with full traceback and context
+            logger.error(
+                "[RAG] index_load_failed_with_context",
+                storage_dir=storage_dir,
+                error_type=error_type,
+                error_message=error_message,
+                debug_info=debug_info,
+                exc_info=True,  # Full traceback
+                message=f"Index load failed: {error_type}: {error_message}"
+            )
             
             # Special handling for JSONDecodeError - likely means a corrupted index file
             if error_type == "JSONDecodeError" or "JSONDecodeError" in error_message:
@@ -4652,38 +4898,12 @@ class RAGOrchestrator:
                                  error=str(size_check_error),
                                  message="Could not check individual file sizes")
             
-            logger.error("orchestrator_index_load_failed", 
-                        storage_dir=storage_dir,
-                        error=error_message,
-                        error_type=error_type,
-                        exc_info=True,
-                        message=f"Failed to load index from {storage_dir}: {error_type}: {error_message}")
-            
-            # Log directory contents for debugging
-            try:
-                if os.path.exists(storage_dir):
-                    dir_contents = os.listdir(storage_dir)
-                    logger.error("orchestrator_index_load_failed_debug",
-                               storage_dir=storage_dir,
-                               directory_exists=True,
-                               file_count=len(dir_contents),
-                               files=dir_contents,
-                               message="Index load failed. Directory contents listed above for debugging.")
-                else:
-                    logger.error("orchestrator_index_load_failed_debug",
-                               storage_dir=storage_dir,
-                               directory_exists=False,
-                               message="Index load failed. Directory does not exist.")
-            except Exception as debug_error:
-                logger.error("orchestrator_index_load_failed_debug",
-                           storage_dir=storage_dir,
-                           debug_error=str(debug_error),
-                           message="Could not gather debug info about storage directory")
-            
-            # Set index to None so query operations fail gracefully
-            self.index = None
-            self.retriever = None
-            raise  # Re-raise so caller knows initialization failed
+            # Re-raise with enhanced context (debug info already logged above)
+            # This ensures the full exception chain is preserved
+            raise RuntimeError(
+                f"Index load failed from {storage_dir}: {error_type}: {error_message}. "
+                f"See logs for full traceback and debug info."
+            ) from load_error
         
         # Index and retriever are fully loaded and ready
         log_resource_checkpoint("orchestrator_index_ready", logger)
