@@ -157,7 +157,7 @@ def export_ticket_artifacts_from_postgres(output_path: Path) -> Dict[str, Any]:
     from sqlalchemy import create_engine, text
     from sqlalchemy.pool import NullPool
     # Import export function - use backend utils version (supports conversation_json and redaction)
-from backend.utils.ticket_cache_artifacts import build_ticket_cache_artifact
+    from backend.utils.ticket_cache_artifacts import build_ticket_cache_artifact
     
     if not settings.DATABASE_URL:
         raise RuntimeError("DATABASE_URL not configured")
