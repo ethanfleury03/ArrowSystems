@@ -16,12 +16,72 @@ import json
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ticket_store import get_ticket_store
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
+
+# Import redaction and extraction helpers
+# Try to import from backend if available, otherwise define inline
+try:
+    from backend.rag.ticket_redaction import (
+        redact_pii,
+        extract_technician_notes,
+        extract_symptoms,
+        extract_parts_used
+    )
+except ImportError:
+    # Fallback: define minimal versions if backend not available
+    def redact_pii(text: str) -> str:
+        import re
+        if not text:
+            return text
+        result = text
+        result = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]', result)
+        result = re.sub(r'\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b', '[PHONE]', result)
+        result = re.sub(r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b', '[IP_ADDRESS]', result)
+        # Serial masking (simplified)
+        def mask_serial(m):
+            serial = m.group(0)
+            alphanumeric = re.sub(r'[^a-zA-Z0-9]', '', serial)
+            last_4 = alphanumeric[-4:] if len(alphanumeric) >= 4 else alphanumeric
+            prefix = m.group(1) if m.lastindex >= 1 else "SN"
+            return f"{prefix}-[REDACTED]-{last_4}"
+        result = re.sub(r'\b(SN|S/N|Serial\s*Number|Serial)[\s:]*([A-Z0-9]{4,})', mask_serial, result, flags=re.IGNORECASE)
+        return result
+    
+    def extract_technician_notes(conversation_json: Optional[dict], max_length: int = 1500) -> Optional[str]:
+        if not conversation_json:
+            return None
+        messages = conversation_json.get("messages", [])
+        if not isinstance(messages, list):
+            return None
+        agent_messages = [msg for msg in messages if isinstance(msg, dict) and msg.get("role") in ("agent", "technician")]
+        if not agent_messages:
+            return None
+        try:
+            agent_messages.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+        except Exception:
+            pass
+        notes_parts = [msg.get("text", "").strip() for msg in agent_messages[:5] if msg.get("text", "").strip()]
+        if not notes_parts:
+            return None
+        notes = "\n".join(notes_parts)
+        return notes[:max_length] + "..." if len(notes) > max_length else notes
+    
+    def extract_symptoms(conversation_json: Optional[dict], raw_response_json: Optional[dict], max_length: int = 1000) -> Optional[str]:
+        if raw_response_json:
+            for key in ("error", "errors", "symptom", "symptoms"):
+                value = raw_response_json.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()[:max_length]
+        return None
+    
+    def extract_parts_used(conversation_json: Optional[dict], max_length: int = 500) -> Optional[str]:
+        return None  # Simplified fallback
 
 
 # Copy extraction functions from verify_raw_response_schema.py to avoid cross-repo imports
@@ -74,16 +134,18 @@ def extract_confirmation(raw: Dict[str, Any]) -> tuple[Optional[bool], Optional[
 def build_ticket_cache_artifact(
     ticket_id: str,
     raw_response_json: Dict[str, Any],
+    conversation_json: Optional[Dict[str, Any]] = None,
     extra_meta: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Build a ticket cache artifact dict (matches TicketCacheArtifact schema).
     
-    This is a standalone version that doesn't require importing from backend.
+    Enhanced version with PII redaction and optional conversation extraction.
     
     Args:
         ticket_id: Zendesk ticket ID (string)
         raw_response_json: Raw JSON from ticket_judgements.raw_response_json
+        conversation_json: Optional conversation JSON from tickets_detail.conversation_json
         extra_meta: Optional additional metadata
         
     Returns:
@@ -102,30 +164,49 @@ def build_ticket_cache_artifact(
     rationale = raw_response_json.get("rationale", "")
     blockers = raw_response_json.get("blockers", [])
     
-    # Build deterministic text template
+    # Extract root cause if available
+    root_cause = None
+    if isinstance(raw_response_json.get("root_cause"), str):
+        root_cause = raw_response_json.get("root_cause").strip()
+    elif isinstance(raw_response_json.get("root_cause"), dict):
+        root_cause = raw_response_json.get("root_cause", {}).get("text", "").strip()
+    
+    # Extract optional sections from conversation_json
+    symptoms = extract_symptoms(conversation_json, raw_response_json)
+    technician_notes = extract_technician_notes(conversation_json)
+    parts_used = extract_parts_used(conversation_json)
+    
+    # Build enhanced text template (sections only included if non-empty)
     text_parts = []
     
     if problem:
         text_parts.append(f"Problem: {problem}")
+    
+    if symptoms:
+        text_parts.append(f"\nError/Symptoms: {symptoms}")
+    
+    if root_cause:
+        text_parts.append(f"\nRoot Cause: {root_cause}")
     
     if steps:
         text_parts.append("\nResolution Steps:")
         for i, step in enumerate(steps, 1):
             text_parts.append(f"{i}. {step}")
     
+    if parts_used:
+        text_parts.append(f"\nParts Used: {parts_used}")
+    
+    if technician_notes:
+        text_parts.append(f"\nTechnician Notes: {technician_notes}")
+    
     if outcome and outcome != "unclear":
         text_parts.append(f"\nOutcome: {outcome}")
     
-    if rationale:
-        text_parts.append(f"\nRationale: {rationale}")
-    
-    if blockers:
-        blockers_str = ", ".join(str(b) for b in blockers if b)
-        if blockers_str:
-            text_parts.append(f"\nBlockers: {blockers_str}")
-    
     # Ensure we have some text
     text = "\n".join(text_parts) if text_parts else f"Ticket {ticket_id}: No problem or resolution steps available."
+    
+    # Apply PII redaction BEFORE returning
+    text = redact_pii(text)
     
     # Build metadata dict
     metadata = {
@@ -145,15 +226,24 @@ def build_ticket_cache_artifact(
         "machine_model_names": extra_meta.get("machine_model_names", []),
         "machine_models": extra_meta.get("machine_model_names", []),
         "machine_model": extra_meta.get("machine_model_names", []),
+        # New metadata fields
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "judgement_version": raw_response_json.get("prompt_version") or extra_meta.get("prompt_version") or None,
     }
+    
+    # Add optional metadata from extra_meta
+    for key in ("created_at", "updated_at", "resolution_mode", "onsite_required"):
+        if key in extra_meta:
+            metadata[key] = extra_meta[key]
     
     # Add confirmation evidence if available
     if confirmation_evidence:
         metadata["confirmation_evidence"] = confirmation_evidence
     
-    # Add any additional metadata from extra_meta
+    # Add any other additional metadata from extra_meta (excluding already handled keys)
+    excluded_keys = {"machine_model_ids", "machine_model_names", "machine_model", "machine_models", "prompt_version", "created_at", "updated_at", "resolution_mode", "onsite_required"}
     for key in extra_meta:
-        if key not in ("machine_model_ids", "machine_model_names", "machine_model", "machine_models"):
+        if key not in excluded_keys:
             metadata[key] = extra_meta[key]
     
     return {
@@ -164,6 +254,7 @@ def build_ticket_cache_artifact(
 
 
 # SQL query for effective cache-eligible tickets
+# Includes LEFT JOIN to tickets_detail for conversation_json (optional but default ON)
 EFFECTIVE_CACHE_ELIGIBLE_SQL = """
 SELECT 
     j.ticket_id,
@@ -174,9 +265,11 @@ SELECT
     j.prompt_version,
     j.judged_at,
     m.manual_status,
-    m.reviewer
+    m.reviewer,
+    d.conversation_json
 FROM ticket_judgements j
 LEFT JOIN ticket_manual_reviews m ON j.ticket_id = m.ticket_id
+LEFT JOIN tickets_detail d ON j.ticket_id = d.ticket_id
 WHERE (
     (j.review_status = 'approved' OR (j.review_status IS NULL AND j.cache_eligible = 1))
     OR (m.manual_status = 'approved')
@@ -293,11 +386,29 @@ def export_cache_artifacts(
                 elif not isinstance(raw_json, dict):
                     raise ValueError(f"raw_response_json is not a dict, got: {type(raw_json)}")
                 
-                # Build artifact
+                # Parse conversation_json (optional, may be None)
+                conversation_json = None
+                if 'conversation_json' in row and row['conversation_json']:
+                    conv_json = row['conversation_json']
+                    if isinstance(conv_json, str):
+                        try:
+                            conversation_json = json.loads(conv_json)
+                        except (json.JSONDecodeError, TypeError):
+                            conversation_json = None
+                    elif isinstance(conv_json, dict):
+                        conversation_json = conv_json
+                
+                # Build extra_meta from row data
+                extra_meta = {
+                    "prompt_version": row.get("prompt_version"),
+                }
+                
+                # Build artifact with conversation_json
                 artifact = build_ticket_cache_artifact(
                     ticket_id=ticket_id_str,
                     raw_response_json=raw_json,
-                    extra_meta={}  # No extra metadata for now
+                    conversation_json=conversation_json,
+                    extra_meta=extra_meta
                 )
                 
                 # Write JSONL line

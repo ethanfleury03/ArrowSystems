@@ -217,6 +217,17 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
                       <Cog className="h-3 w-3" />
                       <span>Machine Models</span>
                     </Link>
+                    <Link
+                      href="/admin/settings/ticket-index"
+                      className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                        pathname === "/admin/settings/ticket-index"
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                      }`}
+                    >
+                      <Ticket className="h-3 w-3" />
+                      <span>Ticket Index</span>
+                    </Link>
                   </div>
                 )}
               </div>
@@ -282,6 +293,18 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
                     >
                       <Cog className="h-3 w-3" />
                       <span>Machine Models</span>
+                    </Link>
+                    <Link
+                      href="/admin/settings/ticket-index"
+                      onClick={closeSidebar}
+                      className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                        pathname === "/admin/settings/ticket-index"
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                      }`}
+                    >
+                      <Ticket className="h-3 w-3" />
+                      <span>Ticket Index</span>
                     </Link>
                   </div>
                 )}

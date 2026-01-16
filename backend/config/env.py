@@ -441,6 +441,16 @@ class Settings:
         except (ValueError, TypeError):
             logger.warning(f"Invalid TICKET_CACHE_THRESHOLD value: {ticket_cache_threshold_str}, defaulting to 0.75")
             self.TICKET_CACHE_THRESHOLD = 0.75
+        
+        # Ticket reindex job configuration
+        self.GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "arrow-rag-support-prod")
+        self.GCP_REGION = os.getenv("GCP_REGION", "us-central1")
+        self.TICKET_REINDEX_JOB_NAME = os.getenv("TICKET_REINDEX_JOB_NAME", "ticket-cache-reindex")
+        self.RAG_BUCKET = os.getenv("RAG_BUCKET", "arrow-rag-support-prod-rag")
+        self.TICKET_PREFIX = os.getenv("TICKET_PREFIX", "ticket_cache/latest_model/")
+        self.TICKET_BACKUPS_PREFIX = os.getenv("TICKET_BACKUPS_PREFIX", "ticket_cache/backups/")
+        self.TICKET_MANIFEST_PATH = os.getenv("TICKET_MANIFEST_PATH", "ticket_cache/manifest.json")
+        self.TICKET_LOCK_PATH = os.getenv("TICKET_LOCK_PATH", "ticket_cache/locks/reindex.lock")
 
 
 # Global settings instance

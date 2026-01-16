@@ -108,6 +108,43 @@ def get_existing_node_ids(index: VectorStoreIndex) -> Set[str]:
     return existing_ids
 
 
+def delete_node_by_id(index: VectorStoreIndex, node_id: str) -> bool:
+    """
+    Delete a node from the index by ID (for overwrite semantics).
+    
+    Args:
+        index: VectorStoreIndex to modify
+        node_id: Node ID to delete
+        
+    Returns:
+        True if node was deleted, False otherwise
+    """
+    try:
+        docstore = index.storage_context.docstore
+        
+        # Try to delete from docstore
+        if hasattr(docstore, 'delete_document'):
+            docstore.delete_document(node_id)
+            return True
+        elif hasattr(docstore, 'docs') and node_id in docstore.docs:
+            # Direct deletion from docs dict
+            del docstore.docs[node_id]
+            return True
+        
+        # Also try to delete from vector store if possible
+        vector_store = index.storage_context.vector_store
+        if hasattr(vector_store, 'delete'):
+            try:
+                vector_store.delete([node_id])
+            except Exception:
+                pass  # Vector store deletion may not be supported
+        
+        return True
+    except Exception as e:
+        logger.warning(f"Could not delete node {node_id}: {e}")
+        return False
+
+
 def artifact_to_text_node(artifact: TicketCacheArtifact) -> TextNode:
     """
     Convert TicketCacheArtifact to LlamaIndex TextNode.
@@ -190,6 +227,7 @@ def ingest_artifacts(
     nodes_to_insert = []
     skipped = 0
     failed = 0
+    overwritten = 0
     errors = []
     
     for artifact in artifacts:
@@ -199,6 +237,17 @@ def ingest_artifacts(
                 skipped += 1
                 logger.debug(f"Skipping existing artifact: {artifact.id}")
                 continue
+            
+            # For deterministic overwrite: delete existing node if present
+            if artifact.id in existing_ids:
+                logger.info(f"[TICKET_INGEST] Overwriting existing node id={artifact.id}")
+                deleted = delete_node_by_id(index, artifact.id)
+                if deleted:
+                    overwritten += 1
+                    # Remove from existing_ids set to avoid double-counting
+                    existing_ids.discard(artifact.id)
+                else:
+                    logger.warning(f"[TICKET_INGEST] Could not delete existing node {artifact.id}, will attempt insert anyway")
             
             # Convert to TextNode
             node = artifact_to_text_node(artifact)
@@ -210,7 +259,7 @@ def ingest_artifacts(
             errors.append(error_msg)
             logger.error(error_msg)
     
-    logger.info(f"Prepared {len(nodes_to_insert)} nodes for insertion (skipped: {skipped}, failed: {failed})")
+    logger.info(f"Prepared {len(nodes_to_insert)} nodes for insertion (skipped: {skipped}, overwritten: {overwritten}, failed: {failed})")
     
     if dry_run:
         logger.info("DRY RUN: Would insert nodes but skipping actual insertion")
@@ -218,6 +267,7 @@ def ingest_artifacts(
             "total": len(artifacts),
             "inserted": 0,
             "skipped": skipped,
+            "overwritten": overwritten,
             "failed": failed,
             "errors": errors,
             "dry_run": True
@@ -239,6 +289,21 @@ def ingest_artifacts(
                 failed += len(batch)
                 errors.append(f"Batch {i // batch_size + 1} insertion failed: {e}")
         
+        # Verify overwrites: check that nodes were actually inserted/updated
+        # This is a post-insert verification step for deterministic behavior
+        try:
+            final_existing_ids = get_existing_node_ids(index)
+            verified_overwritten = 0
+            for artifact in artifacts:
+                if artifact.id in final_existing_ids:
+                    # Node exists in final index (either newly inserted or overwritten)
+                    if artifact.id in existing_ids:
+                        verified_overwritten += 1
+            if verified_overwritten > 0:
+                logger.info(f"[TICKET_INGEST] Verified {verified_overwritten} nodes exist in final index")
+        except Exception as e:
+            logger.debug(f"Could not verify final node state: {e}")
+        
         # Persist index
         try:
             index.storage_context.persist(persist_dir=str(index_dir))
@@ -249,10 +314,13 @@ def ingest_artifacts(
     else:
         inserted = 0
     
+    logger.info(f"[TICKET_INGEST] Ingestion complete: total={len(artifacts)}, inserted={inserted}, overwritten={overwritten}, skipped={skipped}, failed={failed}")
+    
     return {
         "total": len(artifacts),
         "inserted": inserted,
         "skipped": skipped,
+        "overwritten": overwritten,
         "failed": failed,
         "errors": errors
     }
@@ -325,6 +393,7 @@ Examples:
         print("=" * 70)
         print(f"Total artifacts: {result['total']}")
         print(f"Inserted: {result['inserted']}")
+        print(f"Overwritten: {result.get('overwritten', 0)}")
         print(f"Skipped: {result['skipped']}")
         print(f"Failed: {result['failed']}")
         
