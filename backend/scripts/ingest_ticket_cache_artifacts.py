@@ -23,7 +23,7 @@ _repo_root = Path(__file__).resolve().parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage
+from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage, Settings
 from llama_index.core.schema import TextNode
 from backend.utils.ticket_cache_artifacts import TicketCacheArtifact, validate_ticket_cache_artifact
 from backend.utils.test_mode import get_index_dir
@@ -182,6 +182,52 @@ def ingest_artifacts(
     Returns:
         Dict with counts and status
     """
+    # CRITICAL: Set embed model BEFORE any VectorStoreIndex operations
+    # This prevents LlamaIndex from trying to use OpenAI embeddings (which aren't available)
+    if not Settings.embed_model:
+        try:
+            from backend.utils.embedding_utils import build_offline_embedding
+            
+            # Use same model as production: BAAI/bge-large-en-v1.5 (1024 dim)
+            model_name = os.getenv("TICKET_EMBED_MODEL_NAME", "BAAI/bge-large-en-v1.5")
+            
+            # Determine cache directory (same logic as production)
+            cache_dir = (
+                os.getenv("HF_HOME") or
+                os.getenv("SENTENCE_TRANSFORMERS_HOME") or
+                "/app/.cache/huggingface"
+            )
+            
+            # Build offline embedding model (no OpenAI required)
+            Settings.embed_model = build_offline_embedding(
+                model_name=model_name,
+                cache_dir=cache_dir,
+                device="cpu"  # Cloud Run Jobs run on CPU
+            )
+            
+            logger.info(
+                "[TICKET_REINDEX] Using embed model",
+                embed_model=type(Settings.embed_model).__name__,
+                model_name=model_name,
+                cache_dir=cache_dir
+            )
+        except Exception as e:
+            error_msg = (
+                f"Failed to initialize embedding model. "
+                f"Required env vars: HF_HOME or SENTENCE_TRANSFORMERS_HOME (defaults to /app/.cache/huggingface). "
+                f"Error: {type(e).__name__}: {str(e)}"
+            )
+            logger.error("[TICKET_REINDEX] " + error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
+    else:
+        logger.info(
+            "[TICKET_REINDEX] Using existing embed model",
+            embed_model=type(Settings.embed_model).__name__
+        )
+    
+    # Set LLM to None to avoid OpenAI initialization
+    Settings.llm = None
+    
     if index_dir is None:
         index_dir = get_index_dir()
     
