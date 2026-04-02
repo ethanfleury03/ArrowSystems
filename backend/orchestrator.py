@@ -1928,7 +1928,7 @@ class HybridRetriever:
             return hybrid_results[:top_k]
         
         # PERFORMANCE: Skip LLM evaluation on CPU or for simple queries (saves 30-60s)
-        doc_evaluator = self._ensure_document_evaluator()
+        doc_evaluator = self.document_evaluator
         if (enable_llm_evaluation and 
             doc_evaluator and 
             doc_evaluator.claude_client):
