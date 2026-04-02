@@ -511,18 +511,20 @@ def delete_document_metadata(filename: str, session: Optional[Session] = None):
 
 
 def is_document_active(filename: str, session: Optional[Session] = None) -> bool:
-    """Check if document is active."""
-    close_session = False
-    if session is None:
-        session = SessionLocal()
-        close_session = True
-    
+    """Check if document is active. Returns True if DB is unavailable."""
     try:
-        doc = get_document_by_filename(session, filename)
-        return doc.is_active if doc else True  # Default to active if not found
-    finally:
-        if close_session:
-            session.close()
+        close_session = False
+        if session is None:
+            session = SessionLocal()
+            close_session = True
+        try:
+            doc = get_document_by_filename(session, filename)
+            return doc.is_active if doc else True
+        finally:
+            if close_session:
+                session.close()
+    except Exception:
+        return True
 
 
 def infer_machine_model_from_filename(filename: str) -> Optional[list[str]]:
@@ -602,45 +604,46 @@ def load_metadata(session: Optional[Session] = None) -> Dict[str, Dict[str, Any]
         - last_ingestion_date: str | None (ISO format)
         - requires_admin_review: bool
     """
-    close_session = False
-    if session is None:
-        session = SessionLocal()
-        close_session = True
-    
     try:
-        documents = get_all_documents(session=session, active_only=False)
-        metadata_dict = {}
-        
-        for doc in documents:
-            # Prefer many-to-many mapping; fallback to legacy string field
-            machine_model = None
-            try:
-                if hasattr(doc, "machine_models") and doc.machine_models:
-                    machine_model = [m.name for m in doc.machine_models if getattr(m, "name", None)]
-            except Exception:
-                machine_model = None
-
-            if not machine_model:
-                machine_model = doc.machine_model
-                if machine_model and isinstance(machine_model, str):
-                    try:
-                        machine_model = json.loads(machine_model)
-                    except (json.JSONDecodeError, TypeError):
-                        machine_model = machine_model if machine_model else None
+        close_session = False
+        if session is None:
+            session = SessionLocal()
+            close_session = True
+        try:
+            documents = get_all_documents(session=session, active_only=False)
+            metadata_dict = {}
             
-            metadata_dict[doc.file_name] = {
-                "is_active": doc.is_active,
-                "machine_model": machine_model,
-                "category": doc.category,
-                "product_family": doc.product_family,
-                "last_ingestion_date": doc.last_ingestion_date.isoformat() if doc.last_ingestion_date else None,
-                "requires_admin_review": doc.requires_admin_review
-            }
-        
-        return metadata_dict
-    finally:
-        if close_session:
-            session.close()
+            for doc in documents:
+                machine_model = None
+                try:
+                    if hasattr(doc, "machine_models") and doc.machine_models:
+                        machine_model = [m.name for m in doc.machine_models if getattr(m, "name", None)]
+                except Exception:
+                    machine_model = None
+
+                if not machine_model:
+                    machine_model = doc.machine_model
+                    if machine_model and isinstance(machine_model, str):
+                        try:
+                            machine_model = json.loads(machine_model)
+                        except (json.JSONDecodeError, TypeError):
+                            machine_model = machine_model if machine_model else None
+                
+                metadata_dict[doc.file_name] = {
+                    "is_active": doc.is_active,
+                    "machine_model": machine_model,
+                    "category": doc.category,
+                    "product_family": doc.product_family,
+                    "last_ingestion_date": doc.last_ingestion_date.isoformat() if doc.last_ingestion_date else None,
+                    "requires_admin_review": doc.requires_admin_review
+                }
+            
+            return metadata_dict
+        finally:
+            if close_session:
+                session.close()
+    except Exception:
+        return {}
 
 
 def ensure_metadata_entry(
