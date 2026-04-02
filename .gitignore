@@ -128,3 +128,4 @@ Scraper/audit_results_*.jsonl
 .next/
 out/
 .turbo/
+latest_model/
