@@ -1,2 +1,0 @@
-"""Migration version scripts."""
-
