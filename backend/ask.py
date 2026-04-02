@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""One-shot CLI query runner for ArrowSystems RAG."""
+"""One-shot CLI query runner for ArrowSystems RAG.
+
+Loads a local LlamaIndex vector store from disk and answers a single query.
+No database, no GCS, no web server — strictly local index only.
+"""
 
 import os
 import sys
@@ -8,18 +12,32 @@ import time
 import argparse
 from pathlib import Path
 
-# ---- env bootstrap BEFORE backend imports ----
-os.environ.setdefault("ENV", "dev")
-os.environ.setdefault("DEV_SKIP_DB", "true")
-os.environ.setdefault("DEV_SKIP_GCS", "true")
-os.environ.setdefault("DATABASE_URL", "postgresql://user:pass@127.0.0.1:5432/db")
-os.environ.setdefault("TICKET_CACHE_ENABLED", "false")
+# ---- env: force local-only mode BEFORE any backend imports ----
+os.environ["ENV"] = "dev"
+os.environ["DEV_SKIP_DB"] = "true"
+os.environ["DEV_SKIP_GCS"] = "true"
+os.environ["TICKET_CACHE_ENABLED"] = "false"
 
 project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from backend.rag_pipeline import RAGPipeline  # noqa: E402
+_REQUIRED_INDEX_FILES = ("docstore.json", "index_store.json", "default__vector_store.json")
+
+
+def _preflight(storage_dir: str) -> None:
+    """Verify required index files exist before heavy imports."""
+    storage_path = Path(storage_dir)
+    if not storage_path.is_absolute():
+        storage_path = storage_path.resolve()
+    missing = [f for f in _REQUIRED_INDEX_FILES if not (storage_path / f).exists()]
+    if missing:
+        print(
+            f"ERROR: Required index files missing from {storage_path}:\n"
+            + "\n".join(f"  - {f}" for f in missing),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def main():
@@ -31,6 +49,10 @@ def main():
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.add_argument("--cache-dir", default=os.getenv("HF_HOME", "/tmp/hf_cache"))
     args = parser.parse_args()
+
+    _preflight(args.storage_dir)
+
+    from backend.rag_pipeline import RAGPipeline  # noqa: E402
 
     pipeline = RAGPipeline(cache_dir=args.cache_dir, db_manager=None)
     ok = pipeline.initialize(storage_dir=args.storage_dir)

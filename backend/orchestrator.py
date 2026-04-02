@@ -947,13 +947,8 @@ class HybridRetriever:
         if not self.bm25 or not self.corpus_nodes:
             return []
         
-        # Import document metadata checker
-        try:
-            from .utils.document_metadata import is_document_active
-        except ImportError:
-            # Fallback if metadata module not available
-            def is_document_active(filename: str) -> bool:
-                return True
+        def is_document_active(filename: str) -> bool:
+            return True
         
         # Tokenize query
         tokenized_query = query.lower().split()
@@ -1056,13 +1051,8 @@ class HybridRetriever:
     def dense_search(self, query: str, top_k: int = 20) -> List["NodeWithScore"]:
         """Perform dense embedding search. Filters out inactive documents."""
         try:
-            # Import document metadata checker
-            try:
-                from .utils.document_metadata import is_document_active
-            except ImportError:
-                # Fallback if metadata module not available
-                def is_document_active(filename: str) -> bool:
-                    return True
+            def is_document_active(filename: str) -> bool:
+                return True
             
             # CRITICAL: Ensure embedding model is set before creating retriever
             # This must match the model used when building the index
@@ -1173,12 +1163,8 @@ class HybridRetriever:
                     logger.debug(f"Broad query '{broad_query}' failed: {e}")
                     continue
             
-            # Import document metadata checker
-            try:
-                from .utils.document_metadata import is_document_active
-            except ImportError:
-                def is_document_active(filename: str) -> bool:
-                    return True
+            def is_document_active(filename: str) -> bool:
+                return True
             
             # Group nodes by filename first
             nodes_by_filename = {}
@@ -1235,6 +1221,9 @@ class HybridRetriever:
         Returns:
             Set of allowed filenames, or None if no filtering should be applied (full access)
         """
+        if os.environ.get("DEV_SKIP_DB", "").lower() in ("true", "1"):
+            return None
+
         try:
             from .utils.document_metadata import load_metadata
             from .config.machine_models import get_effective_machines_for_user, GENERAL_MACHINE, ANY_MACHINE
@@ -4252,10 +4241,14 @@ class RAGOrchestrator:
             storage_dir: Directory containing the index files. Should be an absolute path in production.
                         Default "latest_model" is for dev/local use only.
         """
-        from backend.utils.test_mode import is_test_mode
-        from backend.utils.cloud_run import should_skip_ingestion
         from backend.config.env import settings
         from pathlib import Path
+
+        def should_skip_ingestion() -> bool:
+            return bool(os.getenv("K_SERVICE")) or os.getenv("ENABLE_INGESTION_ON_STARTUP", "false").lower() != "true"
+
+        def is_test_mode() -> bool:
+            return os.getenv("TEST_MODE", "").lower() in ("1", "true", "yes")
         
         # Ensure storage_dir is an absolute path (resolve relative paths)
         storage_path = Path(storage_dir)

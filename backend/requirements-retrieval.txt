@@ -28,10 +28,6 @@ llama-index-embeddings-huggingface==0.6.1
 # ---- LLM ----
 anthropic==0.71.0
 
-# ---- Database (still imported lazily; remove after full db.py decoupling) ----
-sqlalchemy==2.0.25
-psycopg2-binary==2.9.9
-
 # ---- Utilities ----
 rank-bm25==0.2.2
 pyyaml==6.0.3
