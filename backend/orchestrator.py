@@ -3800,72 +3800,9 @@ class RAGOrchestrator:
         return processed.strip()
 
     def _load_ticket_index(self):
-        """
-        Load optional ticket cache index if it exists.
-        
-        This is non-blocking - if the index doesn't exist or fails to load,
-        the system continues normally without ticket cache retrieval.
-        """
-        try:
-            from backend.rag.ticket_index_downloader import get_ticket_index_local_dir
-            from llama_index.core import StorageContext, load_index_from_storage
-            
-            ticket_dir = get_ticket_index_local_dir()
-            if not ticket_dir:
-                logger.debug("[TICKET] Ticket index not found locally - skipping ticket cache retrieval")
-                self.ticket_index = None
-                self.ticket_retriever = None
-                return
-            
-            logger.info("[TICKET] Loading ticket cache index", local_dir=str(ticket_dir))
-            
-            # Ensure embedding model is set (reuse main index embedding model)
-            # Import Settings lazily to avoid circular imports
-            try:
-                from llama_index.core import Settings
-                if self.embed_model:
-                    Settings.embed_model = self.embed_model
-                else:
-                    logger.warning("[TICKET] Embedding model not initialized - ticket index may not load correctly")
-                
-                # Set LLM to None to avoid accidental LLM init during load
-                Settings.llm = None
-            except ImportError:
-                logger.debug("[TICKET] Could not import Settings - continuing without explicit config")
-            
-            # Load ticket index
-            storage_context = StorageContext.from_defaults(persist_dir=str(ticket_dir))
-            self.ticket_index = load_index_from_storage(storage_context)
-            
-            # Create retriever for ticket index
-            if self.ticket_index:
-                self.ticket_retriever = self.ticket_index.as_retriever(similarity_top_k=3)
-                
-                # Count ticket nodes
-                try:
-                    docstore = self.ticket_index.storage_context.docstore
-                    ticket_node_count = len(docstore.docs.keys()) if docstore else 0
-                    logger.info(
-                        "[TICKET] Ticket index loaded successfully",
-                        local_dir=str(ticket_dir),
-                        node_count=ticket_node_count
-                    )
-                except Exception as e:
-                    logger.debug(f"[TICKET] Could not count ticket nodes: {e}")
-                    logger.info("[TICKET] Ticket index loaded successfully", local_dir=str(ticket_dir))
-            else:
-                logger.warning("[TICKET] Ticket index load returned None")
-                self.ticket_index = None
-                self.ticket_retriever = None
-                
-        except Exception as e:
-            logger.warning(
-                "[TICKET] Failed to load ticket index - continuing without it",
-                error=str(e),
-                error_type=type(e).__name__
-            )
-            self.ticket_index = None
-            self.ticket_retriever = None
+        """Ticket index loading removed — downloader was pruned."""
+        self.ticket_index = None
+        self.ticket_retriever = None
     
     def _load_glossary_index(self):
         """
@@ -4337,33 +4274,6 @@ class RAGOrchestrator:
         docstore_exists = os.path.exists(docstore_path)
         index_exists = dir_exists and docstore_exists
         
-        # In production mode, download index from GCS if files don't exist
-        # (Startup download should have already run, but this is a safety check)
-        if settings.is_prod and not index_exists:
-            logger.info("[RAG] Production mode — index files not found, attempting download from GCS")
-            try:
-                from backend.rag.startup_downloader import download_index_from_gcs
-                ok = download_index_from_gcs()
-                if not ok:
-                    logger.error("[RAG] Index download failed — RAG will NOT be initialized")
-                    self.index = None
-                    self.retriever = None
-                    self.last_error = "Failed to download RAG index from GCS"
-                    return
-                # Re-check if files exist after download
-                docstore_exists = os.path.exists(docstore_path)
-                index_exists = dir_exists and docstore_exists
-            except Exception as e:
-                logger.error(
-                    "[RAG] Exception during index download — RAG will NOT be initialized",
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    exc_info=True
-                )
-                self.index = None
-                self.retriever = None
-                self.last_error = f"Exception during index download: {type(e).__name__}: {str(e)}"
-                return
         
         logger.info("orchestrator_index_check", 
                    storage_dir=storage_dir,
