@@ -1,0 +1,39 @@
+# =============================================================================
+# Minimal CLI Retrieval Requirements  (backend/ask.py)
+# =============================================================================
+# Only what's needed for:  python backend/ask.py --query "..."
+# Removed: FastAPI, Uvicorn, Gunicorn, auth, migrations, ingestion, GCS, Qdrant
+# =============================================================================
+
+# ---- PyTorch (CPU-only) ----
+# Linux: uncomment the next line for the smaller CPU wheel
+# --extra-index-url https://download.pytorch.org/whl/cpu
+# torch==2.2.0+cpu
+# macOS / generic:
+torch==2.2.0
+
+# ---- Core ML ----
+numpy==1.26.4
+transformers==4.40.0
+sentence-transformers==2.6.1
+huggingface-hub==0.22.2
+safetensors==0.6.2
+accelerate==0.30.1
+scikit-learn==1.7.2
+
+# ---- LlamaIndex (only the packages we use) ----
+llama-index-core==0.14.5
+llama-index-embeddings-huggingface==0.6.1
+
+# ---- LLM ----
+anthropic==0.71.0
+
+# ---- Database (still imported lazily; remove after full db.py decoupling) ----
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+
+# ---- Utilities ----
+rank-bm25==0.2.2
+pyyaml==6.0.3
+structlog==24.1.0
+python-dotenv==1.1.1
